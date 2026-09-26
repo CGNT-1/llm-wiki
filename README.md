@@ -100,7 +100,8 @@ uv run python scripts/doctor.py
 uv run python scripts/search_memory.py "auth"
 ```
 
-`doctor` is read-only and says what is healthy, degraded or broken, and what to run.
+`doctor` changes nothing (its locking probe creates and removes one temporary file) and says
+what is healthy, degraded or broken, and what to run.
 
 ### Dependency profiles
 

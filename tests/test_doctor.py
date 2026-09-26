@@ -476,7 +476,28 @@ def test_read_only_runtime_probe_leaves_no_files_or_directories(tmp_path):
     assert not list(state_root.rglob("*.doctor-probe*"))
 
 
-def test_read_only_run_never_attempts_a_write(tmp_path, monkeypatch):
+def _whole_tree(path: Path) -> dict[str, bytes | None]:
+    """Every entry under `path`, hidden ones and directories included."""
+    return {
+        item.relative_to(path).as_posix(): item.read_bytes() if item.is_file() else None
+        for item in path.rglob("*")
+    }
+
+
+def test_a_read_only_run_leaves_every_entry_as_it_was(tmp_path):
+    """The locking probe is the one file doctor touches, and it is gone again (audit 2026-09-27 C-1)."""
+    from doctor import run_doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    before = _whole_tree(tmp_path)
+
+    run_doctor(root=root, state_root=state_root, home=home)
+
+    assert _whole_tree(tmp_path) == before
+
+
+def test_read_only_run_writes_through_no_python_file_api(tmp_path, monkeypatch):
+    """Python-level writes are refused; the SQLite locking probe writes below this layer by design."""
     import doctor
 
     root, state_root, home = _build_root(tmp_path)

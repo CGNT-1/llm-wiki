@@ -8551,7 +8551,14 @@ def run_doctor(
     time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
     deadline: float | None = None,
 ) -> dict:
-    """Return a JSON-safe local health report; mutate only with ``repair=True``."""
+    """Return a JSON-safe local health report; mutate only with ``repair=True``.
+
+    Without ``repair`` the one file doctor touches is the locking probe: it creates
+    one temporary SQLite file in the state root and removes it, because whether two
+    connections really exclude each other can only be learned by trying (audit
+    2026-09-27 C-1, docs/research/2026-09-27-a-read-only-doctor-says-what-it-touches.md).
+    Every other file, and the state it describes, is left as it was.
+    """
     root_path, state_path, home_path = _resolved_doctor_paths(root, state_root, home)
     generated_at = _as_utc(now)
     context = _RepairContext(

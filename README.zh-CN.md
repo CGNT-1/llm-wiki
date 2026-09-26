@@ -95,7 +95,7 @@ uv run python scripts/doctor.py
 uv run python scripts/search_memory.py "auth"
 ```
 
-`doctor` 只读，报告哪些正常、哪些处于 degraded 状态、哪些损坏，以及该运行什么。
+`doctor` 不做任何改动（锁检测会创建并删除一个临时文件），报告哪些正常、哪些处于 degraded 状态、哪些损坏，以及该运行什么。
 
 ### 依赖配置
 
