@@ -2640,6 +2640,92 @@ def _require_indexed_capture_decision(
         raise QueueOperationError("semantic_decision_conflict")
 
 
+def _decision_sealer(
+    database: sqlite3.Connection, row: sqlite3.Row, intent_id: str, stage: str
+) -> sqlite3.Row:
+    """The seal of the task that published this decision, proven by its own digest."""
+    seal = database.execute(
+        """SELECT * FROM capture_task_link_seals
+           WHERE consumer_kind='semantic-decision' AND consumer_id=? AND active_digest=?""",
+        (f"{intent_id}:{stage}", row["active_link_digest"]),
+    ).fetchone()
+    if seal is None:
+        raise QueueOperationError("semantic_decision_conflict")
+    expected = _capture_semantic_seal_digest(
+        str(seal["task_id"]), intent_id, stage, str(row["active_link_digest"])
+    )
+    if seal["seal_digest"] != expected:
+        raise QueueOperationError("semantic_decision_conflict")
+    return seal
+
+
+def _redrive_ancestors(database: sqlite3.Connection, task_id: str) -> set[str]:
+    """Every task this one was redriven from, however deep the chain."""
+    ancestors: set[str] = set()
+    parent = _redrive_parent(database, task_id)
+    while parent is not None and parent not in ancestors:
+        ancestors.add(parent)
+        parent = _redrive_parent(database, parent)
+    return ancestors
+
+
+def _redrive_parent(database: sqlite3.Connection, task_id: str) -> str | None:
+    row = database.execute("SELECT redrive_of FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None or row["redrive_of"] is None:
+        return None
+    return str(row["redrive_of"])
+
+
+def _decision_seal_of(
+    database: sqlite3.Connection, task_id: str, intent_id: str, stage: str
+) -> sqlite3.Row | None:
+    """This task's seal to the decision, when its digest proves it."""
+    seal = database.execute(
+        """SELECT * FROM capture_task_link_seals WHERE task_id=?
+           AND consumer_kind='semantic-decision' AND consumer_id=?""",
+        (task_id, f"{intent_id}:{stage}"),
+    ).fetchone()
+    if seal is None:
+        return None
+    expected = _capture_semantic_seal_digest(task_id, intent_id, stage, str(seal["active_digest"]))
+    return seal if seal["seal_digest"] == expected else None
+
+
+def _sealed_binding(seal: sqlite3.Row, intent_id: str) -> dict[str, str]:
+    """The capture binding a Markdown transaction records for this seal."""
+    return {
+        "intent_id": intent_id,
+        "task_id": str(seal["task_id"]),
+        "active_link_digest": str(seal["active_digest"]),
+        "seal_digest": str(seal["seal_digest"]),
+    }
+
+
+def _require_inherited_capture_decision(
+    database: sqlite3.Connection,
+    sealer: sqlite3.Row,
+    active: CaptureTaskBinding,
+    *,
+    intent_id: str,
+    stage: str,
+    active_link_digest: str,
+) -> None:
+    """A decision an ancestor of this redrive sealed for the same intent.
+
+    The decision is one per intent and stage, but its seal and link belong to the
+    task that made it; a redrive re-signs the link for the child, so the child
+    could never match its parent's seal (audit 2026-09-27 B-14). A redrive keeps
+    what its ancestor already decided, as a workflow redrive keeps completed steps
+    (docs/research/2026-09-27-a-redrive-keeps-the-decision-its-parent-sealed.md).
+    """
+    own_seal = _capture_semantic_seal_digest(active.task_id, intent_id, stage, active_link_digest)
+    actual = (active.intent_id, active.active_digest, active.seal_digest in (None, own_seal))
+    if actual != (intent_id, active_link_digest, True):
+        raise QueueOperationError("semantic_decision_conflict")
+    if str(sealer["task_id"]) not in _redrive_ancestors(database, active.task_id):
+        raise QueueOperationError("semantic_decision_conflict")
+
+
 def _indexed_capture_decision_published_at(row: sqlite3.Row) -> datetime:
     published_at = _parse_timestamp(str(row["published_at"]))
     if published_at is None:
@@ -3164,21 +3250,6 @@ def _require_matching_decision_owner(
         raise ValueError("semantic decision owner does not match fences")
     if task_fence.owner != owner or intent_fence.owner != owner:
         raise ValueError("semantic decision owner does not match fences")
-
-
-def _semantic_seal_digest(
-    task_id: str, intent_id: str, stage: str, active_link_digest: str
-) -> str:
-    return sha256_bytes(
-        canonical_json_bytes(
-            {
-                "active_digest": active_link_digest,
-                "consumer_id": f"{intent_id}:{stage}",
-                "consumer_kind": "semantic-decision",
-                "task_id": task_id,
-            }
-        )
-    )
 
 
 # The stored columns a semantic decision has to agree with, in argument order.
@@ -8416,12 +8487,8 @@ class _QueueV3CandidateReader:
             ).fetchone()
             if row is None:
                 return None
-            active = self.active_capture_binding(database, task_id)
-            _require_indexed_capture_decision(
-                row,
-                active,
-                intent_id=intent_id,
-                stage=stage,
+            sealer = self._require_decision_for_task(
+                database, row, task_id, intent_id=intent_id, stage=stage,
                 active_link_digest=active_link_digest,
             )
             published_at = _indexed_capture_decision_published_at(row)
@@ -8429,15 +8496,39 @@ class _QueueV3CandidateReader:
             self.state_root, row
         )
         return SemanticDecision(
-            task_id=task_id,
+            task_id=str(sealer["task_id"]),
             intent_id=intent_id,
             stage=stage,
             decision_path=decision_path,
             decision_sha256=decision_sha256,
-            active_link_digest=active_link_digest,
-            seal_digest=active.seal_digest or "",
+            active_link_digest=str(row["active_link_digest"]),
+            seal_digest=str(sealer["seal_digest"]),
             published_at=published_at,
         )
+
+    def _require_decision_for_task(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        task_id: str,
+        *,
+        intent_id: str,
+        stage: str,
+        active_link_digest: str,
+    ) -> sqlite3.Row:
+        """The seal behind this decision, which this task made or inherited by redrive."""
+        active = self.active_capture_binding(database, task_id)
+        sealer = _decision_sealer(database, row, intent_id, stage)
+        if sealer["task_id"] == task_id:
+            _require_indexed_capture_decision(
+                row, active, intent_id=intent_id, stage=stage, active_link_digest=active_link_digest
+            )
+            return sealer
+        _require_inherited_capture_decision(
+            database, sealer, active, intent_id=intent_id, stage=stage,
+            active_link_digest=active_link_digest,
+        )
+        return sealer
 
     def _read_semantic_decision_bytes(
         self, decision_path: str, decision_sha256: str, intent_id: str, stage: str
@@ -8645,7 +8736,7 @@ class _QueueV3CandidateReader:
         )
         now = _utc_now()
         self._require_live_worker_intent(intent_id, intent_fence, owner, now)
-        seal_digest = _semantic_seal_digest(
+        seal_digest = _capture_semantic_seal_digest(
             task_id, intent_id, stage, active_link_digest
         )
         with closing(self._connect()) as database, begin_immediate(database):
@@ -8674,6 +8765,95 @@ class _QueueV3CandidateReader:
             active_link_digest=active_link_digest,
             seal_digest=seal_digest,
             published_at=published_at,
+        )
+
+    def adopt_semantic_decision(
+        self,
+        decision: SemanticDecision,
+        *,
+        task_id: str,
+        active_link_digest: str,
+        task_fence: TaskFence,
+        intent_fence: object,
+        owner: OwnerLease,
+    ) -> None:
+        """Seal this redrive's link to the decision an ancestor already published.
+
+        Writing Markdown needs the working task's own sealed link, and a redrive has
+        none: its link was re-signed for it. The seal names the same decision and
+        adds no second one (audit 2026-09-27 B-14).
+        """
+        from markdown_transaction import IntentFence
+        from operational_ownership import OwnerLease
+
+        _require_semantic_decision_fences(
+            task_id, decision.intent_id, decision.stage, decision.decision_sha256,
+            task_fence, intent_fence, owner, IntentFence, OwnerLease,
+        )
+        now = _utc_now()
+        self._require_live_worker_intent(decision.intent_id, intent_fence, owner, now)
+        with closing(self._connect()) as database, begin_immediate(database):
+            self._require_live_task_fence(database, task_id, task_fence, owner, now)
+            self._require_inherited_decision_row(database, decision, task_id, active_link_digest)
+            self._insert_inherited_seal(database, decision, task_id, active_link_digest, now)
+
+    def sealed_ancestor_bindings(
+        self, task_id: str, intent_id: str, stage: str
+    ) -> tuple[dict[str, str], ...]:
+        """The capture bindings this task's redrive ancestors sealed to the same decision.
+
+        A block an ancestor committed before it died carries that ancestor's binding;
+        its redrive replays the same operation and must recognise the block as its
+        own family's, not as a conflict (audit 2026-09-27 B-14).
+        """
+        with closing(self._connect()) as database:
+            seals = [
+                _decision_seal_of(database, ancestor, intent_id, stage)
+                for ancestor in sorted(_redrive_ancestors(database, task_id))
+            ]
+        return tuple(_sealed_binding(seal, intent_id) for seal in seals if seal is not None)
+
+    def _require_inherited_decision_row(
+        self,
+        database: sqlite3.Connection,
+        decision: SemanticDecision,
+        task_id: str,
+        active_link_digest: str,
+    ) -> None:
+        row = database.execute(
+            "SELECT * FROM semantic_decisions WHERE intent_id=? AND stage=?",
+            (decision.intent_id, decision.stage),
+        ).fetchone()
+        if row is None or row["decision_sha256"] != decision.decision_sha256:
+            raise QueueOperationError("semantic_decision_conflict")
+        self._require_decision_for_task(
+            database, row, task_id, intent_id=decision.intent_id, stage=decision.stage,
+            active_link_digest=active_link_digest,
+        )
+
+    @staticmethod
+    def _insert_inherited_seal(
+        database: sqlite3.Connection,
+        decision: SemanticDecision,
+        task_id: str,
+        active_link_digest: str,
+        now: datetime,
+    ) -> None:
+        """Insert this task's seal once; a retry of the same task finds it already there."""
+        seal_digest = _capture_semantic_seal_digest(
+            task_id, decision.intent_id, decision.stage, active_link_digest
+        )
+        database.execute(
+            """INSERT OR IGNORE INTO capture_task_link_seals(
+                   task_id,active_digest,consumer_kind,consumer_id,seal_digest,sealed_at
+               ) VALUES (?,?,'semantic-decision',?,?,?)""",
+            (
+                task_id,
+                active_link_digest,
+                f"{decision.intent_id}:{decision.stage}",
+                seal_digest,
+                _timestamp(now),
+            ),
         )
 
     def _read_capture_terminal(

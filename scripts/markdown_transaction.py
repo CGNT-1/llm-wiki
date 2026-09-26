@@ -4546,13 +4546,17 @@ def append_knowledge(
 
 
 def _capture_append_context_matches(
-    stored: Mapping[str, object], current: Mapping[str, object]
+    stored: Mapping[str, object],
+    current: Mapping[str, object],
+    inherited: Sequence[Mapping[str, object]] = (),
 ) -> bool:
+    """The committed append was made under this binding, or one a redrive inherited."""
     stored_fence = stored.get("intent_fence")
     current_fence = current.get("intent_fence")
     if not isinstance(stored_fence, Mapping) or not isinstance(current_fence, Mapping):
         return False
-    return stored.get("capture_binding") == current.get("capture_binding") and (
+    bindings = [current.get("capture_binding"), *inherited]
+    return stored.get("capture_binding") in bindings and (
         stored_fence.get("intent_id"),
         stored_fence.get("mode"),
     ) == (
@@ -4569,10 +4573,16 @@ def append_captured_knowledge(
     block: bytes,
     *,
     preconditions: Mapping[str, object],
+    inherited_bindings: Sequence[Mapping[str, object]] = (),
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
 ) -> TransactionRecord:
-    """CAS-append one provider decision under live capture preconditions."""
+    """CAS-append one provider decision under live capture preconditions.
+
+    `inherited_bindings` are the sealed bindings of the task's redrive ancestors for
+    the same decision: a block one of them committed before it died is this
+    redrive's own, not a conflict (audit 2026-09-27 B-14).
+    """
     operation_id, append_path, content = _normalize_append_request(
         operation_id, path, block
     )
@@ -4594,7 +4604,7 @@ def append_captured_knowledge(
             deadline=deadline,
             cancelled=cancelled,
         )
-    if not _capture_append_context_matches(record.preconditions, expected):
+    if not _capture_append_context_matches(record.preconditions, expected, inherited_bindings):
         raise ValueError("capture append transaction preconditions conflict")
     return record
 
