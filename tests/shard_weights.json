@@ -681,6 +681,7 @@
   "test_the_queue_is_adopted_before_anything_writes_to_it.py": 8.07,
   "test_the_reader_window_is_twelve_and_its_constants_are_pinned.py": 0.0,
   "test_the_receipt_names_the_code_that_runs.py": 4.76,
+  "test_the_redactor_knows_the_missing_shapes.py": 0.44,
   "test_the_repair_commands_open_the_adopted_queue.py": 16.13,
   "test_the_report_says_how_much_evidence_reached_the_reader.py": 0.01,
   "test_the_reranker_does_not_pay_for_padding.py": 0.01,
