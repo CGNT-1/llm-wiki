@@ -198,10 +198,25 @@ def trim_state_to_budget(state: dict[str, Any]) -> int:
     return dropped
 
 
-def save_state(state: dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+def _serialized_state(state: dict[str, Any]) -> str:
     trim_state_to_budget(state)
-    atomic_write(STATE_FILE, json.dumps(state, indent=2, ensure_ascii=False))
+    return json.dumps(state, indent=2, ensure_ascii=False)
+
+
+def _write_state_text(text: str) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    atomic_write(STATE_FILE, text)
+
+
+def save_state(state: dict[str, Any]) -> None:
+    _write_state_text(_serialized_state(state))
+
+
+def _state_unchanged(text: str) -> bool:
+    try:
+        return STATE_FILE.read_bytes() == text.encode("utf-8")
+    except OSError:
+        return False
 
 
 def _sharing_violation(exc: PermissionError) -> bool:
@@ -532,8 +547,15 @@ def update_state(
     with _state_lock(timeout=lock_timeout):
         state, readable = _state_for_update()
         mutator(state)
+        text = _serialized_state(state)
+        # An unchanged state is neither linked nor written: linking first and then
+        # finding the write a duplicate left `.previous` the same inode as the
+        # file itself, so in-place damage would take both (audit 2026-09-27 C-20,
+        # docs/research/2026-09-27-a-previous-state-is-a-different-file.md).
+        if _state_unchanged(text):
+            return state
         _keep_previous(readable)
-        save_state(state)
+        _write_state_text(text)
         return state
 
 
