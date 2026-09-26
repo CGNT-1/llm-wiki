@@ -149,6 +149,7 @@
   "test_a_project_named_con_still_gets_a_handoff.py": 0.01,
   "test_a_provider_call_fails_closed.py": 0.03,
   "test_a_prune_inside_its_step.py": 0.81,
+  "test_a_prune_keeps_what_resolves_a_quarantine.py": 1.2,
   "test_a_publication_counts_what_it_leaves_out.py": 5.9,
   "test_a_publication_is_all_or_nothing.py": 12.12,
   "test_a_publication_that_is_out_of_time_does_not_link.py": 0.06,

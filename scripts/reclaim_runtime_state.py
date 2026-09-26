@@ -33,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from daily_log_append import BREADCRUMB_APPEND_BUDGET_SECONDS  # noqa: E402
 from integration_adapter import BACKLOG_DRAIN_SECONDS, drain_pending_backlog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 
@@ -152,17 +153,26 @@ def prune_settled_transactions(deadline: float = float("inf")) -> dict[str, obje
         return {"pruned": 0, "failed": 1, "reason": str(error)[:120]}
 
 
-def prune_transaction_history() -> dict[str, int]:
+# How long one slice of the history prune holds the writer gate: half the budget a
+# hook's breadcrumb append has for the whole write, so an append that arrives as a
+# slice starts still keeps half its time (audit 2026-09-27 B-1,
+# docs/research/2026-09-27-a-prune-keeps-what-resolves-a-quarantine.md).
+HISTORY_SLICE_SECONDS = BREADCRUMB_APPEND_BUDGET_SECONDS / 2
+
+
+def prune_transaction_history(deadline: float = float("inf")) -> dict[str, int]:
     """Settled rows past the history window (`HISTORY_RETENTION_DAYS`).
 
     The image prune above kept the rows, and the table only grew: 23 557 rows,
-    55 MB on 2026-09-24. Failure is reported, never raised.
+    55 MB on 2026-09-24. Bounded by the step's deadline and sliced, so it never
+    holds the gate for the whole step. Failure is reported, never raised.
     """
     from markdown_transaction import active_or_legacy_coordinator
 
     try:
         coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
-        return {**coordinator.prune_history(), "failed": 0}
+        pruned = coordinator.prune_history(deadline=deadline, slice_seconds=HISTORY_SLICE_SECONDS)
+        return {**pruned, "failed": 0}
     except Exception as error:  # noqa: BLE001
         return {"attempts": 0, "transactions": 0, "failed": 1, "reason": str(error)[:120]}
 
@@ -232,7 +242,7 @@ def reclaim(budget_seconds: float) -> dict[str, object]:
     return {
         "backlog": drain_pending_backlog(budget_seconds),
         "transactions": prune_settled_transactions(deadline),
-        "history": prune_transaction_history(),
+        "history": prune_transaction_history(deadline),
         "temporaries": sweep_orphan_temporaries(),
         "staged_writes": sweep_staged_knowledge_writes(),
         "empty_shards": remove_empty_intent_shards(),
@@ -251,7 +261,8 @@ def _report(result: dict[str, object]) -> str:
         f"snapshot {snapshot['status']} ({snapshot['commit']}); "
         f"pruned {transactions['pruned']} settled transaction(s){_unfinished_note(transactions)}; "
         f"dropped {result['history']['transactions']} transaction row(s) and "
-        f"{result['history']['attempts']} attempt row(s) past the history window; "
+        f"{result['history']['attempts']} attempt row(s) past the history window"
+        f"{_unfinished_note(result['history'])}; "
         f"drained {drained} checkpoint(s); "
         f"{len(backlog['remaining'])} project(s) still queued; "
         f"{len(backlog['failed'])} project(s) failed; "

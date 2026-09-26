@@ -63,6 +63,7 @@ from reliable_memory import (
     validate_schema,
     validate_state_root,
 )
+from transaction_lineage import quarantine_witnesses
 
 ChangeKind = Literal["create", "replace", "delete"]
 Validator = Callable[[Mapping[str, object]], object]
@@ -682,14 +683,22 @@ _RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS = (
     "UPDATE project_checkpoints SET transaction_id = NULL WHERE state = 'committed' "
     'AND transaction_id IN (SELECT id FROM "transaction" WHERE ' + _SETTLED_PAST_WINDOW + ")"
 )
-_PRUNE_SETTLED_TRANSACTIONS = (
-    'DELETE FROM "transaction" WHERE ' + _SETTLED_PAST_WINDOW + " "
+_PRUNABLE_TRANSACTION = (
+    _SETTLED_PAST_WINDOW + " "
     "AND NOT (" + " OR ".join("operation_id LIKE ?" for _ in KEPT_OPERATION_FAMILIES) + ") "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoints WHERE transaction_id IS NOT NULL) "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoint_attempts WHERE transaction_id IS NOT NULL)"
 )
+_PRUNABLE_TRANSACTION_IDS = 'SELECT id FROM "transaction" WHERE ' + _PRUNABLE_TRANSACTION + " ORDER BY updated_at"
+# Re-checked per row at delete time, so a row that became referenced since the
+# candidates were read is kept.
+_PRUNE_ONE_TRANSACTION = 'DELETE FROM "transaction" WHERE id = ? AND ' + _PRUNABLE_TRANSACTION
 
 MAX_ATTEMPT_ORDINAL = 100
+
+
+def _kept_family_patterns() -> tuple[str, ...]:
+    return tuple(f"{family}:%" for family in KEPT_OPERATION_FAMILIES)
 
 # How old a transaction directory no row names must be before the prune removes it.
 UNNAMED_ARTIFACT_AGE_SECONDS = 3600
@@ -7586,26 +7595,69 @@ class MarkdownCoordinator:
         return pruned
 
     def prune_history(
-        self, *, retention_days: int = HISTORY_RETENTION_DAYS, now: datetime | None = None
-    ) -> dict[str, int]:
+        self,
+        *,
+        retention_days: int = HISTORY_RETENTION_DAYS,
+        now: datetime | None = None,
+        deadline: float = float("inf"),
+        slice_seconds: float = float("inf"),
+    ) -> dict[str, int | bool]:
         """Drop settled history past its window: committed attempts, then settled rows.
 
         Attempts first, so the transactions they named are no longer named, then a
         committed checkpoint lets go of its settled transaction. Every family but
         the authority ones (`KEPT_OPERATION_FAMILIES`) goes; a transaction an
-        unsettled checkpoint names stays, and so does every quarantined one;
-        operations go with their transaction (`ON DELETE CASCADE`).
+        unsettled checkpoint names stays, and so does every quarantined one and
+        every row that ties a quarantine to its resolution
+        (`transaction_lineage.quarantine_witnesses`); operations go with their
+        transaction (`ON DELETE CASCADE`). Rows go in slices of at most
+        `slice_seconds` under the gate, each committed, until `deadline`: a
+        killed or late prune keeps what it already did and says it is unfinished
+        (audit 2026-09-27 A-6, B-1,
+        docs/research/2026-09-27-a-prune-keeps-what-resolves-a-quarantine.md).
         """
         cutoff = _timestamp(_prune_cutoff(retention_days, now))
+        attempts = self._prune_attempts(cutoff)
+        candidates = self._prunable_history(cutoff)
+        processed, removed = self._prune_in_slices(candidates, cutoff, deadline, slice_seconds)
+        return {"attempts": attempts, "transactions": removed, "unfinished": processed < len(candidates)}
+
+    def _prune_attempts(self, cutoff: str) -> int:
         with self.writer_gate(), self._connect() as database, begin_immediate(database):
             spent = database.execute(_PRUNE_SPENT_RESERVATIONS).rowcount
             attempts = spent + database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
             database.execute(_RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS, (cutoff,))
-            families = tuple(f"{family}:%" for family in KEPT_OPERATION_FAMILIES)
-            transactions = database.execute(
-                _PRUNE_SETTLED_TRANSACTIONS, (cutoff, *families)
-            ).rowcount
-        return {"attempts": attempts, "transactions": transactions}
+        return attempts
+
+    def _prunable_history(self, cutoff: str) -> list[str]:
+        """Candidate rows, oldest first, less every witness of a quarantine."""
+        with self._connect() as database:
+            witnesses = quarantine_witnesses(database)
+            rows = database.execute(_PRUNABLE_TRANSACTION_IDS, (cutoff, *_kept_family_patterns()))
+            return [str(row[0]) for row in rows if row[0] not in witnesses]
+
+    def _prune_in_slices(
+        self, candidates: list[str], cutoff: str, deadline: float, slice_seconds: float
+    ) -> tuple[int, int]:
+        """(candidates processed, rows deleted)."""
+        processed = removed = 0
+        while processed < len(candidates) and time.monotonic() < deadline:
+            stop_at = min(deadline, time.monotonic() + slice_seconds)
+            step, deleted = self._prune_slice(candidates[processed:], cutoff, stop_at)
+            processed, removed = processed + step, removed + deleted
+        return processed, removed
+
+    def _prune_slice(self, candidates: list[str], cutoff: str, stop_at: float) -> tuple[int, int]:
+        """Delete candidates in one committed transaction until `stop_at`; at least one."""
+        processed = deleted = 0
+        arguments = (cutoff, *_kept_family_patterns())
+        with self.writer_gate(), self._connect() as database, begin_immediate(database):
+            for identifier in candidates:
+                deleted += database.execute(_PRUNE_ONE_TRANSACTION, (identifier, *arguments)).rowcount
+                processed += 1
+                if time.monotonic() >= stop_at:
+                    break
+        return processed, deleted
 
     def _recover_interrupted_prunes(self) -> None:
         """Put back the images of every prune that died between rename and mark.
