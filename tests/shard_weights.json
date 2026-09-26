@@ -256,6 +256,7 @@
   "test_a_windows_name_is_read_wherever_an_acl_is_checked.py": 0.03,
   "test_a_windows_owner_with_a_non_ascii_name_is_verified.py": 0.01,
   "test_a_worker_that_failed_lost_no_capture.py": 0.0,
+  "test_a_writer_past_its_lease_is_named.py": 2.09,
   "test_a_written_batch_is_found_not_asked_again.py": 0.01,
   "test_abstention_is_stated_as_a_calibration.py": 0.01,
   "test_access_tracking.py": 27.5,

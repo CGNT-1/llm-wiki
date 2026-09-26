@@ -1069,9 +1069,9 @@ def _count_owner_table(
     unknown_code: str,
     count_key: str,
     require_token: bool,
-) -> None:
+) -> list[sqlite3.Row]:
     if table not in tables:
-        return
+        return []
     rows = database.execute(
         _OWNER_TABLE_QUERIES[table], (MAX_OPERATIONAL_ROWS + 1,)
     ).fetchall()
@@ -1082,13 +1082,28 @@ def _count_owner_table(
     details[count_key] = sum(
         _live_owner(row, now, pid_column="process_id") for row in bounded
     )
+    return bounded
+
+
+def _overdue_owner(row: sqlite3.Row, now: datetime) -> bool:
+    """A live process whose lease has run out: it holds what it promised to give up.
+
+    A release the busy database refused is retried for about an hour and then
+    given up, leaving the row of a process that is alive, so nothing reclaims it
+    and every other writer waits (audit 2026-09-27 C-3,
+    docs/research/2026-09-27-a-writer-past-its-lease-is-named.md).
+    """
+    expiry = _parse_utc(_row_value(row, "expires_at"))
+    if expiry is None or expiry > now:
+        return False
+    return _owner_pid_live(_row_value(row, "process_id"), _row_value(row, "process_start_identity"))
 
 
 def _count_owner_tables(
     database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
 ) -> None:
     _count_project_leases(database, tables, details, now)
-    _count_owner_table(
+    writers = _count_owner_table(
         database,
         tables,
         details,
@@ -1098,6 +1113,7 @@ def _count_owner_tables(
         count_key="live_writers",
         require_token=False,
     )
+    details["overdue_writers"] = sum(_overdue_owner(row, now) for row in writers)
     _count_owner_table(
         database,
         tables,
@@ -1601,6 +1617,11 @@ def _attention_parts(states: dict[str, int], invalid_state: bool, details: dict)
             f"{details['quarantined_unresolved']} refused attempt(s) whose work never happened",
         ),
         (invalid_state, "a transaction in a state this runtime does not define"),
+        (
+            details["overdue_writers"],
+            f"{details['overdue_writers']} writer(s) holding the writer gate past its lease "
+            "while their process lives, so every other writer waits",
+        ),
     )
     return [text for present, text in candidates if present]
 
@@ -1629,6 +1650,7 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
         sum(states[state] for state in UNSETTLED_TRANSACTION_STATES)
         + states["conflicted"]
         + details["quarantined_unresolved"]
+        + details["overdue_writers"]
     )
     invalid_state = bool(details["state_invalid"])
     _append_state_deletion_codes(details, states)
@@ -1674,6 +1696,7 @@ def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
         "undo_retained": 0,
         "live_project_leases": 0,
         "live_writers": 0,
+        "overdue_writers": 0,
         "live_maintenance_owners": 0,
         "quarantined_unresolved": 0,
         "read_error": False,
