@@ -2606,7 +2606,7 @@ def _excerpt(raw: str) -> str:
     from secret_redact import redact_secrets
 
     collapsed = " ".join(str(raw).split())
-    return redact_secrets(collapsed[:_UNPARSABLE_EXCERPT_CHARS])
+    return redact_secrets(collapsed)[:_UNPARSABLE_EXCERPT_CHARS]
 
 
 def _parsed_answer(raw: str | None) -> object:

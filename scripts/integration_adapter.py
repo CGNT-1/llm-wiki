@@ -2710,16 +2710,33 @@ def _turn_lines(lines: Iterable[bytes], side: int) -> list[bytes]:
 
 
 def _turns_head(window: bytes, side: int) -> bytes:
-    """The first turns; the raw window when not one whole turn fits in it."""
+    """The first turns; whole tokens of the raw window when not one whole turn fits in it."""
     kept = _turn_lines(window.split(b"\n")[:-1], side)
-    return b"".join(line + b"\n" for line in kept) or window[:side]
+    return b"".join(line + b"\n" for line in kept) or _whole_tokens_head(window[:side])
 
 
 def _turns_tail(window: bytes, side: int) -> bytes:
-    """The last turns; the raw window when not one whole turn fits in it."""
+    """The last turns; whole tokens of the raw window when not one whole turn fits in it."""
     lines = [line for line in window.split(b"\n")[1:] if line]
     kept = _turn_lines(reversed(lines), side)
-    return b"".join(line + b"\n" for line in reversed(kept)) or window[-side:]
+    return b"".join(line + b"\n" for line in reversed(kept)) or _whole_tokens_tail(window[-side:])
+
+
+# Where a token of a JSON line ends. A raw window cut inside a token would keep a
+# fragment the redactor cannot recognise — a token prefix is not a token — so the
+# fragment at the cut is dropped (audit 2026-09-27 B-4,
+# docs/research/2026-09-27-a-secret-is-redacted-before-it-is-cut.md).
+_TOKEN_BOUNDARY = re.compile(rb"[\s,\"'{}\[\]:=]")
+
+
+def _whole_tokens_head(piece: bytes) -> bytes:
+    ends = [match.end() for match in _TOKEN_BOUNDARY.finditer(piece)]
+    return piece[: ends[-1]] if ends else b""
+
+
+def _whole_tokens_tail(piece: bytes) -> bytes:
+    match = _TOKEN_BOUNDARY.search(piece)
+    return piece[match.start():] if match else b""
 
 
 def _capture_excerpt_marker(dropped: int) -> str:
