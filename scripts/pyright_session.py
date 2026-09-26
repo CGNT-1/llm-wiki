@@ -58,10 +58,8 @@ from lsp_security import (
 from lsp_server_profile import LanguageServerProfile, thaw_profile_value
 from pyright_profile import (
     MAX_SERVER_BYTES,
-    PYRIGHT_CONFIGURATION,
     PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
     PyrightIdentity,
-    thaw_pyright_profile_value,
 )
 from reliable_memory import _known_network_path
 from repository_scope import RepositoryScope
@@ -1512,12 +1510,17 @@ def _configuration_value(settings: Mapping[str, object], section: str) -> object
 
 
 def _configuration_result(settings: Mapping[str, object], item: object) -> object:
-    """What to answer for one requested configuration item."""
+    """What to answer for one requested configuration item.
+
+    An item without a section asks for this server's whole configuration, as
+    the reference clients answer it (vscode-languageclient, Neovim); it is the
+    session's own profile settings, never another profile's.
+    """
     section, usable = _configuration_section(item)
     if not usable:
         return None
     if section is None:
-        return thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
+        return settings
     return _configuration_value(settings, section)
 
 
