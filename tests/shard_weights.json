@@ -422,6 +422,7 @@
   "test_every_pinned_download_retries_the_network.py": 5.61,
   "test_every_process_settles_its_inference_at_exit.py": 0.68,
   "test_every_provider_names_a_death_and_a_deadline.py": 2.05,
+  "test_every_re_export_form_is_followed.py": 0.03,
   "test_every_scheduler_gets_the_providers_path.py": 0.08,
   "test_every_session_record_is_redacted.py": 0.01,
   "test_every_store_has_a_bound.py": 9.9,

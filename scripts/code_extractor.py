@@ -10,6 +10,7 @@ import math
 import re
 import time
 from bisect import bisect_left
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
@@ -39,7 +40,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v16"  # v16: a name the function binds hides an import of it (audit 2026-09-26 C-9)
+EXTRACTOR_VERSION = "code-extractor/v17"  # v17: star, branch and rebinding re-exports (audit 2026-09-27 C-7)
 _SYNTAX_STOP_INTERVAL = 256
 _MAX_OBSERVATION_TARGET_CHARS = 4096
 _MAX_OBSERVATION_TARGET_BYTES = 4096
@@ -583,6 +584,62 @@ def _from_import_aliases(node: ast.ImportFrom, imported_module: str) -> dict[str
     return {alias.asname or alias.name: (imported_module, alias.name) for alias in node.names}
 
 
+def _is_star_import(node: ast.ImportFrom) -> bool:
+    return any(alias.name == "*" for alias in node.names)
+
+
+# The compound statements whose blocks still run at module level.
+_MODULE_BLOCKS = tuple(
+    getattr(ast, name) for name in ("If", "Try", "TryStar", "With") if hasattr(ast, name)
+)
+
+
+def _block_statements(statement: ast.stmt) -> list[ast.stmt]:
+    """The statements of every block a module-level compound statement holds."""
+    if not isinstance(statement, _MODULE_BLOCKS):
+        return []
+    handlers = [child for handler in getattr(statement, "handlers", ()) for child in handler.body]
+    return [*statement.body, *handlers, *getattr(statement, "orelse", ()), *getattr(statement, "finalbody", ())]
+
+
+def _module_level_imports(body: list[ast.stmt]) -> list[tuple[ast.ImportFrom, bool]]:
+    """Every `from x import ...` that runs at module level, and whether it sits in a block.
+
+    One explicit stack, as `_walk_python` keeps, so nesting cannot raise
+    `RecursionError`.
+    """
+    found: list[tuple[ast.ImportFrom, bool]] = []
+    stack = [(statement, False) for statement in reversed(body)]
+    while stack:
+        statement, nested = stack.pop()
+        if isinstance(statement, ast.ImportFrom):
+            found.append((statement, nested))
+        stack.extend((child, True) for child in reversed(_block_statements(statement)))
+    return found
+
+
+def _is_string_constant(item: ast.expr) -> bool:
+    return isinstance(item, ast.Constant) and isinstance(item.value, str)
+
+
+def _string_sequence(value: ast.expr) -> frozenset[str] | None:
+    """The strings of a literal list or tuple, or None when it holds anything else."""
+    if not isinstance(value, (ast.List, ast.Tuple)):
+        return None
+    if not all(_is_string_constant(item) for item in value.elts):
+        return None
+    return frozenset(item.value for item in value.elts)
+
+
+def _declared_public_names(body: list[ast.stmt]) -> frozenset[str] | None:
+    """A module's literal `__all__`, the last one assigned, or None when it has none we can read."""
+    declared = None
+    for statement in body:
+        if isinstance(statement, ast.Assign) and _assigned_names(statement) == ["__all__"]:
+            declared = _string_sequence(statement.value)
+    return declared
+
+
 def _assigned_targets(statement: ast.Assign | ast.AnnAssign) -> list[ast.expr]:
     return statement.targets if isinstance(statement, ast.Assign) else [statement.target]
 
@@ -1017,9 +1074,15 @@ class _Collector:
         self.tables: dict[str, list[str]] = {}
         self.routes: dict[tuple[str, str], list[str]] = {}
         self.definitions: dict[tuple[str, str], list[str]] = {}
-        # (module, exported name) -> (source module, symbol) for a module-level
-        # `from x import y [as z]`: a package's re-export (audit 2026-09-26 B-6).
-        self.reexports: dict[tuple[str, str], tuple[str, str]] = {}
+        # (module, exported name) -> every (source module, symbol) a module-level
+        # `from x import y [as z]` may bind it to: a package's re-export (audit
+        # 2026-09-26 B-6). A straight-line import replaces the earlier bindings; one
+        # inside an `if`, `try` or `with` block is an alternative (audit 2026-09-27 C-7).
+        self.reexports: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        # module -> the modules it `from x import *`s, and the literal `__all__`
+        # that limits what a star import of it binds.
+        self.star_reexports: dict[str, list[str]] = {}
+        self.public_names: dict[str, frozenset[str]] = {}
         self.python_scopes: dict[tuple[str, str, str], list[str]] = {}
         self.local_bindings: dict[int, frozenset[str]] = {}
         self.function_body_scope: dict[str, str] = {}
@@ -1317,16 +1380,27 @@ class _Collector:
 
     def _record_reexports(self, ctx: _PythonFile, tree: ast.Module) -> None:
         """Module-level `from x import y`: what this module hands on under its own name."""
-        for statement in tree.body:
-            if isinstance(statement, ast.ImportFrom) and statement.module is not None:
-                self._record_reexport(ctx, statement)
+        declared = _declared_public_names(tree.body)
+        if declared is not None:
+            self.public_names[ctx.module_name] = declared
+        for statement, nested in _module_level_imports(tree.body):
+            if statement.module is not None:
+                self._record_reexport(ctx, statement, nested)
 
-    def _record_reexport(self, ctx: _PythonFile, statement: ast.ImportFrom) -> None:
+    def _record_reexport(self, ctx: _PythonFile, statement: ast.ImportFrom, nested: bool) -> None:
         imported = self._absolute_import(
             ctx.module_name, statement.module or "", statement.level, is_package=ctx.is_package
         )
+        if _is_star_import(statement):
+            self.star_reexports.setdefault(ctx.module_name, []).append(imported)
+            return
         for exported, target in _from_import_aliases(statement, imported).items():
-            self.reexports.setdefault((ctx.module_name, exported), target)
+            self._bind_reexport((ctx.module_name, exported), target, nested)
+
+    def _bind_reexport(self, key: tuple[str, str], target: tuple[str, str], nested: bool) -> None:
+        """A straight-line binding replaces the earlier ones; one in a block is an alternative."""
+        earlier = self.reexports.get(key, []) if nested else []
+        self.reexports[key] = [*earlier, target]
 
     def _walk_python(self, ctx: _PythonFile, body: list[ast.stmt], owner: _PythonOwner) -> None:
         """Every definition of one scope, including those under an `if` or a `try`.
@@ -2241,19 +2315,47 @@ class _Collector:
         ]
 
     def _reexported_targets(self, module: str, symbol: str) -> list[str]:
+        """Every definition the re-exports of `symbol` may hand on, across every alternative."""
         seen: set[tuple[str, str]] = set()
-        hop = self._reexport_of(module, symbol)
-        while hop is not None and hop not in seen and len(seen) < MAX_REEXPORT_HOPS:
-            seen.add(hop)
-            targets = self._defined_targets(*hop)
-            if targets:
-                return targets
-            hop = self._reexport_of(*hop)
-        return []
+        pending = deque(self._reexports_of(module, symbol))
+        found: list[str] = []
+        while pending and len(seen) < MAX_REEXPORT_HOPS:
+            hop = pending.popleft()
+            if hop not in seen:
+                seen.add(hop)
+                self._follow_reexport(hop, found, pending)
+        return found
 
-    def _reexport_of(self, module: str, symbol: str) -> tuple[str, str] | None:
-        hops = (self.reexports.get((candidate, symbol)) for candidate in self._matching_modules(module))
-        return next((hop for hop in hops if hop is not None), None)
+    def _follow_reexport(
+        self, hop: tuple[str, str], found: list[str], pending: deque[tuple[str, str]]
+    ) -> None:
+        """A hop's definitions are targets; a hop without one hands on to its own re-exports."""
+        targets = self._defined_targets(*hop)
+        found.extend(target for target in targets if target not in found)
+        if not targets:
+            pending.extend(self._reexports_of(*hop))
+
+    def _reexports_of(self, module: str, symbol: str) -> list[tuple[str, str]]:
+        """The bindings a module names for `symbol`, else the star imports that may bind it."""
+        candidates = self._matching_modules(module)
+        named = self._named_reexports(candidates, symbol)
+        if named:
+            return named
+        return self._star_reexports(candidates, symbol)
+
+    def _named_reexports(self, candidates: Iterable[str], symbol: str) -> list[tuple[str, str]]:
+        return [hop for candidate in candidates for hop in self.reexports.get((candidate, symbol), ())]
+
+    def _star_reexports(self, candidates: Iterable[str], symbol: str) -> list[tuple[str, str]]:
+        sources = [source for candidate in candidates for source in self.star_reexports.get(candidate, ())]
+        return [(source, symbol) for source in sources if self._star_exports(source, symbol)]
+
+    def _star_exports(self, module: str, symbol: str) -> bool:
+        """Whether `from module import *` binds `symbol`: its `__all__`, else every public name."""
+        declared = [self.public_names[c] for c in self._matching_modules(module) if c in self.public_names]
+        if not declared:
+            return not symbol.startswith("_")
+        return any(symbol in names for names in declared)
 
     def _scoped_targets(self, name: str, module_name: str, owner: ast.AST) -> list[str]:
         """The innermost enclosing scope that defines `name`, falling back to module level."""
