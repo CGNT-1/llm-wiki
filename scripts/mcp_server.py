@@ -5547,12 +5547,23 @@ def _context_components(data) -> dict:
     }
 
 
+# Every navigation status says how fresh its answer is; only an answer computed
+# from the current revision is fresh. `unsupported` has no answer at all, and an
+# unknown status is not assumed fresh (audit 2026-09-27 C-19,
+# docs/research/2026-09-27-an-answer-without-a-provider-is-not-fresh.md).
+_NAVIGATION_FRESHNESS = {
+    "ok": "fresh",
+    "partial": "fresh",
+    "stale": "stale",
+    "unsupported": "missing",
+    "not_ready": "unknown",
+    "timeout": "unknown",
+    "error": "unknown",
+}
+
+
 def _navigation_freshness(status) -> str:
-    if status == "stale":
-        return "stale"
-    if status in {"timeout", "error", "not_ready"}:
-        return "unknown"
-    return "fresh"
+    return _NAVIGATION_FRESHNESS.get(str(getattr(status, "value", status)), "unknown")
 
 
 def _navigation_provider_component(data: dict, freshness: str) -> dict:

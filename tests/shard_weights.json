@@ -274,6 +274,7 @@
   "test_an_answer_names_the_commit_it_read.py": 0.02,
   "test_an_answer_says_how_old_its_index_is.py": 0.03,
   "test_an_answer_that_landed_at_the_deadline_is_kept.py": 0.48,
+  "test_an_answer_without_a_provider_is_not_fresh.py": 0.0,
   "test_an_append_behind_a_stale_attempt_gives_up_in_time.py": 13.39,
   "test_an_append_whose_file_is_gone_is_written_again.py": 8.13,
   "test_an_append_whose_images_were_pruned_can_be_asked_again.py": 3.62,
