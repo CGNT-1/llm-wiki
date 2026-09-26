@@ -4054,7 +4054,7 @@ def _build_tool_definitions() -> list:
     return [
         _make_tool(
             name="recall",
-            description="Search the knowledge vault. Returns ranked results with titles, summaries, and paths. Use this to find relevant knowledge pages.",
+            description="Search the knowledge vault. Returns ranked results with titles, paths, and the matching text. Use this to find relevant knowledge pages.",
             inputSchema=TOOL_INPUT_SCHEMAS["recall"],
         ),
         _make_tool(

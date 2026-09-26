@@ -3188,12 +3188,6 @@ def _page_title(row: sqlite3.Row) -> str:
     return row["title"] or Path(row["source_path"]).stem
 
 
-def _first_prose_line(content: str) -> str:
-    """The first line under the headings: a summary that does not repeat the title."""
-    lines = [line for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-    return lines[0].strip()[:120] if lines else ""
-
-
 def _chunk_weight(authority: object, page_type: object, content: object, relative_path: object) -> float:
     """Who said it and what the page is, and whether this chunk is prose or a link list."""
     return trust_weight(authority, page_type, relative_path) * substance_weight(content)
@@ -3206,7 +3200,9 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
     return {
         "path": row["source_path"],
         "title": _page_title(row),
-        "summary": _first_prose_line(content),
+        # No `summary`: the row's text is `content`, and a first line cut from it
+        # repeated it mid-sentence (audit 2026-09-27 C-16,
+        # docs/research/2026-09-27-a-row-that-carries-its-text-carries-no-cut-of-it.md).
         "content": content,
         "score": score,
         "project": _row_text(row, "project"),
