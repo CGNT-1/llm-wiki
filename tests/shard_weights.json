@@ -1,6 +1,7 @@
 {
   "test_a_backlog_drains_in_windows.py": 0.01,
   "test_a_backup_image_carries_what_git_does_not.py": 31.93,
+  "test_a_backup_snapshots_what_hooks_write.py": 1.02,
   "test_a_backup_takes_what_any_installed_vault_holds.py": 3.85,
   "test_a_bad_model_file_is_fetched_again.py": 0.09,
   "test_a_base_install_can_search.py": 2.56,
@@ -651,6 +652,7 @@
   "test_the_answer_path_reads_no_benchmark_label.py": 5.65,
   "test_the_busy_answer_is_not_a_timeout.py": 0.24,
   "test_the_calendar_does_the_arithmetic.py": 0.07,
+  "test_the_checkpoint_keys_are_indexed.py": 0.86,
   "test_the_classifier_reads_the_conversation.py": 0.05,
   "test_the_code_index_leaves_the_knowledge_alone.py": 0.04,
   "test_the_compile_decides_what_the_snapshot_already_knows.py": 2.66,
