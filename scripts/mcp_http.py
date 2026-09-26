@@ -253,9 +253,17 @@ def _presented_token(headers) -> str | None:
     return value[len(BEARER_PREFIX):].strip()
 
 
+def _token_matches(presented: str, token: str) -> bool:
+    """Compared as bytes: a header is decoded as Latin-1, so a non-ASCII token is
+    a wrong token (401), never a `TypeError` from `compare_digest` (500). Audit
+    2026-09-27 C-14, docs/research/2026-09-27-the-http-guard-refuses-what-it-cannot-judge.md.
+    """
+    return hmac.compare_digest(presented.encode("latin-1"), token.encode("latin-1"))
+
+
 def _refuse_authorization(guard, scope, headers) -> tuple[int, str] | None:
     presented = _presented_token(headers)
-    if presented is not None and hmac.compare_digest(presented, guard.token):
+    if presented is not None and _token_matches(presented, guard.token):
         return None
     return 401, "a valid bearer token is required"
 
@@ -280,6 +288,18 @@ async def _send_refusal(send, status: int, reason: str) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+async def _refuse_other_scope(scope, receive, send) -> None:
+    """Only HTTP is served; a WebSocket (or any other scope) is closed unjudged.
+
+    It used to pass straight to the app, harmless only while every route
+    happened to be HTTP-only.
+    """
+    if scope.get("type") != "websocket":
+        return
+    await receive()
+    await send({"type": "websocket.close", "code": 1008})
+
+
 class LoopbackGuard:
     """The only door. Everything the transport sees has passed all four checks."""
 
@@ -297,8 +317,12 @@ class LoopbackGuard:
         return None
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope.get("type") != "http":
+        kind = scope.get("type")
+        if kind == "lifespan":
             await self.app(scope, receive, send)
+            return
+        if kind != "http":
+            await _refuse_other_scope(scope, receive, send)
             return
         refusal = self.refusal(scope)
         if refusal is None:
