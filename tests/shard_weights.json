@@ -200,6 +200,7 @@
   "test_a_rerank_that_cannot_fit_is_not_started.py": 0.0,
   "test_a_reranker_that_never_finished.py": 0.0,
   "test_a_rerun_may_ask_for_fewer_things.py": 3.09,
+  "test_a_resolved_quarantine_lets_go_of_its_images.py": 0.86,
   "test_a_retained_cleanup_owner_leaves_the_module_registry.py": 0.78,
   "test_a_retired_generation_does_not_come_back.py": 1.1,
   "test_a_retried_checkpoint_is_the_same_batch.py": 0.0,

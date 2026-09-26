@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- A quarantined transaction the rows show resolved (its retry committed, or a commit created its files) gives up its before/after images and keeps its row; the rule is one module shared by the prune, doctor and the refused-append repair (audit 2026-09-27 B-2).
 - A backup copies what the session hooks write (run/state.json, run/capture-intents/) as a snapshot at read time instead of refusing while any agent runs, and leaves their lock file out; every other file still must not change during the copy (audit 2026-09-27 B-16, owner approved).
 - The coordinator's checkpoint tables index their transaction keys, created by the history prune when missing; a database without them stays valid, and deleting settled history no longer scans both tables per row: 400 deletes went from 2.78 s to 0.02 s on a copy of this vault's database (audit 2026-09-27 B-1, owner approved).
 - A failed code-navigation ownership probe names its step, message, duration and the clock's resolution, and a failed reset is reported, not swallowed (audit 2026-09-27 B-8).

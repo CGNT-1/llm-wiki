@@ -63,7 +63,7 @@ from reliable_memory import (
     validate_schema,
     validate_state_root,
 )
-from transaction_lineage import quarantine_witnesses
+from transaction_lineage import quarantine_witnesses, resolved_quarantines
 
 ChangeKind = Literal["create", "replace", "delete"]
 Validator = Callable[[Mapping[str, object]], object]
@@ -7768,14 +7768,22 @@ class MarkdownCoordinator:
         return row is not None and row["artifacts_pruned_at"] is None
 
     def _prunable_rows(self) -> list[sqlite3.Row]:
+        """Settled rows with images, and quarantined ones the rows show resolved.
+
+        A resolved quarantine's images proved nothing any more: the retry that
+        committed, or the commit that created its files, is the evidence, and
+        the row itself is kept. Before this, 117 quarantined rows held 60.8 MB of
+        images on this vault for good (audit 2026-09-27 B-2,
+        docs/research/2026-09-27-a-resolved-quarantine-lets-go-of-its-images.md).
+        """
         with self._connect() as database:
-            return list(
-                database.execute(
-                    'SELECT id, updated_at FROM "transaction" '
-                    "WHERE state IN ('committed', 'discarded') "
-                    "AND artifacts_pruned_at IS NULL"
-                )
+            resolved = resolved_quarantines(database)
+            rows = database.execute(
+                'SELECT id, updated_at, state FROM "transaction" '
+                "WHERE state IN ('committed', 'discarded', 'quarantined') "
+                "AND artifacts_pruned_at IS NULL"
             )
+            return [row for row in rows if row["state"] != "quarantined" or row["id"] in resolved]
 
     def _prune_one(
         self,
