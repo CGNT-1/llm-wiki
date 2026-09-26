@@ -113,13 +113,25 @@ _TOO_SMALL_NOTE = (
 )
 
 
-def estimate_tokens(data) -> int:
-    """`len // 4`, the same approximation `benchmark/run_code_parity.py` uses.
+# A token is about four bytes of UTF-8 (tiktoken's README). Bytes, not characters:
+# a Cyrillic or CJK character is two or three bytes and costs a model more than a
+# Latin one, so counting characters undercounts the Russian this vault is written
+# in. See docs/research/2026-09-27-a-context-answer-fits-the-budget-it-was-given.md.
+BYTES_PER_TOKEN = 4
+
+
+def estimate_text_tokens(text: str) -> int:
+    """The one estimate of what a text costs a model: UTF-8 bytes / 4, rounded up.
 
     Not a tokenizer. A real count needs a network round trip and an API key,
     which do not belong on a local, offline answer path.
     """
-    return len(_serialized(data)) // 4
+    return -(-len(text.encode("utf-8")) // BYTES_PER_TOKEN)
+
+
+def estimate_tokens(data) -> int:
+    """The estimate of an answer: `estimate_text_tokens` of its serialized form."""
+    return estimate_text_tokens(_serialized(data))
 
 
 def _serialized(data) -> str:

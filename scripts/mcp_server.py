@@ -1407,12 +1407,61 @@ def _get_context(
     collected_at = _utc_now_seconds()
     snapshot = collect_corpus(ROOT, deadline=operation_deadline)
     selection = _context_selection(snapshot, set(slugs))
-    compiled = _compiled_context(
-        snapshot, selection, token_budget, operation_deadline
+    answer = functools.partial(
+        _context_answer, snapshot, selection, token_budget, include, collected_at, operation_deadline
     )
+    result = _context_within_budget(answer, token_budget)
     _record_context_injections(selection["selected_paths"])
+    return result
+
+
+def _context_answer(snapshot, selection, token_budget, include, collected_at, deadline, text_tokens: int) -> dict:
+    """The answer with its text packed into `text_tokens`, counted as the answer is."""
+    from answer_budget import BYTES_PER_TOKEN
+
+    compiled = _compiled_context(snapshot, selection, text_tokens * BYTES_PER_TOKEN, deadline)
     result = _context_result(compiled, snapshot, selection, token_budget, include)
     return {**result, "collected_at": collected_at}
+
+
+def _context_within_budget(answer, token_budget: int) -> dict:
+    """The answer whose whole body, not only its text, fits `token_budget`.
+
+    The text gets the whole budget when the answer then fits; otherwise the largest
+    text allowance whose answer fits is searched by halving, because a smaller text
+    also lists fewer items (audit 2026-09-27 B-12,
+    docs/research/2026-09-27-a-context-answer-fits-the-budget-it-was-given.md).
+    """
+    whole = _fitting_answer(answer, token_budget, token_budget)
+    if whole is not None:
+        return whole
+    return _largest_fitting_answer(answer, token_budget)
+
+
+def _largest_fitting_answer(answer, token_budget: int) -> dict:
+    best, low, high = None, 1, token_budget - 1
+    while low <= high:
+        middle = (low + high) // 2
+        result = _fitting_answer(answer, middle, token_budget)
+        if result is None:
+            high = middle - 1
+            continue
+        best, low = result, middle + 1
+    if best is None:
+        raise ValueError("token_budget cannot hold this answer's own item list; ask for fewer pages or a larger budget")
+    return best
+
+
+def _fitting_answer(answer, text_tokens: int, token_budget: int) -> dict | None:
+    """The answer packed into `text_tokens`, or None when it does not fit the budget."""
+    from answer_budget import estimate_tokens
+    from context_budget import BudgetExceededError
+
+    try:
+        result = answer(text_tokens)
+    except BudgetExceededError:
+        return None
+    return result if estimate_tokens(result) <= token_budget else None
 
 
 def _utc_now_seconds() -> str:
@@ -1531,50 +1580,39 @@ def _compiled_context(snapshot, selection: dict, token_budget: int, deadline):
         )
 
 
-def _without_text(item: dict) -> dict:
-    return {key: value for key, value in item.items() if key != "text"}
+# What an agent reads about a packed item: where it comes from and what it is. Its
+# text is in `text`; `item_id` and `source_sha256` spell the source and its digest
+# again, 190 characters an item, and `relevance` is the packer's own bookkeeping
+# (audit 2026-09-27 B-12).
+_ITEM_FIELDS = (
+    "source", "parent_id", "representation", "heading_path", "byte_start", "byte_end",
+    "type", "status", "project", "valid_from", "valid_to", "aliases",
+)
 
 
-def _page_items(items: list) -> list:
-    return [item for item in items if item["source"].endswith(".md")]
-
-
-def _symbol_items(items: list) -> list:
-    return [item for item in items if not item["source"].endswith(".md")]
-
-
-def _items_of_type(items: list, types: set) -> list:
-    return [item for item in items if item["type"] in types]
-
-
-def _items_of_representation(items: list, representation: str) -> list:
-    return [item for item in items if item["representation"] == representation]
-
-
-def _materialization_trace(compiled) -> list:
-    return [asdict(item) for item in compiled.trace.materializations]
+def _item_descriptor(item: dict) -> dict:
+    """The item's fields that say something: no empty value, no parent that is its source."""
+    kept = {key: item[key] for key in _ITEM_FIELDS if item.get(key) not in (None, [], ())}
+    if kept.get("parent_id") == kept.get("source"):
+        kept.pop("parent_id", None)
+    return kept
 
 
 def _context_result(compiled, snapshot, selection: dict, token_budget: int, include):
-    # The packed text is sent once, in `text`; the lists name what it holds. Each
-    # list repeated every item's text, about four times the answer (audit
-    # 2026-09-26 B-18, docs/research/2026-09-26-a-context-answer-sends-its-text-once.md).
-    items = [_without_text(asdict(item)) for item in compiled.items]
+    # The packed text is sent once, in `text`; `items` names each item once, without
+    # its text. Six typed copies of the list and three traces named every item up to
+    # five times (audit 2026-09-26 B-18, 2026-09-27 B-12,
+    # docs/research/2026-09-27-a-context-answer-fits-the-budget-it-was-given.md).
+    from answer_budget import estimate_text_tokens
+
     return {
         "text": compiled.text,
-        "packed_tokens": compiled.packed_tokens,
+        "packed_tokens": estimate_text_tokens(compiled.text),
         "token_budget": token_budget,
         "corpus_generation": snapshot.corpus_sha256,
         "repo_map": sorted(selection["selected_paths"]),
-        "pages": _page_items(items),
-        "symbols": _symbol_items(items),
-        "decisions": _items_of_type(items, {"decision"}),
-        "incidents": _items_of_type(items, {"debugging", "incident"}),
-        "active_task": _items_of_type(items, {"project-state"}),
-        "evidence": _items_of_representation(items, "l2"),
-        "retrieval_trace": asdict(compiled.trace.retrieval),
-        "materialization_trace": _materialization_trace(compiled),
-        "packing_trace": asdict(compiled.trace.packing),
+        "items": [_item_descriptor(asdict(item)) for item in compiled.items],
+        "dropped": [asdict(item) for item in compiled.trace.packing.dropped],
         "missing_slugs": selection["missing"],
         "include": include,
     }
@@ -5536,7 +5574,7 @@ def _index_timestamp(name: str, data) -> str | None:
 def _context_components(data) -> dict:
     if not isinstance(data, dict):
         return {}
-    if "packing_trace" not in data:
+    if "items" not in data:
         return {}
     return {
         "context_compiler": {

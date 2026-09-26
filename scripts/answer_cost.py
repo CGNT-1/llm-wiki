@@ -54,7 +54,7 @@ COST_KEY = "answer_cost"
 # Named in-band beside the number, because the count is an offline estimate
 # rather than a provider-reported one and the caller cannot tell from a bare
 # integer which it is holding.
-ESTIMATE_METHOD = "chars/4"
+ESTIMATE_METHOD = "utf8_bytes/4"
 
 MODE_ENV = "LLM_WIKI_ANSWER_COST"
 _AUTO = "auto"
@@ -67,12 +67,14 @@ _MODES = frozenset({_AUTO, _ALWAYS, _NEVER})
 # trimmed against rule 4 - see MEASURED_BLOCK_TOKENS.
 MAX_SHARE_OF_ANSWER = 0.01
 
-# What the block costs, measured 2026-08-28, so a reader need not run it to
-# find out: 23 tokens on an answer with no optional stages, 52 on a retrieval
-# answer carrying the stage line and a refusal reason. At 1 % that admits
-# answers from ~2 300 tokens (~5 200 with stages) upward; a `recall` answer
-# measured 12 525. `tests/test_answer_cost.py` holds both to the promise.
-MEASURED_BLOCK_TOKENS = {"without_stages": 23, "with_stages": 52}
+# What the block costs, remeasured 2026-09-27 under the one estimator
+# (`utf8_bytes/4`, rounded up; 23 and 52 under `chars/4` on 2026-08-28), so a
+# reader need not run it to find out: 25 tokens on an answer with no optional
+# stages, 54 on a retrieval answer carrying the stage line and a refusal reason.
+# At 1 % that admits answers from ~2 500 tokens (~5 400 with stages) upward; a
+# `recall` answer measured 12 525. `tests/test_answer_cost.py` holds both to the
+# promise.
+MEASURED_BLOCK_TOKENS = {"without_stages": 25, "with_stages": 54}
 
 # Digit widths move the block by a token or two; the ceiling is what a caller
 # may rely on, the numbers above are what a canonical block actually costs.

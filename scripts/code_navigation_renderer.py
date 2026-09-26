@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 
+from answer_budget import estimate_text_tokens as estimate_tokens
 from code_intelligence import Capability
 from code_navigation import (
     NavigationDiagnostic,
@@ -33,10 +34,6 @@ _RESOLUTION_ORDER = {
     "unresolved": 6,
     "unsupported": 7,
 }
-
-
-def estimate_tokens(text: str) -> int:
-    return (len(text.encode("utf-8")) + 3) // 4
 
 
 def _coerce_limit(limit: int | None) -> int:

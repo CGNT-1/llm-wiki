@@ -63,7 +63,7 @@ def test_the_answer_states_its_own_token_estimate_and_the_method() -> None:
     )
     # The count is an offline estimate, not a provider-reported one, and a bare
     # integer cannot tell the caller which it is holding.
-    assert block["estimate_method"] == "chars/4"
+    assert block["estimate_method"] == "utf8_bytes/4"
 
 
 def test_the_estimate_comes_from_the_one_shared_estimator() -> None:
@@ -228,7 +228,7 @@ def test_a_real_tool_answer_carries_its_cost(monkeypatch) -> None:
     block = envelope["data"][COST_KEY]
     assert isinstance(block["tokens_estimated"], int)
     assert isinstance(block["duration_ms"], int)
-    assert block["estimate_method"] == "chars/4"
+    assert block["estimate_method"] == "utf8_bytes/4"
 
 
 def test_the_cost_block_does_not_break_the_declared_envelope_schema(monkeypatch) -> None:

@@ -513,18 +513,12 @@ def _assert_degraded_trace(row, trace) -> None:
 
 
 def _assert_context_package_keys(package) -> None:
-    assert set(package) >= {
-        "text", "packed_tokens", "token_budget", "repo_map", "pages",
-        "symbols", "decisions", "incidents", "active_task", "evidence",
-        "retrieval_trace", "materialization_trace",
-    }
+    assert set(package) >= {"text", "packed_tokens", "token_budget", "repo_map", "items", "dropped"}
 
 
 def _assert_context_package_contents(package) -> None:
     assert package["packed_tokens"] <= package["token_budget"] == 1200
-    assert package["decisions"]
-    assert package["incidents"]
-    assert package["active_task"]
+    assert {item["type"] for item in package["items"]} >= {"decision", "debugging", "project-state"}
 
 
 def _assert_recall_search_call(call) -> None:
