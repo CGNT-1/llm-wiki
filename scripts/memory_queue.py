@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 from reliable_memory import (
     DEFAULTS,
+    MAX_CAPTURE_DECISION_BYTES,
     MigrationStatement,
     OperationalDatabaseContract,
     OperationalDatabaseContractError,
@@ -2655,7 +2656,7 @@ def _read_indexed_capture_decision(
     data = read_runtime_bytes(
         state_root / decision_path,
         state_root,
-        max_bytes=1024 * 1024,
+        max_bytes=MAX_CAPTURE_DECISION_BYTES,
         owner_only=True,
     )
     if sha256_bytes(data) != decision_sha256:
@@ -8445,7 +8446,7 @@ class _QueueV3CandidateReader:
         data = read_runtime_bytes(
             self.state_root / decision_path,
             self.state_root,
-            max_bytes=64 * 1024,
+            max_bytes=MAX_CAPTURE_DECISION_BYTES,
             owner_only=True,
         )
         if sha256_bytes(data) != decision_sha256:
@@ -8704,7 +8705,7 @@ class _QueueV3CandidateReader:
             data = read_runtime_bytes(
                 self.state_root / str(row["decision_path"]),
                 self.state_root,
-                max_bytes=1024 * 1024,
+                max_bytes=MAX_CAPTURE_DECISION_BYTES,
                 owner_only=True,
             )
             if sha256_bytes(data) != row["decision_sha256"]:

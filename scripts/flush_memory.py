@@ -39,7 +39,6 @@ MAX_TRANSCRIPT_CHARS = 60_000
 # What a session record may read from a transcript file; the record itself is
 # bounded again after rendering.
 MAX_RECORD_CHARS = 4_000_000
-MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 MAX_CAPTURE_TERMINAL_BYTES = 64 * 1024
 
 _CAPTURE_SOURCE_FIELDS = (
@@ -720,7 +719,7 @@ def _capture_decision_bytes(
     chosen_at: datetime | None,
 ) -> bytes:
     from llm_client import LLMResult
-    from reliable_memory import canonical_json_bytes, validate_schema
+    from reliable_memory import MAX_CAPTURE_DECISION_BYTES, canonical_json_bytes, validate_schema
 
     if not isinstance(result, LLMResult):
         raise TypeError("capture decision requires an LLM result")
@@ -881,7 +880,7 @@ def _existing_capture_decision(
         candidate.lstat()
     except FileNotFoundError:
         return None
-    from reliable_memory import read_runtime_bytes
+    from reliable_memory import MAX_CAPTURE_DECISION_BYTES, read_runtime_bytes
 
     encoded = read_runtime_bytes(
         candidate,

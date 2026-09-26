@@ -513,6 +513,7 @@
   "test_one_day_for_a_session_record.py": 0.0,
   "test_one_entry_does_not_refuse_a_repository.py": 0.68,
   "test_one_failed_repair_does_not_cancel_the_others.py": 0.04,
+  "test_one_file_one_bound.py": 1.26,
   "test_one_hard_python_file_does_not_freeze_the_index.py": 1.61,
   "test_one_iso_reading_for_every_python.py": 0.01,
   "test_one_limit_one_place.py": 0.19,
