@@ -41,17 +41,19 @@ BASELINE_SYNC_COMMAND = (
 )
 FETCH_DETAIL_CHARS = 300
 
-# What one update may cost the pass that calls it, by its own timeouts: two
-# fetches (the default branch and the tracked one), the baseline sync, and the
-# sixteen ordinary git calls of a full update — `rev-parse --abbrev-ref`,
-# `config --get`, `symbolic-ref`, `rev-parse FETCH_HEAD` twice, `rev-parse HEAD`
-# twice, `merge-base --is-ancestor` twice, four `diff`s, `hash-object`,
-# `cat-file` and the `merge`. The
-# nightly counts this in its own bound instead of leaving the step out of the
-# sum. Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+# What one update may cost the pass that calls it, by its own timeouts: one
+# fetch of the default branch, the baseline sync, and the sixteen ordinary git
+# calls of a full update — `rev-parse --abbrev-ref`, `config --get`,
+# `symbolic-ref`, `rev-parse FETCH_HEAD`, `rev-parse HEAD` twice,
+# `merge-base --is-ancestor` twice, five `diff`s, `hash-object`, `cat-file` and
+# the `merge`. The nightly counts this in its own bound instead of leaving the
+# step out of the sum; `tests/test_an_update_costs_what_it_says.py` runs a real
+# update and holds the counts to the code. Research:
+# docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+FETCHES_PER_UPDATE = 1
 GIT_CALLS_PER_UPDATE = 16
 WORST_CASE_SECONDS = (
-    2 * FETCH_TIMEOUT_SECONDS
+    FETCHES_PER_UPDATE * FETCH_TIMEOUT_SECONDS
     + SYNC_TIMEOUT_SECONDS
     + GIT_CALLS_PER_UPDATE * GIT_TIMEOUT_SECONDS
 )
@@ -453,7 +455,7 @@ def _set_aside(root: Path, paths: list[str]) -> dict[str, tuple[bytes, int]]:
 
 
 def _put_back(root: Path, saved: dict[str, tuple[bytes, int]]) -> None:
-    """A failed merge leaves the tree as it was: each copy set aside returns."""
+    """A failed or interrupted merge leaves the tree as it was: each copy set aside returns."""
     for path, (content, mode) in saved.items():
         target = root / path
         if not os.path.lexists(target):
@@ -465,7 +467,10 @@ def _fast_forward_over(root: Path, fetched: str, copies: list[str]) -> None:
     saved = _set_aside(root, copies)
     try:
         _git(root, "merge", "--ff-only", fetched)
-    except SelfUpdateError:
+    except BaseException:
+        # A timeout or an OSError skipped the put-back too (audit 2026-09-27 C-13);
+        # only a missing path is written, so a merge that got as far as the file
+        # is left alone.
         _put_back(root, saved)
         raise
 
