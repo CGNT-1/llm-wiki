@@ -1882,9 +1882,22 @@ def _target_snapshot(inputs: CompileInputs, path: str) -> TargetSnapshot | None:
     return next((item for item in inputs.targets if item.logical_path == path), None)
 
 
+# Fields the compile derives from the quoted bytes, never takes from the model.
+# A validated operation carries them and is validated again downstream (plan,
+# materialization), so validation drops and re-derives them: validating twice
+# gives the same operation, and a model cannot supply its own (audit 2026-09-27
+# A-2, docs/research/2026-09-27-a-derived-field-is-derived-again.md).
+_DERIVED_FIELDS = frozenset({"project"})
+
+
+def _without_derived(operation: Mapping[str, object]) -> dict[str, object]:
+    return {key: value for key, value in operation.items() if key not in _DERIVED_FIELDS}
+
+
 def _validate_semantic_operation(
     operation: dict[str, object], inputs: CompileInputs
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
+    operation = _without_derived(operation)
     _require_semantic_shape(operation)
     _require_semantic_strings(operation)
     _require_semantic_links(operation)
@@ -4458,18 +4471,30 @@ def _run(
 
     outcomes: list[BatchOutcome] = []
     for batch in batches:
-        done = _run_batch(
-            _refresh_compile_batch(batch),
-            args,
-            coordinator=coordinator,
-            deadline=deadline,
-            cancelled=cancelled,
-            owner=owner,
+        # A failed batch is recorded against its sources and the run goes on:
+        # batches are independent snapshots, and stopping here held every later
+        # day behind one bad day (audit 2026-09-27 A-3,
+        # docs/research/2026-09-27-one-bad-day-does-not-hold-the-rest.md).
+        outcomes.append(
+            _run_batch(
+                _refresh_compile_batch(batch),
+                args,
+                coordinator=coordinator,
+                deadline=deadline,
+                cancelled=cancelled,
+                owner=owner,
+            )
         )
-        if done.status != 0:
-            return done.status
-        outcomes.append(done)
     _require_compile_active(deadline, cancelled)
+    return _finish_run(args, outcomes)
+
+
+def _finish_run(args: argparse.Namespace, outcomes: Sequence[BatchOutcome]) -> int:
+    """Exit 1 when any batch failed (its failure is already recorded), else mark the run ok."""
+    failed = [item for item in outcomes if item.status != 0]
+    if failed:
+        print(f"compile_memory: {len(failed)} batch(es) failed; the rest: {_outcome_sentence(outcomes)}.")
+        return 1
     _mark_ok_unless_dry(args, outcomes=outcomes)
     print(f"compile_memory: done: {_outcome_sentence(outcomes)}.")
     return 0
@@ -4489,7 +4514,7 @@ def _failed_compile(
     *,
     prefix: str = "",
 ) -> int:
-    """Record the failure against every source in the batch and stop the run."""
+    """Record the failure against every source in the batch; the run reports it at the end."""
     error = f"{type(exc).__name__}: {exc}"
     _record_compile_source_failures(inputs, STATE_ROOT, error_code=type(exc).__name__)
     print(f"compile_memory: FAILED — {prefix}{error}")
@@ -4506,7 +4531,7 @@ def _run_batch(
     cancelled: Callable[[], bool] | None,
     owner: OwnerLease | None,
 ) -> BatchOutcome:
-    """Resolve and apply one batch; a non-zero status ends the whole run."""
+    """Resolve and apply one batch; a non-zero status marks it failed, not the run over."""
     try:
         resolved = resolve_compile_plan(
             batch.inputs,

@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- A compile plan whose evidence names a project validates and publishes again: validation drops the derived `project` field and derives it from the quoted blocks, so validating twice gives the same operation and a model cannot set it (audit 2026-09-27 A-2, my regression from B-14).
 - The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 - The CI installer job checks the installed vault in the `.venv` the install built, as the scheduler does, and a test refuses an installing job that points uv elsewhere; the Windows task check reads its hour limits through a function, so it works for any caller.
 - No test gives work it expects to finish a literal few-second deadline: 572 of them name the shared scaled timeout, and a guard refuses a new one outside a test about time running out; a full run had failed on one under load.
