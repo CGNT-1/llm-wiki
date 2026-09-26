@@ -777,6 +777,10 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 - Weights are read from the local Hugging Face cache only, like the embedding
   model's; `scripts/install_models.py` puts them there (see above). Without
   them the trace says `reranker_unavailable` and the fused order stands.
+- When the rerank's measured cost does not fit the time a question has left, it
+  is not waited for: the trace says `optional_stage_not_admitted`, the fused
+  order stands and the answer is not marked partial. `optional_stage_timeout`
+  means a stage was waited for and ran out of time.
 - `LLMWIKI_RERANKER_MODEL=off` switches it off; `LLMWIKI_RERANKER_MODEL` plus a
   40-hex `LLMWIKI_RERANKER_REVISION` name another model.
   `LLMWIKI_RERANKER_PRECISION=fp32` restores full precision at twice the time.
