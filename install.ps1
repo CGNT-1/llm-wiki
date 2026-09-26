@@ -34,22 +34,18 @@ function Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Blue }
 function Ok($msg)   { Write-Host "[OK] $msg"   -ForegroundColor Green }
 function Warn($msg) { Write-Host "[WARN] $msg"  -ForegroundColor Yellow }
 function Fail($msg) { Write-Host "[FAIL] $msg"  -ForegroundColor Red; exit 1 }
-# The llm-wiki entry in ~/.claude.json, judged as install.sh judges it: an entry that
-# points at another vault is not this install's (audit C-34,
+# The llm-wiki entry in ~/.claude.json, read by the helper install.sh asks: an entry
+# that points at another vault is not this install's (audit C-34,
 # docs/research/2026-09-25-the-installers-agree.md). The file is only read.
+# ConvertFrom-Json refused a file whose keys differ only by case, which Claude Code
+# writes for two spellings of one project path (audit 2026-09-27 C-11,
+# docs/research/2026-09-27-both-installers-read-the-claude-file-alike.md).
 function Get-ClaudeMcpState {
     param([string]$Config, [string]$VaultRoot)
-    if (-not (Test-Path -LiteralPath $Config)) { return "missing" }
-    try {
-        $parsed = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
-    } catch {
-        return "unreadable"
-    }
-    $entry = $null
-    if ($null -ne $parsed.mcpServers) { $entry = $parsed.mcpServers.'llm-wiki' }
-    if ($null -eq $entry) { return "absent" }
-    if (@($entry.args) -contains $VaultRoot) { return "current" }
-    return "elsewhere"
+    $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\installer_config.py") `
+        claude-mcp-state --config $Config --vault-root $VaultRoot 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $state) { return "unreadable" }
+    return $state
 }
 
 # The same line install.sh's claude_status_line prints for each entry state: only a
@@ -619,6 +615,10 @@ if ($claudeDetected) {
         if ($claudeMcpState -eq "elsewhere") {
             Warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
             Warn "  claude mcp remove --scope user llm-wiki"
+            Warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+        }
+        if ($claudeMcpState -eq "unreadable") {
+            Warn "~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
             Warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
         }
     }

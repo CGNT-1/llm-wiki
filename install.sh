@@ -162,19 +162,12 @@ configure_codex_mcp() {
 
 # The status line used to say "active automatic" whatever happened to the MCP
 # entry, and an entry pointing at another vault passed a plain grep. The file is
-# only read here: it is Claude Code's live state and is never rewritten in place.
+# only read: it is Claude Code's live state and is never rewritten in place.
+# install.ps1 asks the same helper, so both installers read it alike.
 claude_mcp_state() {
   local config="$1" vault_root="$2"
-  if [ ! -f "$config" ]; then
-    echo missing
-    return 0
-  fi
-  python3 - "$config" "$vault_root" <<'PY' 2>/dev/null || echo unreadable
-import json, sys
-entry = json.load(open(sys.argv[1], encoding="utf-8")).get("mcpServers", {}).get("llm-wiki")
-states = {True: "current", False: "elsewhere"}
-print("absent" if entry is None else states[sys.argv[2] in entry.get("args", [])])
-PY
+  uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/installer_config.py" \
+    claude-mcp-state --config "$config" --vault-root "$vault_root" 2>/dev/null || echo unreadable
 }
 
 claude_status_line() {
@@ -683,6 +676,9 @@ if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
   elif [ "$CLAUDE_MCP_STATE" = "elsewhere" ]; then
     warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
     warn "  claude mcp remove --scope user llm-wiki"
+    warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+  elif [ "$CLAUDE_MCP_STATE" = "unreadable" ]; then
+    warn "~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
     warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
   fi
   AGENT_STATUSES+=("$(claude_status_line "$CLAUDE_MCP_STATE")")

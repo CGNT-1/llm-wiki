@@ -97,37 +97,8 @@ def test_an_existing_checkout_is_named_with_the_way_forward(tmp_path: Path) -> N
     assert (f'bash "{tmp_path}/install.sh"' in advice[0], "move it away" in advice[1]) == (True, True)
 
 
-def _claude_config(tmp_path: Path, servers: dict[str, object] | None) -> Path:
-    path = tmp_path / "claude.json"
-    if servers is not None:
-        path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
-    return path
-
-
-@needs_bash
-@pytest.mark.parametrize(
-    ("servers", "expected"),
-    [
-        (None, "missing"),
-        ({}, "absent"),
-        ({"llm-wiki": {"args": ["run", "--directory", "/vault", "python"]}}, "current"),
-        ({"llm-wiki": {"args": ["run", "--directory", "/old-vault", "python"]}}, "elsewhere"),
-    ],
-)
-def test_the_claude_entry_is_read_not_assumed(tmp_path, servers, expected) -> None:
-    result = _call("claude_mcp_state", str(_claude_config(tmp_path, servers)), "/vault")
-
-    assert result.stdout.strip() == expected
-
-
-@needs_bash
-def test_an_unreadable_claude_file_is_not_called_active(tmp_path: Path) -> None:
-    broken = tmp_path / "claude.json"
-    broken.write_text("{not json", encoding="utf-8")
-
-    state = _call("claude_mcp_state", str(broken), "/vault").stdout.strip()
-
-    assert (state, "active automatic" in _call("claude_status_line", state).stdout) == ("unreadable", False)
+# What the Claude entry reads as, in both installers, is asked of
+# tests/test_both_installers_read_the_claude_file_alike.py.
 
 
 def _git(directory: Path, *arguments: str) -> None:

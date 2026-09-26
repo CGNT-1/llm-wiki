@@ -810,6 +810,41 @@ def _opencode_status(
     )
 
 
+def claude_mcp_state(config: Path, vault_root: str) -> str:
+    """Which state the llm-wiki entry of Claude Code's `~/.claude.json` is in.
+
+    One of missing, unreadable, absent, current, elsewhere. The file is Claude
+    Code's live state and is only read. Keys that differ only by case (two
+    project paths) are distinct JSON keys; PowerShell's ConvertFrom-Json refused
+    them, so both installers ask here. See
+    docs/research/2026-09-27-both-installers-read-the-claude-file-alike.md.
+    """
+    if not config.is_file():
+        return "missing"
+    try:
+        document = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return "unreadable"
+    return _claude_entry_state(document, vault_root)
+
+
+def _claude_entry_state(document: object, vault_root: str) -> str:
+    servers = document.get("mcpServers") if isinstance(document, dict) else None
+    entry = servers.get("llm-wiki") if isinstance(servers, dict) else None
+    if entry is None:
+        return "absent"
+    return "current" if _names_vault(entry, vault_root) else "elsewhere"
+
+
+def _names_vault(entry: object, vault_root: str) -> bool:
+    """Whether the entry's arguments name this vault, compared as the platform compares paths."""
+    arguments = entry.get("args") if isinstance(entry, dict) else None
+    if not isinstance(arguments, list):
+        return False
+    target = os.path.normcase(vault_root)
+    return any(isinstance(argument, str) and os.path.normcase(argument) == target for argument in arguments)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -830,6 +865,9 @@ def _parser() -> argparse.ArgumentParser:
     sync = subparsers.add_parser("sync-args")
     sync.add_argument("--root", type=Path, required=True)
     sync.add_argument("--environment")
+    claude = subparsers.add_parser("claude-mcp-state")
+    claude.add_argument("--config", type=Path, required=True)
+    claude.add_argument("--vault-root", required=True)
     return parser
 
 
@@ -886,7 +924,13 @@ def _configure_opencode_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _claude_mcp_state_command(args: argparse.Namespace) -> int:
+    print(claude_mcp_state(args.config, args.vault_root))
+    return 0
+
+
 _COMMANDS = {
+    "claude-mcp-state": _claude_mcp_state_command,
     "profile": _profile_command,
     "cron": _cron_command,
     "sync-args": _sync_args_command,
