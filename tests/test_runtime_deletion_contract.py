@@ -1536,15 +1536,16 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
         {"code": "legacy_protocol_unquiesced"}
     ]
     assert checks["transactions"]["status"] == "ok"
-    assert checks["queue"]["status"] == "ok", checks["queue"]
+    # Retained succeeded and cancelled work degrades nothing; the dead task is work
+    # that did not happen and is named until it is resolved (audit 2026-09-27 B-13).
+    assert (checks["queue"]["status"], checks["queue"]["details"]["dead_unresolved"]) == ("degraded", 1)
     assert checks["run_deletion"]["status"] == "ok"
     assert checks["generation"]["status"] == "ok"
     # A legacy pair is a vault that has not adopted Reliability V3, and that
-    # is the one finding here (issue #17): capture is disabled until it does.
-    # Retention itself degrades nothing; a test vault has no scheduler and has
-    # never taken a knowledge snapshot.
+    # is the other finding here (issue #17): capture is disabled until it does.
+    # A test vault has no scheduler and has never taken a knowledge snapshot.
     degraded = {check["id"] for check in report["checks"] if check["status"] != "ok"}
-    assert degraded <= {"backup", "capture", "scheduler"}, degraded
+    assert degraded <= {"backup", "capture", "scheduler", "queue"}, degraded
     assert "Session capture is disabled" in checks["capture"]["message"]
     monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
     assert "Session capture is disabled" in session_start_context.health_block()

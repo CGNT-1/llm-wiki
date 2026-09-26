@@ -2107,7 +2107,7 @@ def _scan_queue_database(
             rows, now=now, deadline=deadline, details=details, states=states
         )
         _append_queue_scan_codes(details, unknown_state, corrupt_metadata, rows)
-        details["recent_dead"] = _recent_dead_count(rows, now)
+        details["dead_unresolved"], details["oldest_dead_days"] = _dead_backlog(rows, now)
         _count_queue_side_tables(database, tables, details, now)
         _validate_queue_results(state_root, references, result_hashes, details)
         return _QueueScan(None, unknown_state, corrupt_metadata)
@@ -2122,24 +2122,31 @@ def _queue_error_state(
 
 
 def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
-    return bool(states["ready"] or states["leased"] or states["blocked"] or details.get("recent_dead"))
+    return bool(states["ready"] or states["leased"] or states["blocked"] or details.get("dead_unresolved"))
 
 
-# A task that died this week is work that did not happen: 25 of them were
-# reported healthy (audit 2026-09-26 B-23). Older dead tasks are history the
-# weekly purge exports and removes.
-DEAD_TASK_LIVE_SECONDS = 7 * 24 * 3600
+# A dead task is work that did not happen, whatever its age, until it is redriven
+# or the weekly purge exports it past the retention window. Counting only this
+# week's reported 25 unresolved captures from 08-27..09-08 as healthy while the
+# weekly that would export them had not run since 09-13 (audit 2026-09-27 B-13,
+# docs/research/2026-09-27-a-dead-task-counts-until-it-is-resolved.md). The age
+# is shown, not used to hide.
+def _dead_backlog(rows: list[sqlite3.Row], now: datetime) -> tuple[int, int | None]:
+    """(dead tasks in the queue, age in days of the oldest)."""
+    moments = [_dead_moment(row) for row in rows if row["state"] == "dead"]
+    return len(moments), _oldest_age_days([moment for moment in moments if moment is not None], now)
 
 
-def _recent_dead_count(rows: list[sqlite3.Row], now: datetime) -> int:
-    return sum(1 for row in rows if _died_recently(row, now))
+def _oldest_age_days(moments: list[datetime], now: datetime) -> int | None:
+    if not moments:
+        return None
+    return (now - min(moments)).days
 
 
-def _died_recently(row: sqlite3.Row, now: datetime) -> bool:
-    if row["state"] != "dead" or "updated_at" not in row.keys():
-        return False
-    moment = _parse_utc(row["updated_at"])
-    return moment is not None and (now - moment).total_seconds() <= DEAD_TASK_LIVE_SECONDS
+def _dead_moment(row: sqlite3.Row) -> datetime | None:
+    if "updated_at" not in row.keys():
+        return None
+    return _parse_utc(row["updated_at"])
 
 
 def _queue_status(
