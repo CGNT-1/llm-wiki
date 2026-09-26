@@ -381,6 +381,31 @@ def _drop_oldest_kinds(counters: dict) -> None:
         counters.pop(kind, None)
 
 
+def hook_object(raw: str, kind: str) -> dict:
+    """The hook's JSON object; any other input is a lost capture, recorded, and read as `{}`.
+
+    The prompt and tool hooks both turned a malformed input into `{}` and captured
+    nothing without a trace (audit 2026-09-27 C-3,
+    docs/research/2026-09-27-a-capture-that-fails-says-so.md). Empty input is not a
+    loss: a host may call a hook with nothing to say.
+    """
+    if not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        record_capture_failure(kind, "hook input is not JSON", error=error)
+        return {}
+    return _object_or_recorded(value, kind)
+
+
+def _object_or_recorded(value: object, kind: str) -> dict:
+    if isinstance(value, dict):
+        return value
+    record_capture_failure(kind, "hook input is not a JSON object")
+    return {}
+
+
 def record_capture_failure(
     kind: str,
     reason: str,

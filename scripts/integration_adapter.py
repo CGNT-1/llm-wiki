@@ -30,7 +30,7 @@ from project_journal import (
     ProjectStore,
     recover_project_handoff,
 )
-from secret_redact import redact_jsonl, redact_secrets
+from secret_redact import describe_error, redact_jsonl, redact_secrets
 from session_start_project_state import _compute_slug
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -1927,17 +1927,21 @@ def _checkpoint_log_kind(error: BaseException) -> str:
     return "project checkpoint"
 
 
-def _log_checkpoint_error(error: BaseException) -> None:
-    """Best-effort bounded diagnostics for fail-open lifecycle capture."""
+def _log_hook_error(kind: str, message: str) -> None:
+    """One line in the hook failure log; a hook never fails its host over its diagnostics."""
     try:
-        message = _bounded_checkpoint_error(error)
         log_path = STATE_ROOT / "logs" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"[{timestamp}] {_checkpoint_log_kind(error)}: {message}\n")
-    except Exception:  # noqa: BLE001
+            stream.write(f"[{timestamp}] {kind}: {message}\n")
+    except OSError:
         pass
+
+
+def _log_checkpoint_error(error: BaseException) -> None:
+    """Best-effort bounded diagnostics for fail-open lifecycle capture."""
+    _log_hook_error(_checkpoint_log_kind(error), _bounded_checkpoint_error(error))
 
 
 def _observe_checkpoint_fail_open(envelope: EventEnvelope) -> None:
@@ -2361,8 +2365,14 @@ def _cleanup_runtime_transient(path: Path) -> None:
 
 
 def _run_maintenance_command(script: str, argument: str) -> None:
+    """Run one session-start drain; a failure is logged, never raised into the hook.
+
+    The exit code and a spawn failure were both dropped, so a drain that failed on
+    every session start left nothing to read (audit 2026-09-27 C-3,
+    docs/research/2026-09-27-a-capture-that-fails-says-so.md).
+    """
     try:
-        subprocess.run(
+        completed = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / script), argument],
             cwd=str(ROOT),
             stdin=subprocess.DEVNULL,
@@ -2371,8 +2381,11 @@ def _run_maintenance_command(script: str, argument: str) -> None:
             check=False,
             timeout=MAINTENANCE_DRAIN_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    except (OSError, subprocess.SubprocessError) as error:
+        _log_hook_error("session-start maintenance", f"{script} {argument}: {describe_error(error)}")
+        return
+    if completed.returncode != 0:
+        _log_hook_error("session-start maintenance", f"{script} {argument} exited {completed.returncode}")
 
 
 def _run_session_start_maintenance() -> int:
@@ -2381,8 +2394,8 @@ def _run_session_start_maintenance() -> int:
     _catch_up_missed_nightly()
     try:
         spawn_compile_if_idle()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as error:  # noqa: BLE001 - session start never fails over a compile spawn
+        _log_hook_error("session-start compile", describe_error(error))
     return 0
 
 
