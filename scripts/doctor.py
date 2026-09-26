@@ -31,7 +31,7 @@ import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
 from evidence_resolver import _daily_part_bounds
-from install_control import validate_install_state
+from install_control import SCHEDULER_LIMIT_HOURS, validate_install_state
 from iso_time import utc_text
 from reliable_memory import (
     open_readonly_operational_db,
@@ -5419,6 +5419,8 @@ def _with_findings(nightly: dict, verdicts: tuple[tuple[str, str] | None, ...]) 
 # 2026-09-24; a vault on which it has never recorded a run is not degraded for
 # that. See docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md.
 WEEKLY_FRESH_SECONDS = 8 * 24 * 3600
+# The scheduler kills a weekly after its limit; past that, a run with no result is over.
+WEEKLY_LIMIT_SECONDS = SCHEDULER_LIMIT_HOURS["weekly"] * 3600
 _SEVERITY = {"ok": 0, "skipped": 1, "degraded": 2, "error": 3}
 
 
@@ -5433,11 +5435,46 @@ def _weekly_verdict(state: dict, now: datetime) -> tuple[str, str] | None:
 
 
 def _weekly_lateness(state: dict, now: datetime) -> str | None:
+    checks = (_weekly_stale_note, _weekly_never_completed_note, _weekly_unfinished_note)
+    return next((note for note in (check(state, now) for check in checks) if note), None)
+
+
+def _weekly_stale_note(state: dict, now: datetime) -> str | None:
     if _weekly_is_stale(_parse_utc(state.get("last_weekly_at")), now):
         return "Weekly maintenance is stale."
-    if _weekly_never_ran_but_skipped(state):
+    return None
+
+
+def _weekly_never_completed_note(state: dict, now: datetime) -> str | None:
+    """No weekly run on record although one was due: skipped, or due for over a period.
+
+    A weekly that never starts leaves no skip either; the nightly's first success
+    (`weekly_due_since`) is the clock (audit 2026-09-27 B-15).
+    """
+    if state.get("last_weekly_at") is not None:
+        return None
+    due = _parse_utc(state.get("weekly_due_since"))
+    overdue = due is not None and (now - due).total_seconds() > WEEKLY_FRESH_SECONDS
+    if overdue or _weekly_never_ran_but_skipped(state):
         return "Weekly maintenance has never completed."
     return None
+
+
+def _weekly_finished_at(state: dict) -> datetime | None:
+    failure = state.get("last_weekly_failure")
+    failed_at = _parse_utc(failure.get("failed_at")) if isinstance(failure, dict) else None
+    return _parse_utc(state.get("last_weekly_at")) or failed_at
+
+
+def _weekly_unfinished_note(state: dict, now: datetime) -> str | None:
+    """A weekly that started, outlived its scheduler limit, and left no result."""
+    started = _parse_utc(state.get("last_weekly_started_at"))
+    if started is None or (now - started).total_seconds() <= WEEKLY_LIMIT_SECONDS:
+        return None
+    finished = _weekly_finished_at(state)
+    if finished is not None and finished >= started:
+        return None
+    return f"The last weekly started at {state['last_weekly_started_at']} and did not finish."
 
 
 def _weekly_never_ran_but_skipped(state: dict) -> bool:

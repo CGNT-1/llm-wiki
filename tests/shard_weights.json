@@ -249,6 +249,7 @@
   "test_a_verified_digest_is_remembered.py": 1.62,
   "test_a_verified_first_install_then_follows_main.py": 6.58,
   "test_a_weekly_pass_counts_what_failed.py": 0.0,
+  "test_a_weekly_that_never_finishes_is_seen.py": 0.0,
   "test_a_weekly_waits_for_the_nightly.py": 0.07,
   "test_a_wider_fetch_is_judged_by_what_is_new.py": 0.06,
   "test_a_windows_name_is_read_wherever_an_acl_is_checked.py": 0.03,

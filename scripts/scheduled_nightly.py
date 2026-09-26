@@ -148,6 +148,9 @@ def _record_nightly_result(today: str, failures: int, error: str | None = None) 
             # The date alone cannot say whether a 03:00 run is late; the health
             # check needs an instant to measure an interval against.
             state["last_nightly_at"] = timestamp
+            # From the first scheduled night on, a weekly is due; doctor measures a
+            # weekly that never completed against this (audit 2026-09-27 B-15).
+            state.setdefault("weekly_due_since", timestamp)
             state.pop("last_nightly_failure", None)
 
     update_state(_mutate)
