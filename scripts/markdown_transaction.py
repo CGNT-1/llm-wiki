@@ -595,16 +595,68 @@ def _coordinator_v3_object_matches(
     ) == _normalized_coordinator_sql(sql)
 
 
-def _coordinator_v3_schema_complete(database: sqlite3.Connection) -> bool:
-    objects = database.execute(
-        """SELECT type, name FROM sqlite_schema
-           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
-    ).fetchall()
-    expected = {("table", name) for name, _sql in _COORDINATOR_V3_TABLE_SQL}
-    return {(str(row[0]), str(row[1])) for row in objects} == expected and all(
-        _coordinator_v3_object_matches(database, name, sql)
-        for name, sql in _COORDINATOR_V3_TABLE_SQL
+# Indexes on the child keys the history prune deletes against: without them every
+# deleted transaction row scans both checkpoint tables (audit 2026-09-27 B-1, owner
+# approved; docs/research/2026-09-27-the-checkpoint-keys-are-indexed.md). Optional in
+# a v3 database — one built before them is complete without them, and the prune
+# creates them before it deletes. They are not part of COORDINATOR_V3_SCHEMA_SHA256,
+# which names the table contract recorded adoptions were written against.
+_COORDINATOR_V3_INDEX_SQL = (
+    (
+        "project_checkpoints_transaction",
+        "CREATE INDEX project_checkpoints_transaction ON project_checkpoints(transaction_id)",
+    ),
+    (
+        "project_checkpoint_attempts_transaction",
+        "CREATE INDEX project_checkpoint_attempts_transaction ON project_checkpoint_attempts(transaction_id)",
+    ),
+)
+_COORDINATOR_V3_INDEXES = dict(_COORDINATOR_V3_INDEX_SQL)
+
+
+def _known_coordinator_index(database: sqlite3.Connection, kind: object, name: object) -> bool:
+    if kind != "index" or name not in _COORDINATOR_V3_INDEXES:
+        return False
+    row = database.execute("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (name,)).fetchone()
+    return row is not None and _normalized_coordinator_sql(row[0]) == _normalized_coordinator_sql(
+        _COORDINATOR_V3_INDEXES[str(name)]
     )
+
+
+def _ensure_coordinator_v3_indexes(database: sqlite3.Connection) -> None:
+    for _name, sql in _COORDINATOR_V3_INDEX_SQL:
+        database.execute(sql.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1))
+
+
+def _schema_objects(database: sqlite3.Connection) -> set[tuple[str, str]]:
+    rows = database.execute("SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")
+    return {(str(row[0]), str(row[1])) for row in rows}
+
+
+def _coordinator_v3_tables_match(database: sqlite3.Connection) -> bool:
+    return all(_coordinator_v3_object_matches(database, name, sql) for name, sql in _COORDINATOR_V3_TABLE_SQL)
+
+
+_COORDINATOR_V3_TABLES = frozenset(("table", name) for name, _sql in _COORDINATOR_V3_TABLE_SQL)
+
+
+def _tables_of(objects: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    return {item for item in objects if item[0] == "table"}
+
+
+def _only_known_indexes(database: sqlite3.Connection, others: set[tuple[str, str]]) -> bool:
+    return all(_known_coordinator_index(database, kind, name) for kind, name in others)
+
+
+def _coordinator_v3_schema_complete(database: sqlite3.Connection) -> bool:
+    """Exactly the v3 tables, each as declared, plus only the known optional indexes."""
+    objects = _schema_objects(database)
+    tables = _tables_of(objects)
+    if tables != _COORDINATOR_V3_TABLES:
+        return False
+    if not _only_known_indexes(database, objects - tables):
+        return False
+    return _coordinator_v3_tables_match(database)
 
 
 def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
@@ -799,13 +851,14 @@ def _coordinator_schema_objects(
 def _coordinator_schema_exact(
     database: sqlite3.Connection, objects: list[tuple[str, str]]
 ) -> bool:
-    expected = {name: sql for name, sql in _COORDINATOR_V3_TABLE_SQL}
-    return all(
-        kind == "table"
-        and name in expected
-        and _coordinator_v3_object_matches(database, str(name), expected[str(name)])
-        for kind, name in objects
-    )
+    return all(_coordinator_v3_object_known(database, kind, name) for kind, name in objects)
+
+
+def _coordinator_v3_object_known(database: sqlite3.Connection, kind: object, name: object) -> bool:
+    expected = dict(_COORDINATOR_V3_TABLE_SQL)
+    if kind != "table":
+        return _known_coordinator_index(database, kind, name)
+    return name in expected and _coordinator_v3_object_matches(database, str(name), expected[str(name)])
 
 
 def _require_rebuildable_schema(
@@ -7624,6 +7677,8 @@ class MarkdownCoordinator:
 
     def _prune_attempts(self, cutoff: str) -> int:
         with self.writer_gate(), self._connect() as database, begin_immediate(database):
+            if getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT:
+                _ensure_coordinator_v3_indexes(database)
             spent = database.execute(_PRUNE_SPENT_RESERVATIONS).rowcount
             attempts = spent + database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
             database.execute(_RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS, (cutoff,))
