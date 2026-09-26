@@ -678,7 +678,7 @@ if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
     warn "  claude mcp remove --scope user llm-wiki"
     warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
   elif [ "$CLAUDE_MCP_STATE" = "unreadable" ]; then
-    warn "~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
+    warn "The file ~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
     warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
   fi
   AGENT_STATUSES+=("$(claude_status_line "$CLAUDE_MCP_STATE")")

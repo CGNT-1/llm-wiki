@@ -618,7 +618,7 @@ if ($claudeDetected) {
             Warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
         }
         if ($claudeMcpState -eq "unreadable") {
-            Warn "~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
+            Warn "The file ~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
             Warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
         }
     }
