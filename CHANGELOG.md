@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- Five released changelog sections no longer carry a 2026-09-26 line copied into them by mistake, and a test refuses any entry that appears in two sections (audit 2026-09-27 B-18).
 - One compile batch that fails no longer stops the run: its failure is recorded against its sources, the later batches still run, and the run exits 1 at the end (audit 2026-09-27 A-3).
 - A compile plan whose evidence names a project validates and publishes again: validation drops the derived `project` field and derives it from the quoted blocks, so validating twice gives the same operation and a model cannot set it (audit 2026-09-27 A-2, my regression from B-14).
 - The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
@@ -775,7 +776,6 @@ the legacy index files are no longer read (see Removed).
   unaffected — any agent that speaks MCP can still use the vault.
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 
 - **The health and context resources are readable.** The server's read handler
   returned the protocol model `TextResourceContents` where the MCP SDK 1.29
@@ -1560,7 +1560,6 @@ state, including everything found and fixed during the audit week.
   deterministic rendering, and precise MCP routing.
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 
 - Bound untrusted LSP runtime JSON nesting before decoding, independently of the
   process-wide Python recursion limit changed by optional dependencies.
@@ -1779,7 +1778,6 @@ open findings as of the final audit pass.
 ## [3.3.3] — 2026-07-10
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 - **GitHub Actions Gitleaks** — upgraded to the Node 24 `v3.0.0` action pinned by immutable commit SHA. The previous action attempted to download the removed Gitleaks 8.24.3 Windows archive and failed before tests ran.
 
 ### Tests
@@ -1791,7 +1789,6 @@ open findings as of the final audit pass.
 ## [3.3.2] — 2026-07-09
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 - **Three-zone layout hardening** — removed machine-local `D:\projects\` / `D:\tools-agent\` paths from public `AGENTS.md` + `CLAUDE.md` (they leaked the author's disk layout into a public repo)
 - **maybe_compile PID race** — placeholder PID-0 lock is now treated as "alive", preventing a concurrent-spawn race during the detached-spawn window
 - **agent_timeline breadcrumb regex** — now matches the real writer format (`tool | sid | slug | tool\` target`); tool-event attribution was silently dead
@@ -1847,7 +1844,6 @@ open findings as of the final audit pass.
 - Benchmark scans flat notes (reproducible on public tree)
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 - Path traversal via LLM `category`; Codex wrapper `exit` killing shell; flush `--event` mapping
 - OpenCode timestamp format (`[HH:MM:SS]`); broken QA dir; lint double-scan / wrong index path
 - Doc falsehoods (test counts, install URLs); tracked wikilinks (0 missing)
