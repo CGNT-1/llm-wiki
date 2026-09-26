@@ -672,6 +672,7 @@
   "test_the_installer_says_what_it_needs.py": 5.32,
   "test_the_installers_agree.py": 0.02,
   "test_the_installers_register_claude_mcp_alike.py": 0.01,
+  "test_the_installers_say_which_branch_and_which_warning.py": 0.34,
   "test_the_json_queue_import_goes.py": 2.07,
   "test_the_keys_are_indexed_beside_the_turn.py": 0.79,
   "test_the_keys_have_one_reader_and_a_turn_is_not_asked_forever.py": 3.3,

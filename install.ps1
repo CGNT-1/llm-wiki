@@ -144,11 +144,13 @@ function Get-ExistingTargetAdvice([string]$Target) {
     }
     return "Remote install target already exists: $Target. It is not an LLM-Wiki checkout; move it away and run the same command again"
 }
-# The nightly update skips a detached head, so a checkout its operator detached is told so.
+# What the nightly update does with this checkout, as self_update.py decides it: only
+# the default branch is followed, and a detached head is skipped.
 function Get-CodeUpdateNote([string]$VaultRoot) {
-    & git -C $VaultRoot symbolic-ref -q HEAD *> $null
-    if ($LASTEXITCODE -eq 0) { return "nightly fast-forward of the checked-out branch" }
-    return "none - this checkout is pinned to one commit, which the nightly update skips; update it by hand with git"
+    $note = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\self_update.py") `
+        --note $VaultRoot 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $note) { return "unknown - the nightly update target could not be read" }
+    return $note
 }
 function Protect-PushUrls([string]$VaultRoot) {
     $remoteResult = Invoke-NativeCommand git @("-C", $VaultRoot, "remote") -CaptureOutput -ReturnResult
@@ -377,13 +379,15 @@ if (-not [string]::IsNullOrWhiteSpace($configuredTestTimeout)) {
         Fail "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS must be a positive integer"
     }
 }
+# The smoke's own deadline is two thirds of the bound, rounded up, as in install.sh.
+$smokeDeadlineSeconds = [int][math]::Ceiling($testTimeoutSeconds * 2 / 3)
 $testTimeoutMilliseconds = [int]($testTimeoutSeconds * 1000)
 $testProcess = $null
 $testFailure = $null
 try {
     $testProcess = Start-Process `
         -FilePath "uv" `
-        -ArgumentList "run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120" `
+        -ArgumentList "run --locked --no-sync python scripts/install_smoke.py --deadline-seconds $smokeDeadlineSeconds" `
         -NoNewWindow `
         -PassThru
     # Windows PowerShell 5.1 needs an open handle to retain a fast process's exit code.
@@ -719,6 +723,10 @@ Write-Host ""
 Write-Host "==============================================" -ForegroundColor Green
 if ($syncWarning -or $schedulerWarning) {
     Write-Host "  LLM-Wiki installed with warnings" -ForegroundColor Yellow
+    if ($syncWarning) {
+        Write-Host "  The runtime synchronization named the checks that needed attention (the doctor line above);"
+        Write-Host "  some are settled by the later steps. For the state now: uv run --locked --no-sync python scripts/doctor.py"
+    }
 } else {
     Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green
 }

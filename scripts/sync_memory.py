@@ -485,10 +485,25 @@ def _repair_actions(apply: bool) -> set[str] | None:
     return None
 
 
-def _final_doctor_message(status: str) -> str:
+def _attention(report: dict) -> dict[str, str]:
+    """Each doctor check that is not ok, with its own message."""
+    return {
+        str(check.get("id")): str(check.get("message") or check.get("status"))
+        for check in report.get("checks", [])
+        if check.get("status") != "ok"
+    }
+
+
+def _final_doctor_message(status: str, attention: dict[str, str]) -> str:
+    """The verdict, and when it is not ok, which checks made it so.
+
+    "Requires attention" alone left a fresh install ending "with warnings" and no
+    way to tell which; see docs/research/2026-09-27-the-installers-say-which-branch-and-which-warning.md.
+    """
     if status == "ok":
         return "Final doctor check completed."
-    return "Final doctor check requires attention."
+    named = "; ".join(f"{check_id}: {message}" for check_id, message in attention.items())
+    return f"Final doctor check requires attention - {named or 'doctor named no check'}"
 
 
 def _skipped_by_limit(action_id: str) -> dict:
@@ -596,11 +611,12 @@ class _SyncRun:
     def final_doctor_action(self) -> dict:
         report = self.doctor_report(repair=False, refresh=True)
         status = _mapped_status(str(report.get("overall_status", "error")))
+        attention = _attention(report)
         return _result(
             "doctor",
             status,
-            _final_doctor_message(status),
-            {"overall_status": report.get("overall_status", "error")},
+            _final_doctor_message(status, attention),
+            {"overall_status": report.get("overall_status", "error"), "attention": attention},
         )
 
     def action(self, action_id: str) -> dict:

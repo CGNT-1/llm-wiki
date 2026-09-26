@@ -14,6 +14,7 @@ See knowledge/notes/automatic-code-update-decision.md.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import subprocess
@@ -506,3 +507,44 @@ def _update_over_copies(root: Path, head: str, fetched: str) -> dict:
     if isinstance(copies, dict):
         return copies
     return _merged_update(root, head, fetched, copies)
+
+
+# What the installers print for the checkout they leave, by the reason
+# `_update_target` stops with: they used to promise a fast-forward of whatever
+# branch was checked out (audit 2026-09-27 C-12,
+# docs/research/2026-09-27-the-installers-say-which-branch-and-which-warning.md).
+_TARGET_NOTES = {
+    "detached_head": (
+        "none - this checkout is pinned to one commit, which the nightly update skips; "
+        "update it by hand with git"
+    ),
+    "no_tracking_remote": "none - the checked-out branch tracks no remote, so the nightly update skips it",
+    "not_on_default_branch": (
+        "none while {branch} is checked out - the nightly update follows only the default "
+        "branch; switch to it with git"
+    ),
+}
+
+
+def update_target_note(root: Path | str) -> str:
+    """What the nightly update will do with this checkout, in the installers' words."""
+    try:
+        target = _update_target(Path(root))
+    except (OSError, subprocess.TimeoutExpired, SelfUpdateError) as error:
+        return f"unknown - {describe_error(error)}"
+    if isinstance(target, dict):
+        return _TARGET_NOTES[target["reason"]].format(**target)
+    branch, remote = target
+    return f"nightly fast-forward of {branch}, the default branch of {remote}"
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Say what the nightly code update does with a checkout.")
+    parser.add_argument("--note", type=Path, required=True, metavar="ROOT", help="the checkout to describe")
+    args = parser.parse_args(argv)
+    print(update_target_note(args.note))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

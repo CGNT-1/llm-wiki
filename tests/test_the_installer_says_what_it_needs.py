@@ -5,6 +5,7 @@ Research: `docs/research/2026-09-17-the-installer-says-what-it-needs-and-what-it
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -33,11 +34,31 @@ needs_pwsh = pytest.mark.skipif(_pwsh() is None, reason="PowerShell is not insta
 _HELPERS = {"fetch_pinned_checkout": ("pinned_fetch", "pinned_branch")}
 
 
+# `uv run ... python <vault>/scripts/<helper> <args>` becomes this Python running the
+# repository's own helper: the checkouts under test are bare git trees, not vaults.
+UV_STUB_SH = (
+    "uv() {\n"
+    "  while [[ $# -gt 0 && $1 != python ]]; do shift; done\n"
+    '  local helper="$TEST_SCRIPTS/${2##*/}"\n'
+    "  shift 2\n"
+    '  command "$TEST_PYTHON" "$helper" "$@"\n'
+    "}\n"
+)
+UV_STUB_PS1 = (
+    "function uv {\n"
+    "    $at = [array]::IndexOf($args, 'python')\n"
+    "    $helper = Join-Path $env:TEST_SCRIPTS (Split-Path -Leaf $args[$at + 1])\n"
+    "    & $env:TEST_PYTHON $helper @($args | Select-Object -Skip ($at + 2))\n"
+    "}\n"
+)
+STUB_ENV = {**os.environ, "TEST_PYTHON": sys.executable, "TEST_SCRIPTS": str(TESTS.parent / "scripts")}
+
+
 def _call(name: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     functions = "\n".join(_shell_function(INSTALL_SH, part) for part in (*_HELPERS.get(name, ()), name))
-    script = f"set -euo pipefail\n{functions}\n{name} \"$@\"\n"
+    script = f"set -euo pipefail\n{UV_STUB_SH}{functions}\n{name} \"$@\"\n"
     return subprocess.run(
-        [_bash(), "-c", script, name, *arguments], capture_output=True, text=True, check=False
+        [_bash(), "-c", script, name, *arguments], capture_output=True, text=True, check=False, env=STUB_ENV
     )
 
 
@@ -127,7 +148,7 @@ def test_a_pinned_checkout_is_told_it_will_not_update(checkout: Path) -> None:
 def test_the_windows_installer_says_the_same(checkout: Path, tmp_path: Path) -> None:
     names = ("Get-PinnedCheckout", "Get-ExistingTargetAdvice", "Get-CodeUpdateNote")
     target = tmp_path / "LLM-wiki"
-    command = _powershell_functions(ROOT / "install.ps1", names) + (
+    command = UV_STUB_PS1 + _powershell_functions(ROOT / "install.ps1", names) + (
         f"$fetched = Get-PinnedCheckout -Target {json.dumps(str(target))} "
         f"-Url {json.dumps(str(tmp_path / 'no-such-repository'))} -Commit {'a' * 40} 6>$null 2>$null\n"
         f"$note = Get-CodeUpdateNote {json.dumps(str(checkout))}\n"
@@ -137,7 +158,7 @@ def test_the_windows_installer_says_the_same(checkout: Path, tmp_path: Path) -> 
 
     result = subprocess.run(
         [_pwsh(), "-NoProfile", "-NonInteractive", "-Command", command],
-        capture_output=True, text=True, timeout=120, check=False,
+        capture_output=True, text=True, timeout=120, check=False, env=STUB_ENV,
     )
 
     assert result.returncode == 0, result.stderr

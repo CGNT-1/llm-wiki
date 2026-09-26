@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +21,9 @@ from tests.test_the_installer_says_what_it_needs import (
     INSTALL_PS1,
     INSTALL_SH,
     ROOT,
+    STUB_ENV,
+    UV_STUB_PS1,
+    UV_STUB_SH,
     _bash,
     _powershell_functions,
     _pwsh,
@@ -77,25 +79,15 @@ def test_both_installers_ask_the_same_helper_and_name_the_unreadable_file() -> N
     assert (asked, advised) == ([True, True], [True, True])
 
 
-# `uv run ... python <script> <args>` becomes `<this python> <script> <args>`.
-_UV_STUB_SH = 'uv() {\n  while [[ $# -gt 0 && $1 != python ]]; do shift; done\n  shift\n  command "$TEST_PYTHON" "$@"\n}\n'
-_UV_STUB_PS1 = (
-    "function uv {\n"
-    "    $rest = @($args | Select-Object -Skip ([array]::IndexOf($args, 'python') + 1))\n"
-    "    & $env:TEST_PYTHON @rest\n"
-    "}\n"
-)
-
-
 @needs_bash
 def test_install_sh_reads_a_file_whose_keys_differ_by_case(tmp_path: Path) -> None:
     config = _config(tmp_path, CASE_KEYS.replace(VAULT, str(ROOT)))
-    script = f"set -euo pipefail\n{_UV_STUB_SH}{_shell_function(INSTALL_SH, 'claude_mcp_state')}\nclaude_mcp_state \"$@\"\n"
+    script = f"set -euo pipefail\n{UV_STUB_SH}{_shell_function(INSTALL_SH, 'claude_mcp_state')}\nclaude_mcp_state \"$@\"\n"
 
     result = subprocess.run(
         [_bash(), "-c", script, "claude_mcp_state", str(config), str(ROOT)],
         capture_output=True, text=True, check=False, timeout=LONG_TIMEOUT,
-        env={**os.environ, "TEST_PYTHON": sys.executable},
+        env=STUB_ENV,
     )
 
     assert result.stdout.strip() == "current"
@@ -104,14 +96,14 @@ def test_install_sh_reads_a_file_whose_keys_differ_by_case(tmp_path: Path) -> No
 @needs_pwsh
 def test_install_ps1_reads_a_file_whose_keys_differ_by_case(tmp_path: Path) -> None:
     config = _config(tmp_path, CASE_KEYS.replace(VAULT, json.dumps(str(ROOT))[1:-1]))
-    script = _UV_STUB_PS1 + _powershell_functions(ROOT / "install.ps1", ("Get-ClaudeMcpState",)) + (
+    script = UV_STUB_PS1 + _powershell_functions(ROOT / "install.ps1", ("Get-ClaudeMcpState",)) + (
         f"Get-ClaudeMcpState -Config {json.dumps(str(config))} -VaultRoot {json.dumps(str(ROOT))}\n"
     )
 
     result = subprocess.run(
         [_pwsh(), "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True, text=True, check=False, timeout=LONG_TIMEOUT,
-        env={**os.environ, "TEST_PYTHON": sys.executable},
+        env=STUB_ENV,
     )
 
     assert result.stdout.strip().splitlines()[-1:] == ["current"]

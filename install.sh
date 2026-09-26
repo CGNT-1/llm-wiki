@@ -178,14 +178,12 @@ claude_status_line() {
   esac
 }
 
-# The nightly update skips a detached head, so a checkout its operator detached to
-# freeze it is told so. A remote bootstrap is no longer such a checkout (see below).
+# What the nightly update does with this checkout, in the words of the code that
+# does it: it follows only the default branch, and skips a detached head. A remote
+# bootstrap is no longer detached (see below).
 code_update_note() {
-  if git -C "$1" symbolic-ref -q HEAD >/dev/null 2>&1; then
-    echo "nightly fast-forward of the checked-out branch"
-    return 0
-  fi
-  echo "none - this checkout is pinned to one commit, which the nightly update skips; update it by hand with git"
+  uv run --locked --no-sync --directory "$1" python "$1/scripts/self_update.py" --note "$1" 2>/dev/null \
+    || echo "unknown - the nightly update target could not be read"
 }
 
 # A failed fetch used to leave the directory `git init` had made, and the next
@@ -348,6 +346,10 @@ testTimeoutSeconds="${LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS:-180}"
 case "$testTimeoutSeconds" in
   ""|*[!0-9]*|0) fail "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS must be a positive integer" ;;
 esac
+# The smoke's own deadline is two thirds of the bound, rounded up: 120 s of the
+# default 180, leaving the rest for it to report and exit before it is stopped.
+# A fixed 120 meant a longer bound could never give the smoke longer.
+smokeDeadlineSeconds=$(( (testTimeoutSeconds * 2 + 2) / 3 ))
 testPid=""
 testPgid=""
 testTimerPid=""
@@ -439,7 +441,7 @@ start_test_child() {
     *m*) testMonitorMode=on ;;
     *) testMonitorMode=off; set -m ;;
   esac
-  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120 &
+  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "$smokeDeadlineSeconds" &
   testPid=$! testPgid=$!
   (
     trap 'exit 0' HUP INT TERM
@@ -812,6 +814,8 @@ echo ""
 echo "=============================================="
 if [ "$SYNC_WARNING" -eq 1 ]; then
   echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
+  echo "  The runtime synchronization named the checks that needed attention (the doctor line above);"
+  echo "  some are settled by the later steps. For the state now: uv run --locked --no-sync python scripts/doctor.py"
 else
   echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
 fi

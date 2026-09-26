@@ -379,7 +379,7 @@ _SHELL_SMOKE_FORBIDDEN = (
 )
 _SHELL_SMOKE_REQUIRED_PATTERNS = (
     r"trap .*EXIT",
-    r"uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120\s*&",
+    r'uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "\$smokeDeadlineSeconds"\s*&',
 )
 _SHELL_SMOKE_FORBIDDEN_PATTERNS = (r'=\s*"\$\(uv run .*install_smoke',)
 
