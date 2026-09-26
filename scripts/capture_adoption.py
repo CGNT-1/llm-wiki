@@ -174,7 +174,9 @@ def _not_skipped(
     return [record for record in records if str(record["intent_id"]) not in skipped]
 
 
-def _next_records(reader, outcome: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+def _next_records(
+    reader, outcome: dict[str, Any], limit: int, done_key: str = "adopted"
+) -> list[dict[str, Any]]:
     """The orphans still owed to this pass; a skipped record does not use the bound up.
 
     A skipped record is left untouched, so it is among the oldest again on every
@@ -182,11 +184,25 @@ def _next_records(reader, outcome: dict[str, Any], limit: int) -> list[dict[str,
     to the orphans behind them instead of stalling at a head of bad records.
     See `docs/research/2026-09-17-bad-intents-do-not-use-up-the-adoption-bound.md`.
     """
-    remaining = limit - len(outcome["adopted"])
+    remaining = limit - len(outcome[done_key])
     skipped = {entry["intent_id"] for entry in outcome["skipped"]}
     if remaining < 1 or len(skipped) >= MAX_SKIPPED_INTENTS_PER_PASS:
         return []
     return _not_skipped(reader(remaining + len(skipped)), skipped)[:remaining]
+
+
+def _drain(reader, outcome: dict[str, Any], limit: int, done_key: str, batch) -> dict[str, Any]:
+    """Read and handle windows until the bound is met or only skipped records remain.
+
+    One loop for both recovery passes: the pending pass read one fixed window, so a
+    head of records it could not finish hid every half-published intent behind it
+    (audit 2026-09-27 C-4, docs/research/2026-09-27-both-recovery-passes-look-past-a-bad-head.md).
+    """
+    while True:
+        records = _next_records(reader, outcome, limit, done_key)
+        if not records:
+            return outcome
+        batch(records, outcome)
 
 
 def _adopt_records(
@@ -197,11 +213,11 @@ def _adopt_records(
     limit: int,
 ) -> dict[str, Any]:
     outcome: dict[str, Any] = {"examined": 0, "adopted": [], "skipped": []}
-    while True:
-        records = _next_records(reader, outcome, limit)
-        if not records:
-            return outcome
-        _adopt_batch(queue, coordinator, state_root, records, outcome)
+
+    def batch(records: list[dict[str, Any]], result: dict[str, Any]) -> None:
+        _adopt_batch(queue, coordinator, state_root, records, result)
+
+    return _drain(reader, outcome, limit, "adopted", batch)
 
 
 def adopt_orphaned_capture_intents(
@@ -231,8 +247,9 @@ PENDING_INTENT_RECOVERY_SECONDS = 60
 
 
 def _stale_pending_cutoff(now: datetime | None = None) -> str:
+    """The queue's own stored width (microseconds, `+00:00`), so text order is time order."""
     moment = now or datetime.now(timezone.utc)
-    return (moment - timedelta(seconds=PENDING_INTENT_RECOVERY_SECONDS)).isoformat()
+    return (moment - timedelta(seconds=PENDING_INTENT_RECOVERY_SECONDS)).isoformat(timespec="microseconds")
 
 
 def _ready_relative_path(record: dict[str, Any]) -> str:
@@ -301,9 +318,15 @@ def complete_pending_capture_intents(
     reader = getattr(queue, "pending_capture_intents", None)
     if reader is None:
         return {**outcome, "reason": "unsupported"}
-    records = reader(limit, _stale_pending_cutoff(now))
-    _complete_pending_batch(queue, coordinator, Path(state_root), records, outcome)
-    return outcome
+    cutoff = _stale_pending_cutoff(now)
+
+    def window(count: int) -> list[dict[str, Any]]:
+        return reader(count, cutoff)
+
+    def batch(records: list[dict[str, Any]], result: dict[str, Any]) -> None:
+        _complete_pending_batch(queue, coordinator, Path(state_root), records, result)
+
+    return _drain(window, outcome, limit, "completed", batch)
 
 
 # Both recovery passes, in the order a capture needs them: a half-published intent

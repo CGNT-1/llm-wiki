@@ -318,6 +318,7 @@
   "test_bitemporal_claims.py": 0.09,
   "test_blackboard.py": 299.02,
   "test_blackboard_release_retry.py": 87.19,
+  "test_both_recovery_passes_look_past_a_bad_head.py": 1.33,
   "test_bounded_io.py": 0.02,
   "test_build_tiers.py": 0.6,
   "test_capture_diagnostics.py": 1.23,
