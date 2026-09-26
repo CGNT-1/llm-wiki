@@ -10,7 +10,6 @@ See docs/research/2026-09-27-a-sectionless-configuration-is-the-servers-own.md.
 from __future__ import annotations
 
 import pytest
-
 from lsp_profiles import REGISTRY
 from pyright_session import _configuration_result
 
