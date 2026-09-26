@@ -38,6 +38,7 @@ from pinned_download import (
     MAX_MEMBERS,
     MAX_PATH_COMPONENTS,
     NETWORK_TIMEOUT_SECONDS,
+    retry_transient,
 )
 from pinned_download import open_pinned_url as _open_pinned_url
 from reliable_memory import (
@@ -2658,13 +2659,11 @@ def _response_reader(response: object) -> object:
 
 
 def _next_download_chunk(response: object, read1: object, deadline: float) -> bytes:
-    try:
-        _set_response_read_timeout(response, deadline)
-        chunk = read1(COPY_CHUNK_BYTES)
-    except TimeoutError:
-        raise
-    except OSError as exc:
-        raise PyrightInstallError("pyright_download_failed") from exc
+    # A reset mid-stream stays an OSError here, so the retry around the whole
+    # download can tell it from a refusal; `_download_artifact` names it after the
+    # last attempt (audit 2026-09-27 C-10).
+    _set_response_read_timeout(response, deadline)
+    chunk = read1(COPY_CHUNK_BYTES)
     if not isinstance(chunk, bytes):
         raise PyrightInstallError("pyright_download_response_invalid")
     return chunk
@@ -2712,14 +2711,29 @@ def _downloaded_bytes(
     return sha256.hexdigest(), sha512.digest()
 
 
+def _download_attempt(destination: _OwnedFile, deadline: float) -> tuple[str, bytes]:
+    """One whole download from the start of the file: a retry overwrites what a reset left.
+
+    The pinned artifact is the same bytes every time, so a complete attempt writes at
+    least as far as any partial one did, and the digests check what was kept.
+    """
+    _seek_start(destination.handle)
+    return _downloaded_bytes(_opened_download(deadline), destination, deadline)
+
+
 def _download_artifact(
     destination: _OwnedFile,
     deadline: float,
 ) -> tuple[str, bytes]:
+    """The pinned package, tried again after a transient network error.
+
+    The language-server installer had this since 2026-09-23 (run 35926589114); Pyright,
+    installed on every CI run, did not (audit 2026-09-27 C-10,
+    docs/research/2026-09-27-every-pinned-download-retries-the-network.md).
+    """
     _check_deadline(deadline)
-    response_context = _opened_download(deadline)
     try:
-        return _downloaded_bytes(response_context, destination, deadline)
+        return retry_transient(lambda: _download_attempt(destination, deadline), deadline=deadline)
     except TimeoutError:
         raise
     except PyrightInstallError:
