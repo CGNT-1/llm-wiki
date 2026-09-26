@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import bisect
-import difflib
 import math
 import os
 import re
@@ -189,6 +188,7 @@ def _git(
     deadline: float,
     max_bytes: int,
     cancelled: Callable[[], bool] | None = None,
+    success_codes: tuple[int, ...] = (0,),
 ) -> bytes:
     """Run Git without a shell and stop reading at the declared ceiling.
 
@@ -216,7 +216,7 @@ def _git(
         finally:
             finished.set()
             _ensure_finished(process)
-        _require_git_success(process, stdout, stopped, max_bytes, _stderr_head(stderr))
+        _require_git_success(process, stdout, stopped, max_bytes, _stderr_head(stderr), success_codes)
     return stdout
 
 
@@ -227,17 +227,24 @@ def _ensure_finished(process: subprocess.Popen) -> None:
 
 
 def _require_git_success(
-    process: subprocess.Popen, stdout: bytes, stopped: list[str], max_bytes: int, stderr: str
+    process: subprocess.Popen,
+    stdout: bytes,
+    stopped: list[str],
+    max_bytes: int,
+    stderr: str,
+    success_codes: tuple[int, ...] = (0,),
 ) -> None:
     if stopped:
         raise TimeoutError(stopped[0])
     if len(stdout) > max_bytes:
         raise ValueError("Git impact output exceeds the read ceiling")
-    _require_git_exit_zero(process, stdout, stderr)
+    _require_git_exit_zero(process, stdout, stderr, success_codes)
 
 
-def _require_git_exit_zero(process: subprocess.Popen, stdout: bytes, stderr: str) -> None:
-    if process.returncode == 0:
+def _require_git_exit_zero(
+    process: subprocess.Popen, stdout: bytes, stderr: str, success_codes: tuple[int, ...] = (0,)
+) -> None:
+    if process.returncode in success_codes:
         return
     detail = stderr or stdout[:1024].decode("utf-8", errors="replace").strip()
     raise ValueError(f"Git impact command failed: {detail or process.returncode}")
@@ -833,7 +840,7 @@ def _changed_ranges(
     if prefix == len(old_keys) == len(new_keys):
         return []
     suffix = _common_suffix(old_keys, new_keys, prefix, stop)
-    hunks = _hunks(old_keys, new_keys, prefix, suffix)
+    hunks = _hunks(old_keys, new_keys, prefix, suffix, stop)
     return [_hunk_ranges(hunk, new_lines, old_offsets, new_offsets) for hunk in hunks]
 
 
@@ -859,19 +866,56 @@ def _compared_lines(old_lines: list[bytes], new_lines: list[bytes]) -> tuple[lis
 
 # Two edits in one file were one range from the first to the last, so every
 # symbol between them read as changed (audit 2026-09-26 B-8,
-# docs/research/2026-09-26-an-impact-names-each-edit.md). Past this many lines
-# between the common ends the one-range answer is kept, bounded and honest.
-MAX_DIFF_LINES = 20_000
+# docs/research/2026-09-26-an-impact-names-each-edit.md). The edits between the
+# common ends come from Git's own diff, run as a child the deadline and a cancel
+# can stop: an in-process `difflib` match was quadratic and could not be
+# interrupted, 110 s past a 5 s deadline on a reformatted file (audit 2026-09-27
+# A-5, docs/research/2026-09-27-an-impact-diff-can-be-stopped.md).
+_HUNK_HEADER = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+_DIFF_ARGUMENTS = ["diff", "--no-index", "--no-color", "--no-ext-diff", "--text", "--unified=0", "--", "old", "new"]
+# A hunk header is at most this many bytes beyond the changed lines themselves.
+_HUNK_HEADER_BYTES = 64
 
 
-def _hunks(old_lines: list[bytes], new_lines: list[bytes], prefix: int, suffix: int) -> list[tuple[int, int, int, int]]:
+def _hunks(
+    old_lines: list[bytes], new_lines: list[bytes], prefix: int, suffix: int, stop: tuple
+) -> list[tuple[int, int, int, int]]:
     """Each edited run as (old start, old end, new start, new end), between the common ends."""
     old_middle = old_lines[prefix : len(old_lines) - suffix]
     new_middle = new_lines[prefix : len(new_lines) - suffix]
-    if max(len(old_middle), len(new_middle)) > MAX_DIFF_LINES:
+    if not old_middle or not new_middle:
         return [(prefix, len(old_lines) - suffix, prefix, len(new_lines) - suffix)]
-    opcodes = difflib.SequenceMatcher(None, old_middle, new_middle, autojunk=False).get_opcodes()
-    return [(prefix + i1, prefix + i2, prefix + j1, prefix + j2) for tag, i1, i2, j1, j2 in opcodes if tag != "equal"]
+    return [(prefix + a, prefix + b, prefix + c, prefix + d) for a, b, c, d in _git_hunks(old_middle, new_middle, stop)]
+
+
+def _git_hunks(old_middle: list[bytes], new_middle: list[bytes], stop: tuple) -> list[tuple[int, int, int, int]]:
+    deadline, cancelled = stop
+    old_bytes, new_bytes = b"".join(old_middle), b"".join(new_middle)
+    ceiling = len(old_bytes) + len(new_bytes) + _HUNK_HEADER_BYTES * (len(old_middle) + len(new_middle) + 1)
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        (root / "old").write_bytes(old_bytes)
+        (root / "new").write_bytes(new_bytes)
+        output = _git(
+            root, _DIFF_ARGUMENTS, deadline=_finite_deadline(deadline), max_bytes=ceiling,
+            cancelled=cancelled, success_codes=(0, 1),
+        )
+    return [_header_span(match) for match in _HUNK_HEADER.finditer(output)]
+
+
+def _finite_deadline(deadline: float | None) -> float:
+    return float("inf") if deadline is None else deadline
+
+
+def _side(line: bytes, count: bytes | None) -> tuple[int, int]:
+    """A unified-diff side `-l,c` as a 0-based half-open line span; `c` defaults to 1."""
+    size = 1 if count is None else int(count)
+    start = int(line) - (1 if size else 0)
+    return start, start + size
+
+
+def _header_span(match: re.Match) -> tuple[int, int, int, int]:
+    return (*_side(match.group(1), match.group(2)), *_side(match.group(3), match.group(4)))
 
 
 def _hunk_ranges(hunk: tuple[int, int, int, int], new_lines: list[bytes], old_offsets: list[int], new_offsets: list[int]) -> dict:
