@@ -48,6 +48,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from iso_time import utc_text  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MAX_KNOWLEDGE_TARGET_BYTES,
     MarkdownCoordinator,
@@ -313,9 +314,7 @@ def _utc_now(value: datetime | None) -> datetime:
 
 
 def _timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
+    return utc_text(value)
 
 
 def _parse_timestamp(value: object) -> datetime:

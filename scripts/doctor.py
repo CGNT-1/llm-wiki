@@ -32,6 +32,7 @@ import reliable_memory
 from bounded_io import read_stable_bytes
 from evidence_resolver import _daily_part_bounds
 from install_control import validate_install_state
+from iso_time import utc_text
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
@@ -6529,9 +6530,9 @@ def _acquired_legacy_maintenance(
             (
                 token,
                 os.getpid(),
-                now.isoformat(),
-                now.isoformat(),
-                expires.isoformat(),
+                utc_text(now),
+                utc_text(now),
+                utc_text(expires),
                 epoch,
             ),
         )
@@ -6553,8 +6554,8 @@ def _heartbeat_maintenance_owner(
             """UPDATE maintenance_owners SET heartbeat_at=?,expires_at=?
                WHERE owner_name='doctor' AND owner_token=? AND fencing_epoch=?""",
             (
-                heartbeat.isoformat(),
-                expires.isoformat(),
+                utc_text(heartbeat),
+                utc_text(expires),
                 lease["token"],
                 lease["epoch"],
             ),

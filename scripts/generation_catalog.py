@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from bounded_io import IO_CHUNK_BYTES
+from iso_time import utc_text
 from reliable_memory import (
     canonical_json_bytes,
     fsync_directory,
@@ -413,7 +414,7 @@ def _utc_timestamp(clock: Callable[[], datetime | str]) -> str:
     parsed = _parsed_clock(clock())
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("clock timestamp must include a UTC offset")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return utc_text(parsed)
 
 
 def _is_link_or_reparse(path: Path) -> bool:

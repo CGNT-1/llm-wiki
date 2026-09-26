@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from iso_time import utc_text
 from memory_state import STATE_ROOT
 from reliable_memory import (
     begin_immediate,
@@ -104,9 +105,7 @@ def _utc_timestamp(value: datetime | str | None) -> str:
     parsed = _parsed_timestamp(value)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must include a UTC offset")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
+    return utc_text(parsed)
 
 
 def hash_query(query: str) -> str:

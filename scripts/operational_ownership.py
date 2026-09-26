@@ -20,6 +20,7 @@ from typing import Literal, cast
 
 import markdown_transaction
 import process_liveness
+from iso_time import utc_text
 from process_liveness import _is_plain_int, _platform_system
 from reliable_memory import (
     DEFAULTS,
@@ -345,7 +346,7 @@ def _timestamp(value: datetime) -> str:
     `…:00Z` compared greater than `…:00.500000Z`. The reader takes both shapes.
     Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
     """
-    return _as_utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return utc_text(_as_utc(value))
 
 
 def _parse_timestamp(value: object) -> datetime:
