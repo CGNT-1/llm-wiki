@@ -200,6 +200,11 @@ generation a recall or code answer came from, or the collection time of a `get_c
 answer; it is null when neither is known. Treat row-level generation and fallback fields
 as the current retrieval truth.
 
+A recall or `get_decisions` answer is `stale` when a page it returned changed or vanished
+after the generation was built, or when a compiled note did (the index cannot see it
+yet). A project `state.md` the answer did not return does not make it stale. When the
+generation's source manifest cannot be read, the freshness is `unknown`.
+
 ## Repository indexes follow your worktrees
 
 Index a repository once (`get_architecture mode=index`, or

@@ -40,25 +40,25 @@ def vault(tmp_path: Path, monkeypatch) -> Path:
 def test_a_touched_page_is_not_a_change(vault: Path) -> None:
     os.utime(vault / PAGE)
 
-    assert mcp_server._index_is_behind(GENERATION) is False
+    assert mcp_server._answer_freshness(GENERATION, []) == "fresh"
 
 
 def test_an_edited_page_is(vault: Path) -> None:
     (vault / PAGE).write_text("# A\n\nAlpha, edited.\n", encoding="utf-8")
 
-    assert mcp_server._index_is_behind(GENERATION) is True
+    assert mcp_server._answer_freshness(GENERATION, []) == "stale"
 
 
 def test_a_new_page_is_and_a_new_readme_is_not(vault: Path) -> None:
     (vault / "knowledge" / "notes" / "README.md").write_text("# Notes\n", encoding="utf-8")
-    readme_only = mcp_server._index_is_behind(GENERATION)
+    readme_only = mcp_server._answer_freshness(GENERATION, [])
     (vault / "knowledge" / "notes" / "b.md").write_text("# B\n", encoding="utf-8")
 
-    assert (readme_only, mcp_server._index_is_behind(GENERATION)) == (False, True)
+    assert (readme_only, mcp_server._answer_freshness(GENERATION, [])) == ("fresh", "stale")
 
 
 def test_a_removed_page_is(vault: Path) -> None:
     (vault / PAGE).unlink()
     os.utime(vault / "knowledge" / "notes")
 
-    assert mcp_server._index_is_behind(GENERATION) is True
+    assert mcp_server._answer_freshness(GENERATION, []) == "stale"

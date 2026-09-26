@@ -8,6 +8,8 @@ docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
 import time
@@ -35,6 +37,11 @@ def _vault(tmp_path: Path, monkeypatch, *, page_after_build: bool) -> str:
     page = notes / "page.md"
     page.write_text("# Page\n", encoding="utf-8")
     manifest.write_text("{}", encoding="utf-8")
+    # The generation records what it read; a page rewritten after it differs.
+    built_text = b"# Page (as built)\n" if page_after_build else page.read_bytes()
+    sources = [{"relative_path": "knowledge/notes/page.md", "sha256": hashlib.sha256(built_text).hexdigest()}]
+    (manifest.parent / "source-manifest.json").write_text(json.dumps({"sources": sources}), encoding="utf-8")
+    mcp_server._recorded_memory_digests.cache_clear()
     built = time.time() - 60
     os.utime(manifest, (built, built))
     page_time = built + 30 if page_after_build else built - 30

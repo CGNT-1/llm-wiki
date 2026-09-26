@@ -5335,13 +5335,11 @@ def _degrade_stale_envelope(envelope: dict) -> None:
         envelope["warnings"].append(warning)
 
 
-def _signal_freshness(signal: str, signals: set, behind: bool) -> str:
-    """Fresh only when the signal ran on an index no page has moved past."""
+def _signal_freshness(signal: str, signals: set, answer: str) -> str:
+    """The answer's own freshness, for a signal that ran."""
     if signal not in signals:
         return "missing"
-    if behind:
-        return "stale"
-    return "fresh"
+    return answer
 
 
 def _reranker_freshness(trace: dict) -> str:
@@ -5369,31 +5367,6 @@ def _generation_built_ns(generation: object) -> int | None:
         return None
 
 
-def _newest_page_ns() -> int:
-    """The latest change to anything the generation indexes (audit B-19).
-
-    Notes and their directories (a removed or renamed page moves only its
-    directory's mtime), and each project's `state.md` and `context.md`, the
-    project files the corpus collects. See
-    `docs/research/2026-09-25-an-answer-is-stale-when-any-indexed-source-moved.md`.
-    """
-    from memory_state import ROOT
-
-    knowledge = ROOT / "knowledge"
-    notes = knowledge / "notes"
-    sources = [*notes.rglob("*.md"), *_directories(notes), *_project_sources(knowledge / "projects")]
-    return max((_mtime_ns(path) for path in sources), default=0)
-
-
-
-def _directories(root: Path) -> list[Path]:
-    return [root, *(path for path in root.rglob("*") if path.is_dir())] if root.is_dir() else []
-
-
-def _project_sources(projects: Path) -> list[Path]:
-    return [path for name in ("state.md", "context.md") for path in projects.glob(f"*/{name}")]
-
-
 def _mtime_ns(path: Path) -> int:
     try:
         return path.stat().st_mtime_ns
@@ -5401,40 +5374,66 @@ def _mtime_ns(path: Path) -> int:
         return 0
 
 
-def _index_is_behind(generation: object) -> bool:
-    """A page changed after the generation was built, so search cannot see it yet.
+def _answer_freshness(generation: object, paths: list[str]) -> str:
+    """Whether this answer's own sources still say what the generation holds.
 
-    See `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    Stale when a source the answer cites changed or vanished since the build, or
+    when a compiled note did (knowledge the index cannot see yet). An uncited
+    project `state.md`, rewritten by sessions all day, no longer makes every answer
+    stale (audit 2026-09-27 B-10,
+    docs/research/2026-09-27-an-answer-is-fresh-by-its-own-sources.md).
     """
     built = _generation_built_ns(generation)
     if built is None:
-        return False
-    if _newest_page_ns() <= built:
-        return False
-    return _sources_differ(generation, built)
-
-
-def _sources_differ(generation: str, built: int) -> bool:
-    """Something the generation indexes really changed, not only its file time.
-
-    A touched page, an edited README or a renamed directory moved a time and left
-    every answer "stale" until the next build, which reused the old generation and
-    never moved its manifest (audit 2026-09-26 B-15,
-    docs/research/2026-09-26-an-answer-is-stale-only-when-a-source-changed.md).
-    """
-    from memory_state import ROOT
-
+        return "fresh"
     recorded = _recorded_memory_digests(generation)
     if recorded is None:
+        return "unknown"
+    if _cited_source_moved(recorded, paths, built) or _notes_moved(recorded, built):
+        return "stale"
+    return "fresh"
+
+
+def _cited_source_moved(recorded: dict[str, str], paths: list[str], built: int) -> bool:
+    from memory_state import ROOT
+
+    cited = [path for path in paths if _is_memory_path(path)]
+    return any(_cited_changed(ROOT, path, recorded, built) for path in cited)
+
+
+def _cited_changed(root: Path, relative: str, recorded: dict[str, str], built: int) -> bool:
+    path = root / relative
+    if not path.is_file():
         return True
-    current = _memory_source_files(ROOT)
-    gone = set(recorded) - {path.relative_to(ROOT).as_posix() for path in current}
-    return bool(gone) or any(_changed_since(ROOT, path, recorded, built) for path in current)
+    return _changed_since(root, path, recorded, built)
 
 
-def _memory_source_files(root: Path) -> list[Path]:
-    knowledge = root / "knowledge"
-    return [*(knowledge / "notes").rglob("*.md"), *_project_sources(knowledge / "projects")]
+def _notes_moved(recorded: dict[str, str], built: int) -> bool:
+    """A compiled note was added, edited or removed since the build."""
+    from memory_state import ROOT
+
+    current = list((ROOT / "knowledge" / "notes").rglob("*.md"))
+    if _recorded_notes(recorded) - {path.relative_to(ROOT).as_posix() for path in current}:
+        return True
+    return any(_changed_since(ROOT, path, recorded, built) for path in current)
+
+
+def _recorded_notes(recorded: dict[str, str]) -> set[str]:
+    return {path for path in recorded if path.startswith("knowledge/notes/")}
+
+
+def _answer_paths(data) -> list[str]:
+    """The vault-relative paths an answer's rows cite."""
+    rows = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [path for path in map(_row_path, rows) if path]
+
+
+def _row_path(row: object) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("path") or "").replace("\\", "/")
 
 
 def _changed_since(root: Path, path: Path, recorded: dict[str, str], built: int) -> bool:
@@ -5498,11 +5497,11 @@ def _recall_components(data) -> dict:
         return {}
     generation = trace.get("corpus_generation")
     signals = set(trace.get("signals_used", []))
-    behind = _index_is_behind(generation)
+    answer = _answer_freshness(generation, _answer_paths(data))
     components = {
         signal: {
             "generation": generation,
-            "freshness": _signal_freshness(signal, signals, behind),
+            "freshness": _signal_freshness(signal, signals, answer),
         }
         for signal in _requested_signals(trace)
     }
