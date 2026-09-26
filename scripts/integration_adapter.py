@@ -932,39 +932,40 @@ def _pending_checkpoints(
     chunks = _split_project_delta(delta)
     if len(chunks) == 1:
         return [pending]
-    result: list[dict[str, object]] = []
-    for index, chunk in enumerate(chunks):
-        item = dict(pending)
-        event_id = f"{envelope.event_id}:part:{index + 1}"
-        item["event_id"] = event_id
-        item["has_project_delta"] = True
-        checkpoint = dict(pending["checkpoint_event"])
-        checkpoint["occurrence_id"] = event_id
-        checkpoint["idempotency_key"] = f"{event_id}:pending"
-        checkpoint["delta"] = chunk
-        checkpoint["evidence_event_ids"] = [event_id]
-        item["checkpoint_event"] = checkpoint
-        if index < len(chunks) - 1:
-            item["observation"] = {
-                "type": "coalesced_delta",
-                "event_id": event_id,
-            }
-        else:
-            observation = dict(pending["observation"])
-            observation["event_id"] = event_id
-            item["observation"] = observation
-        result.append(item)
-    return result
+    last = len(chunks) - 1
+    return [
+        _checkpoint_part(pending, f"{envelope.event_id}:part:{index + 1}", chunk, index == last)
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def _checkpoint_part(
+    pending: Mapping[str, Any], event_id: str, chunk: object, last: bool
+) -> dict[str, object]:
+    """One part of a split project delta; only the last carries the observation."""
+    item = dict(pending)
+    item["event_id"] = event_id
+    item["has_project_delta"] = True
+    checkpoint = dict(pending["checkpoint_event"])
+    checkpoint["occurrence_id"] = event_id
+    checkpoint["idempotency_key"] = f"{event_id}:pending"
+    checkpoint["delta"] = chunk
+    checkpoint["evidence_event_ids"] = [event_id]
+    item["checkpoint_event"] = checkpoint
+    item["observation"] = _part_observation(pending, event_id, last)
+    return item
+
+
+def _part_observation(pending: Mapping[str, Any], event_id: str, last: bool) -> dict[str, object]:
+    if not last:
+        return {"type": "coalesced_delta", "event_id": event_id}
+    observation = dict(pending["observation"])
+    observation["event_id"] = event_id
+    return observation
 
 
 def _release_claims(state: dict[str, Any], queue_key: str, owner: str) -> None:
-    pending = state.get("project_checkpoint_pending")
-    if not isinstance(pending, dict):
-        return
-    queue = pending.get(queue_key)
-    if not isinstance(queue, list):
-        return
-    for item in queue:
+    for item in _pending_queue(state, queue_key) or []:
         if item.get("claim_owner") == owner:
             item.pop("claim_owner", None)
             item.pop("claim_until", None)
@@ -2301,28 +2302,32 @@ def _write_transient_transcript(envelope: EventEnvelope, text: str) -> Path:
 
 def _restrict_file_permissions(path: Path) -> None:
     if os.name == "nt":
-        username = os.environ.get("USERNAME")
-        if not username:
-            raise PermissionError("transient permissions unavailable")
-        result = subprocess.run(
-            [
-                "icacls",
-                str(path),
-                "/inheritance:r",
-                "/grant:r",
-                # D: read and write do not include delete, and the transient file
-                # is deleted once it has been read. See
-                # `docs/research/2026-09-17-a-transient-transcript-can-be-deleted-on-windows.md`.
-                f"{username}:(R,W,D)",
-            ],
-            capture_output=True,
-            check=False,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            raise PermissionError("transient permissions unavailable")
+        _restrict_windows_permissions(path)
         return
     path.chmod(0o600)
+
+
+def _restrict_windows_permissions(path: Path) -> None:
+    username = os.environ.get("USERNAME")
+    if not username:
+        raise PermissionError("transient permissions unavailable")
+    result = subprocess.run(
+        [
+            "icacls",
+            str(path),
+            "/inheritance:r",
+            "/grant:r",
+            # D: read and write do not include delete, and the transient file
+            # is deleted once it has been read. See
+            # `docs/research/2026-09-17-a-transient-transcript-can-be-deleted-on-windows.md`.
+            f"{username}:(R,W,D)",
+        ],
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise PermissionError("transient permissions unavailable")
 
 
 def _record_activity(

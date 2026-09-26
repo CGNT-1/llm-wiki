@@ -1104,20 +1104,30 @@ class ContradictionPipeline:
         changes: list[MarkdownChange] = []
         created: list[str] = []
         present: list[str] = []
-        mutations = set()
-        for assessment in sorted(assessments, key=_assessment_order):
-            mutations.update(assessment.lifecycle_mutations)
-            if assessment.recommendation != "quarantine":
-                continue
-            path, content, record = self._candidate_file(assessment.claim)
-            if _candidate_present(self.vault / path, record):
-                present.append(path)
-                continue
-            changes.append(MarkdownChange.create(path, content))
-            created.append(path)
+        ordered = sorted(assessments, key=_assessment_order)
+        for assessment in ordered:
+            self._plan_candidate(assessment, changes, created, present)
+        mutations = {mutation for assessment in ordered for mutation in assessment.lifecycle_mutations}
         lifecycle_changes, preconditions = self._lifecycle_changes(sorted(mutations))
         changes.extend(lifecycle_changes)
         return changes, preconditions, tuple(created), tuple(present)
+
+    def _plan_candidate(
+        self,
+        assessment: ClaimAssessment,
+        changes: list[MarkdownChange],
+        created: list[str],
+        present: list[str],
+    ) -> None:
+        """Create a quarantined claim's review file, or name the one already on disk."""
+        if assessment.recommendation != "quarantine":
+            return
+        path, content, record = self._candidate_file(assessment.claim)
+        if _candidate_present(self.vault / path, record):
+            present.append(path)
+            return
+        changes.append(MarkdownChange.create(path, content))
+        created.append(path)
 
     def _candidate_file(self, claim: NormalizedClaim) -> tuple[str, bytes, dict[str, object]]:
         quarantined = NormalizedClaim({**claim.record, "lifecycle": "quarantined"})
