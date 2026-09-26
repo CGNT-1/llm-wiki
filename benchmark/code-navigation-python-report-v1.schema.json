@@ -285,7 +285,8 @@
       "required": ["phase", "code"],
       "properties": {
         "phase": {"type": "string", "minLength": 1},
-        "code": {"type": "string", "minLength": 1}
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1}
       }
     }
   }
