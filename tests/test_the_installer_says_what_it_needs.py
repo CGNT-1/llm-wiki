@@ -29,8 +29,13 @@ needs_bash = pytest.mark.skipif(_bash() is None, reason="bash is not installed")
 needs_pwsh = pytest.mark.skipif(_pwsh() is None, reason="PowerShell is not installed")
 
 
+# The helpers a function under test calls, loaded with it.
+_HELPERS = {"fetch_pinned_checkout": ("pinned_fetch", "pinned_branch")}
+
+
 def _call(name: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    script = f"set -euo pipefail\n{_shell_function(INSTALL_SH, name)}\n{name} \"$@\"\n"
+    functions = "\n".join(_shell_function(INSTALL_SH, part) for part in (*_HELPERS.get(name, ()), name))
+    script = f"set -euo pipefail\n{functions}\n{name} \"$@\"\n"
     return subprocess.run(
         [_bash(), "-c", script, name, *arguments], capture_output=True, text=True, check=False
     )

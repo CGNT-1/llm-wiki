@@ -3155,6 +3155,10 @@ def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_pat
     functions = _shell_functions(
         source,
         "restore_test_monitor_mode",
+        "send_signal",
+        "test_group_is_own",
+        "stop_test_group",
+        "stop_test_process",
         "test_tree_alive",
         "stop_test_child",
         "stop_test_timer",
@@ -3242,6 +3246,10 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
     functions = _shell_functions(
         source,
         "restore_test_monitor_mode",
+        "send_signal",
+        "test_group_is_own",
+        "stop_test_group",
+        "stop_test_process",
         "test_tree_alive",
         "stop_test_child",
         "stop_test_timer",
@@ -3299,7 +3307,9 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
 def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
     bash = _require_bash()
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    functions = _shell_functions(source, "test_tree_alive", "stop_test_child")
+    functions = _shell_functions(
+        source, "send_signal", "test_group_is_own", "stop_test_group", "stop_test_process", "test_tree_alive", "stop_test_child"
+    )
     runner = tmp_path / "exercise-cleanup.sh"
     runner.write_text(
         textwrap.dedent(
@@ -3574,7 +3584,7 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    function = _shell_function(source, "configure_codex_mcp")
+    function = _shell_functions(source, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
@@ -4349,7 +4359,7 @@ def test_install_scripts_generate_context(tmp_path):
             }
         }
     }
-    sh_codex_mcp = _shell_function(install_sh, "configure_codex_mcp")
+    sh_codex_mcp = _shell_functions(install_sh, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
     assert (
         _unmet_substrings(
             (

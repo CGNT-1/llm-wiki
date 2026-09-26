@@ -61,8 +61,10 @@ jobs:
       # Nothing parsed PowerShell and nothing ran shellcheck: a syntax error in
       # install.ps1 reached a release, and install.sh was never checked beyond
       # `bash -n`. The owner's complexity gate stays out: it is machine-local
-      # tooling under ~/.claude, not part of this repository.
-      # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md.
+      # tooling under ~/.claude, not part of this repository. The shell's own
+      # complexity is measured by tests/test_shell_functions_stay_simple.py.
+      # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md
+      # and docs/research/2026-09-27-shell-functions-are-measured-too.md.
       - run: shellcheck install.sh
       - name: Every tracked PowerShell file parses
         shell: pwsh

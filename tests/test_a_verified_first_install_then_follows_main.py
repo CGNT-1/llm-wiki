@@ -62,7 +62,8 @@ def upstream(tmp_path: Path) -> Path:
 
 def _bash_bootstrap(target: Path, url: str, commit: str) -> int:
     name = "fetch_pinned_checkout"
-    script = f"set -euo pipefail\n{_shell_function(INSTALL_SH, name)}\n{name} \"$@\"\n"
+    functions = "\n".join(_shell_function(INSTALL_SH, part) for part in ("pinned_fetch", "pinned_branch", name))
+    script = f"set -euo pipefail\n{functions}\n{name} \"$@\"\n"
     done = subprocess.run(
         [_bash(), "-c", script, name, str(target), url, commit],
         capture_output=True, text=True, check=False, timeout=LONG_TIMEOUT,

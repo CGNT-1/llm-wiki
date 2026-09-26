@@ -66,23 +66,32 @@ case "$SCHEDULER_MODE" in
   *) fail "--scheduler requires native or cron" ;;
 esac
 
+# One remote's push URLs cleared; `git config --get-all` exits 1 when there are none.
+clear_push_urls() {
+  local remote="$1" status=0
+  git -C "$VAULT_ROOT" config --get-all "remote.$remote.pushurl" >/dev/null 2>&1 || status=$?
+  [[ "$status" -ne 1 ]] || return 0
+  [[ "$status" -eq 0 ]] || fail "Could not inspect push URLs for remote $remote"
+  git -C "$VAULT_ROOT" config --unset-all "remote.$remote.pushurl" || \
+    fail "Could not clear push URLs for remote $remote"
+}
+
+protect_remote_push_url() {
+  local remote="$1" urls
+  clear_push_urls "$remote"
+  git -C "$VAULT_ROOT" config --add "remote.$remote.pushurl" no-push || \
+    fail "Could not protect push URLs for remote $remote"
+  urls="$(git -C "$VAULT_ROOT" remote get-url --all --push "$remote")" || \
+    fail "Could not verify push URLs for remote $remote"
+  [[ "$urls" == "no-push" ]] || fail "Could not protect push URLs for remote $remote"
+}
+
 protect_push_urls() {
-  local remote remotes status urls
+  local remote remotes
   remotes="$(git -C "$VAULT_ROOT" remote)" || fail "Could not enumerate Git remotes"
   while IFS= read -r remote; do
     [[ -n "$remote" ]] || continue
-    if git -C "$VAULT_ROOT" config --get-all "remote.$remote.pushurl" >/dev/null 2>&1; then
-      git -C "$VAULT_ROOT" config --unset-all "remote.$remote.pushurl" || \
-        fail "Could not clear push URLs for remote $remote"
-    else
-      status=$?
-      [[ "$status" -eq 1 ]] || fail "Could not inspect push URLs for remote $remote"
-    fi
-    git -C "$VAULT_ROOT" config --add "remote.$remote.pushurl" no-push || \
-      fail "Could not protect push URLs for remote $remote"
-    urls="$(git -C "$VAULT_ROOT" remote get-url --all --push "$remote")" || \
-      fail "Could not verify push URLs for remote $remote"
-    [[ "$urls" == "no-push" ]] || fail "Could not protect push URLs for remote $remote"
+    protect_remote_push_url "$remote"
   done <<< "$remotes"
 }
 
@@ -104,42 +113,51 @@ codex_inline_hooks_state() {
     --config "$codex_dir/config.toml" 2>/dev/null || echo "unknown"
 }
 
+write_codex_mcp_block() {
+  local block="$1" config="$2"
+  if [ ! -f "$config" ]; then
+    printf '%s\n' "$block" > "$config"
+    return
+  fi
+  cp -p "$config" "$config.bak" || return 1
+  if [ -s "$config" ]; then
+    printf '\n%s\n' "$block" >> "$config"
+    return
+  fi
+  printf '%s\n' "$block" >> "$config"
+}
+
+add_codex_mcp_block() {
+  local vault_root="$1" config="$2"
+  local vault_json block
+  mkdir -p "$(dirname "$config")" || return 1
+  vault_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$vault_root")" || return 1
+  block="$(printf '%s\n' \
+    '[mcp_servers.llm-wiki]' \
+    'command = "uv"' \
+    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+  write_codex_mcp_block "$block" "$config"
+}
+
+codex_mcp_state_status() {
+  case "$1" in
+    equivalent) return 0 ;;
+    conflict|invalid) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 configure_codex_mcp() {
   local vault_root="$1"
   local config="$2"
-  local state vault_json block
+  local state
   state="$(uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
     config-state --config "$config" --vault-root "$vault_root")" || return 1
-  case "$state" in
-    equivalent)
-      return 0
-      ;;
-    absent)
-      mkdir -p "$(dirname "$config")"
-      vault_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$vault_root")"
-      block="$(printf '%s\n' \
-        '[mcp_servers.llm-wiki]' \
-        'command = "uv"' \
-        "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
-      if [ -f "$config" ]; then
-        cp -p "$config" "$config.bak"
-        if [ -s "$config" ]; then
-          printf '\n%s\n' "$block" >> "$config"
-        else
-          printf '%s\n' "$block" >> "$config"
-        fi
-      else
-        printf '%s\n' "$block" > "$config"
-      fi
-      return 0
-      ;;
-    conflict|invalid)
-      return 2
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  if [ "$state" = absent ]; then
+    add_codex_mcp_block "$vault_root" "$config"
+    return
+  fi
+  codex_mcp_state_status "$state"
 }
 
 # The status line used to say "active automatic" whatever happened to the MCP
@@ -185,14 +203,21 @@ code_update_note() {
 # local default branch with the remote one as its upstream, so the nightly fast-forward
 # reaches this vault as it reaches a cloned one. `git checkout --detach` freezes it again.
 # See docs/research/2026-09-17-a-verified-first-install-then-follows-main.md.
+pinned_fetch() {
+  local target="$1" url="$2" commit="$3"
+  git init "$target" \
+    && git -C "$target" remote add origin "$url" \
+    && git -C "$target" fetch --depth 1 origin "$commit"
+}
+pinned_branch() {
+  local target="$1" commit="$2" branch="$3"
+  git -C "$target" checkout -B "$branch" "$commit" \
+    && git -C "$target" config "branch.$branch.remote" origin \
+    && git -C "$target" config "branch.$branch.merge" "refs/heads/$branch"
+}
 fetch_pinned_checkout() {
   local target="$1" url="$2" commit="$3" branch="${4:-main}"
-  if git init "$target" \
-    && git -C "$target" remote add origin "$url" \
-    && git -C "$target" fetch --depth 1 origin "$commit" \
-    && git -C "$target" checkout -B "$branch" "$commit" \
-    && git -C "$target" config "branch.$branch.remote" origin \
-    && git -C "$target" config "branch.$branch.merge" "refs/heads/$branch"; then
+  if pinned_fetch "$target" "$url" "$commit" && pinned_branch "$target" "$commit" "$branch"; then
     return 0
   fi
   rm -rf -- "$target"
@@ -351,33 +376,39 @@ test_tree_alive() {
     *) kill -0 -- "-$testPgid" 2>/dev/null ;;
   esac
 }
+# A signal to a target that may already be gone: its absence is not a cleanup failure.
+send_signal() {
+  if kill -s "$1" "${@:2}" 2>/dev/null; then :; fi
+}
+test_group_is_own() {
+  case "$testPgid" in
+    ""|*[!0-9]*|0|1|"$$") return 1 ;;
+  esac
+  return 0
+}
+stop_test_group() {
+  local attempt=0
+  send_signal TERM -- "-$testPgid"
+  send_signal CONT -- "-$testPgid"
+  while [ "$attempt" -lt 5 ] && test_tree_alive; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if test_tree_alive; then
+    send_signal KILL -- "-$testPgid"
+  fi
+}
+stop_test_process() {
+  send_signal TERM "$testPid"
+  send_signal CONT "$testPid"
+}
 stop_test_child() {
-  local attempt
   if [ -z "$testPid" ]; then
     return
   fi
-  case "$testPgid" in
-    ""|*[!0-9]*|0|1|"$$")
-      if test_tree_alive; then
-        if kill -s TERM "$testPid" 2>/dev/null; then :; fi
-        if kill -s CONT "$testPid" 2>/dev/null; then :; fi
-      fi
-      ;;
-    *)
-      if test_tree_alive; then
-        if kill -s TERM -- "-$testPgid" 2>/dev/null; then :; fi
-        if kill -s CONT -- "-$testPgid" 2>/dev/null; then :; fi
-        attempt=0
-        while [ "$attempt" -lt 5 ] && test_tree_alive; do
-          sleep 0.1
-          attempt=$((attempt + 1))
-        done
-        if test_tree_alive; then
-          if kill -s KILL -- "-$testPgid" 2>/dev/null; then :; fi
-        fi
-      fi
-      ;;
-  esac
+  if test_tree_alive; then
+    if test_group_is_own; then stop_test_group; else stop_test_process; fi
+  fi
   if wait "$testPid" 2>/dev/null; then :; fi
   testPid=""
   testPgid=""
@@ -387,11 +418,8 @@ stop_test_timer() {
     return
   fi
   case "$testTimerPid" in
-    *[!0-9]*|0|1|"$$") if kill -s TERM "$testTimerPid" 2>/dev/null; then :; fi ;;
-    *)
-      if kill -s TERM -- "-$testTimerPid" 2>/dev/null; then :; fi
-      if kill -s CONT -- "-$testTimerPid" 2>/dev/null; then :; fi
-      ;;
+    *[!0-9]*|0|1|"$$") send_signal TERM "$testTimerPid" ;;
+    *) send_signal TERM -- "-$testTimerPid"; send_signal CONT -- "-$testTimerPid" ;;
   esac
   if wait "$testTimerPid" 2>/dev/null; then :; fi
   testTimerPid=""

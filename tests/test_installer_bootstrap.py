@@ -379,7 +379,7 @@ def _invoke_push_helper(
         source = (ROOT / "install.sh").read_text(encoding="utf-8")
         functions = "\n".join(
             _shell_function(source, name)
-            for name in ("protect_push_urls", "protect_push_urls_if_authorized")
+            for name in ("clear_push_urls", "protect_remote_push_url", "protect_push_urls", "protect_push_urls_if_authorized")
         )
         runner = repository.parent / "push-helper.sh"
         runner.write_text(

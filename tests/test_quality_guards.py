@@ -352,9 +352,12 @@ _SHELL_SMOKE_REQUIRED = (
     "testPgid=$!",
     'wait "$testPid"',
     "if wait_test_child",
-    'kill -s TERM -- "-$testPgid"',
-    'kill -s CONT -- "-$testPgid"',
-    'kill -s KILL -- "-$testPgid"',
+    # The group is signalled through one helper that ignores a target already gone
+    # (audit 2026-09-27, law 5: the three signals kept stop_test_child at CCN 14).
+    'if kill -s "$1" "${@:2}" 2>/dev/null; then :; fi',
+    'send_signal TERM -- "-$testPgid"',
+    'send_signal CONT -- "-$testPgid"',
+    'send_signal KILL -- "-$testPgid"',
     "set -m",
     "set +m",
     'trap \'stop_test_timer; stop_test_child; restore_test_monitor_mode\' EXIT',
