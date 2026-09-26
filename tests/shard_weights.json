@@ -301,6 +301,7 @@
   "test_an_unreadable_generation_degrades_the_decoration.py": 0.0,
   "test_an_unreadable_generation_is_not_a_missing_one.py": 1.0,
   "test_an_unreadable_verdict_is_asked_again.py": 0.0,
+  "test_an_unstated_authority_is_inferred.py": 0.11,
   "test_an_untracked_copy_of_the_update_does_not_stop_it.py": 8.76,
   "test_an_update_keeps_what_is_installed.py": 0.0,
   "test_an_update_only_to_what_main_holds.py": 4.1,

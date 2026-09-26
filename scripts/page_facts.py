@@ -102,7 +102,7 @@ def _facts_from(relative_path: str, path: Path, text: str) -> PageFacts:
         authority=authority,
         confidence=_field(frontmatter, "confidence"),
         status=normalized_status(_field(frontmatter, "status")),
-        trust_weight=trust_weight(authority, page_type),
+        trust_weight=trust_weight(authority, page_type, relative_path),
         age_days=age,
         age_limit_days=limit,
         aging=_is_aging(page_type, age, limit),

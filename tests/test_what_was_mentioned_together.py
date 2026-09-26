@@ -157,7 +157,7 @@ def test_no_table_leaves_every_score_alone(monkeypatch) -> None:
     monkeypatch.setattr(retrieval, "_co_activation_table", lambda: {})
     monkeypatch.setattr(retrieval, "_standing_disposition", lambda query: {})
     scores = {"a": 2.0}
-    meta = {"a": {"relative_path": "knowledge/notes/alpha.md"}}
+    meta = {"a": {"relative_path": "knowledge/notes/alpha.md", "authority": "ai-derived"}}
 
     weighted = retrieval._weigh_by_trust(scores, meta, curated_first=False, query="q")
 

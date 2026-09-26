@@ -1382,7 +1382,7 @@ def _weigh_by_trust(
     alongside = _neighbour_boosts(scores, meta)
     weighted: dict[str, float] = {}
     for key, value in scores.items():
-        authority = authority_weight(meta[key].get("authority"))
+        authority = authority_weight(meta[key].get("authority"), meta[key].get("relative_path"))
         page = source_type_weight(
             meta[key].get("type"),
             meta[key].get("relative_path"),

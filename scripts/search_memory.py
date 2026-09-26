@@ -3194,15 +3194,15 @@ def _first_prose_line(content: str) -> str:
     return lines[0].strip()[:120] if lines else ""
 
 
-def _chunk_weight(authority: object, page_type: object, content: object) -> float:
+def _chunk_weight(authority: object, page_type: object, content: object, relative_path: object) -> float:
     """Who said it and what the page is, and whether this chunk is prose or a link list."""
-    return trust_weight(authority, page_type) * substance_weight(content)
+    return trust_weight(authority, page_type, relative_path) * substance_weight(content)
 
 
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
     authority = _row_text(row, "authority")
     content = _row_text(row, "content")
-    score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content)
+    score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content, row["source_path"])
     return {
         "path": row["source_path"],
         "title": _page_title(row),
@@ -3550,9 +3550,9 @@ def _vector_scored_rows(
         # The vector path boosts a project match by 1.5, not by the lexical 2.0.
         if project and str(result["project"]).casefold() == project.casefold():
             score *= 1.5
-        # Absent provenance weighs 1.0 by `trust_weight`'s own contract, so a row
-        # that carries none is admitted on its cosine alone rather than refused.
-        score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"))
+        # A page that states no provenance weighs as `inferred`, any other source
+        # as neutral (`provenance.page_authority`); a row is never refused for it.
+        score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"), result.get("path"))
         result["score"] = round(score, 4)
         result["requested_mode"] = "hybrid"
         result["effective_mode"] = "hybrid"
@@ -3869,7 +3869,7 @@ def _exact_page_hit(
         return None
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
-    score = round(10.0 * trust_weight(read.authority, read.page_type), 2)
+    score = round(10.0 * trust_weight(read.authority, read.page_type, read.relative_path), 2)
     return _page_hit(read, score=score, bm25_score=0.0)
 
 
@@ -4017,7 +4017,7 @@ def _direct_match_score(
         score *= 3.0
     if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
         score *= 4.0
-    return score * trust_weight(read.authority, read.page_type)
+    return score * trust_weight(read.authority, read.page_type, read.relative_path)
 
 
 def _evidence_terms(query: str) -> set[str]:

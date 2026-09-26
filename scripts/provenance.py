@@ -26,6 +26,28 @@ AUTHORITY_WEIGHTS: dict[str, float] = {
 
 DEFAULT_AUTHORITY_WEIGHT = 1.0
 
+# CLAUDE.md rule 13: a page that makes a claim and states no `source_authority`
+# defaults to `inferred`. Only compiled knowledge pages make claims; code, daily
+# logs and session records keep the neutral weight when they state none (audit
+# 2026-09-27 C-15, docs/research/2026-09-27-an-unstated-authority-is-inferred.md).
+UNSTATED_PAGE_AUTHORITY = "inferred"
+_CLAIM_PAGE_PREFIX = "knowledge/notes/"
+
+
+def _is_claim_page(relative_path: object) -> bool:
+    return isinstance(relative_path, str) and relative_path.replace("\\", "/").startswith(_CLAIM_PAGE_PREFIX)
+
+
+def page_authority(stated: object, relative_path: object) -> object:
+    """The authority a source is ranked by: what it states, or the contract's default for a page.
+
+    Only the ranking reads this default. What a page states is kept as it is, so
+    grounded answers still decide what they may quote from the page's own label.
+    """
+    if stated or not _is_claim_page(relative_path):
+        return stated
+    return UNSTATED_PAGE_AUTHORITY
+
 # What the page *is*, as a second factor on the same score. A status log is
 # derived commentary; a decision page is the thing it comments on. Measured on
 # this vault, authority alone could not tell them apart: the register outranked
@@ -122,8 +144,12 @@ def source_type_weight(
     return type_weight(page_type)
 
 
-def authority_weight(value: object) -> float:
-    """Weight for one `source_authority` value; unknown or absent means 1.0."""
+def authority_weight(value: object, relative_path: object) -> float:
+    """Weight for one source's `source_authority`; a page that states none is `inferred`.
+
+    The path is required so that no ranking path can forget the page default.
+    """
+    value = page_authority(value, relative_path)
     if not isinstance(value, str):
         return DEFAULT_AUTHORITY_WEIGHT
     return AUTHORITY_WEIGHTS.get(value.strip().lower(), DEFAULT_AUTHORITY_WEIGHT)
@@ -136,9 +162,9 @@ def type_weight(value: object) -> float:
     return TYPE_WEIGHTS.get(value.strip().lower(), DEFAULT_TYPE_WEIGHT)
 
 
-def trust_weight(authority: object, page_type: object) -> float:
+def trust_weight(authority: object, page_type: object, relative_path: object) -> float:
     """Both factors, applied once: who said it, and what the page is."""
-    return authority_weight(authority) * type_weight(page_type)
+    return authority_weight(authority, relative_path) * type_weight(page_type)
 
 
 # A chunk that is mostly links points at answers instead of holding one: a
