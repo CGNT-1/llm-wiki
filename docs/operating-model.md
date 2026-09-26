@@ -63,8 +63,9 @@ One-sentence summary: Session memory captures what Claude Code and the human lea
 - `run/` deletion is blocked by nonterminal/conflicted/quarantined transactions,
   source failure, the 2-day undo window, retained queue tasks/results, and any live
   project lease, writer, queue worker, or maintenance owner.
-- The one automatic Git operation is the nightly fast-forward of the checkout on its
-  default branch. There is no persistent daemon, cloud service, remote queue/cache,
+- The automatic Git operations are the nightly fast-forward of the checkout on its
+  default branch and the nightly commit of the `knowledge/` snapshot into its own
+  local repository outside the vault; neither pushes. There is no persistent daemon, cloud service, remote queue/cache,
   SQLite knowledge source or gzip archive tier. The automatic purges are retention
   with evidence kept: finished queue work after 30 days, exported first to
   `knowledge/raw/queue-archive/`, and settled transaction rows after 90 days.

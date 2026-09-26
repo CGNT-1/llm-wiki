@@ -49,7 +49,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── event_envelope.py            v4.x: shared lifecycle event contract
 │   ├── mcp_contract.py              v4.x: uniform MCP response envelope/resources
 │   ├── doctor.py                    v4.x: degraded-only health + safe repair
-│   ├── repair_installed_memory.py   proposed target: explicit check/apply migration
+│   ├── repair_installed_memory.py   explicit check/apply v3 adoption
 │   ├── code_graph.py                v4.0: tree-sitter code intelligence
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── impact_symbols.py            #24 B5: code symbols a diff reaches, beside impact
@@ -69,7 +69,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │
 ├── knowledge/                     KNOWLEDGE — content (gitignored: personal)
 │   ├── daily/                       append-only session logs
-│   │   ├── receipts/                v2 current; immutable v3 proposed target
+│   │   ├── receipts/                v3 authoritative; v2 readable history
 │   │   └── archive/YYYY-MM/bag-…/   immutable uncompressed BagIt packages
 │   ├── notes/                       durable OKF pages (flat slugs)
 │   ├── projects/<slug>/             state.md projection + append-only journal.md
@@ -720,7 +720,7 @@ label it incomplete.
   bounded: the trail by size, the artifacts by age, count, and total size.
 - `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
   `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and
-  locks. The proposed target adds `run/capture-intents/`, two active `*-v3.sqlite3`
+  locks. The adopted v3 layout adds `run/capture-intents/`, two active `*-v3.sqlite3`
   files, retained `*-v2-retired.sqlite3` upgrade evidence, legacy-path JSON
   tombstones, migration/adoption evidence, and explicit compatibility treatment for
   `maintenance.lock`. `run/lsp/<owner-nonce>/`

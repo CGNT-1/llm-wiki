@@ -704,9 +704,11 @@ inside the 2-day undo window; no retained queue task/result or legacy queue arti
    and no live project lease, writer, queue worker, maintenance owner, or LSP owner;
    retained LSP failure evidence also blocks deletion. Deleting an
 otherwise eligible `run/` loses undo history. Installers and repair commands never
-remove it automatically. Its one automatic Git operation is the nightly
+remove it automatically. Its automatic Git operations are two: the nightly
 fast-forward of the checkout on its default branch, which never pushes and declines
-when it would touch a locally modified file; it provides no persistent daemon, cloud
+when it would touch a locally modified file, and the nightly commit of the
+`knowledge/` snapshot into its own local repository outside the vault, which never
+pushes either; it provides no persistent daemon, cloud
 service, remote queue/cache, or SQLite knowledge source.
 
 ### Skills (agent-side workflows)
