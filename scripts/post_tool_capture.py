@@ -197,7 +197,8 @@ def _append_tool_tag(
         )
 
         ts = datetime.now().strftime("%H:%M:%S")
-        preview = redact_secrets(target)[:MAX_TARGET_PREVIEW] if target else ""
+        # One line, as the prompt breadcrumb: a line break in a path is not a line of the log.
+        preview = " ".join(redact_secrets(target).split())[:MAX_TARGET_PREVIEW]
         source = canonical_agent(agent)
         block = (
             f"- `[{ts}] tool | {source} | {session_id[:8]} | "

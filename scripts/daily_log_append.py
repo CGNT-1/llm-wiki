@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import sys
 import time
 from collections.abc import Callable
@@ -46,6 +47,24 @@ def append_deadline(budget_seconds: float) -> float:
     return time.monotonic() + budget_seconds
 
 
+# A line that opens a daily entry of its own: a `## [id]` heading or the operation
+# marker (`evidence_resolver.daily_entries`). A block keeps its own first line;
+# any later line of this shape came from a field the writer interpolated — a tool
+# path, a prompt, a model's answer — and would forge an entry, so it is escaped.
+# Every daily write passes here, so a new writer is covered without being listed
+# (audit 2026-09-27 B-5, docs/research/2026-09-27-a-block-opens-one-entry.md).
+_ENTRY_OPENING = re.compile(r"(?m)^(?=## \[|<!-- llm-wiki-operation:)")
+
+
+def contained_block(text: str) -> str:
+    """The block with every entry-opening line after its first escaped."""
+    start = len(text) - len(text.lstrip("\n"))
+    first_end = text.find("\n", start)
+    if first_end == -1:
+        return text
+    return text[:first_end] + _ENTRY_OPENING.sub("\\\\", text[first_end:])
+
+
 def locked_append(
     daily_path: Path,
     text: str,
@@ -61,7 +80,7 @@ def locked_append(
     ``session_end_project_tag``) both delegate here so that all daily-log
     writes share a single serialization point.
     """
-    text = redact_secrets(text)
+    text = contained_block(redact_secrets(text))
     header = f"# Daily Session Memory — {daily_path.stem}\n".encode()
     if not daily_path.exists():
         append_knowledge(
@@ -102,9 +121,8 @@ def locked_append_once(
             deadline=deadline,
             cancelled=cancelled,
         )
-    block = redact_secrets(
-        f"\n{marker}\n{text}{'' if text.endswith(chr(10)) else chr(10)}"
-    ).encode("utf-8")
+    text = contained_block(redact_secrets(text))
+    block = f"\n{marker}\n{text}{'' if text.endswith(chr(10)) else chr(10)}".encode()
     append_knowledge(
         operation_id,
         daily_path,
