@@ -10,6 +10,40 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- A failed code-navigation ownership probe names its step, message, duration and the clock's resolution, and a failed reset is reported, not swallowed (audit 2026-09-27 B-8).
+- The code graph follows star imports (with `__all__`), imports chosen in `try/except`, and a name imported twice; extractor v17 rebuilds stored generations (audit 2026-09-27 C-7).
+- The installers name the branch the nightly update follows and the checks behind a warning, and the smoke-test timeout variable extends the smoke (audit 2026-09-27 C-12).
+- Both installers read `~/.claude.json` through one helper and print the registration command when it cannot be read (audit 2026-09-27 C-11).
+- A configuration request without a section is answered with the asking server's own settings (audit 2026-09-27 C-8).
+- anyio 4.15.1 and cryptography 50.0.1 carry no known advisories, and CI audits the whole lock with pip-audit (audit 2026-09-27 B-19).
+- Every shell function is measured with tree-sitter-bash and stays within the complexity limit; five installer functions were split (audit 2026-09-27, law 5).
+- The Pyright download retries a dropped connection like the other language servers (audit 2026-09-27 C-10).
+- Every child process a script waits for has a deadline, and a test refuses a call without one (audit 2026-09-27 C-9).
+- A failed nightly merge returns every set-aside copy, and the update's time limit counts one fetch (audit 2026-09-27 C-13).
+- The documents state the server retry budget, the nightly snapshot commit and the v3 layout as they are, and a test catches the old wording (audit 2026-09-27 C-17).
+- Hang bounds that were longer than SHORT_TIMEOUT use LONG_TIMEOUT again, and the guard requires it (audit 2026-09-27 B-7).
+- get_context fits its whole answer into `token_budget`, names each item once, and every answer uses one token estimate (UTF-8 bytes / 4) (audit 2026-09-27 B-12).
+- A recall row no longer repeats a cut of its own content in its summary (audit 2026-09-27 C-16).
+- An answer is fresh or stale by its own sources; another project's rewritten `state.md` no longer marks every answer stale (audit 2026-09-27 B-10).
+- An `unsupported` navigation answer is not reported fresh (audit 2026-09-27 C-19).
+- A retrieval stage that was never admitted is reported as not admitted, not as a timeout (audit 2026-09-27 B-9, first half).
+- A note that states no source authority ranks as inferred, as the contract says (audit 2026-09-27 C-15).
+- The HTTP guard passes lifespan events, closes websockets with 1008 and compares bearer tokens as bytes, so a non-ASCII token is a 401, not a 500 (audit 2026-09-27 C-14).
+- Doctor names a writer that holds the writer gate past its lease while its process lives, the state a given-up release leaves behind (audit 2026-09-27 C-3).
+- A day archive split into parts is checked against the part table it recorded, so changing the split rule no longer orphans old archives (audit 2026-09-27 B-17).
+- The documents say that doctor without `--repair` creates and removes one temporary file for its locking probe, and a test requires every other entry unchanged (audit 2026-09-27 C-1).
+- Doctor names a weekly pass that never ran since it became due, or that started and left no result past its scheduler limit (audit 2026-09-27 B-15).
+- Doctor counts every dead queue task until it is redriven or exported, and shows the oldest age (audit 2026-09-27 B-13).
+- Every stored instant is written by one function, `iso_time.utc_text`, and a test refuses another copy (audit 2026-09-27 C-18).
+- An unchanged state is neither linked nor rewritten, so `state.json.previous` is always a separate copy of the version before the last change (audit 2026-09-27 C-20).
+- A reclaim sweep names a file it could not remove and stops its knowledge walk at the step's deadline instead of a count with no basis (audit 2026-09-27 C-2, C-3).
+- No function in the adapter or the contradiction pipeline holds more than two `if` statements (audit 2026-09-27, law 5).
+- A hook input that cannot be read, a failed prompt counter and a failed maintenance or compile start are recorded instead of lost (audit 2026-09-27 C-3).
+- Both capture recovery passes look past records they cannot finish, and compare stored times at one width (audit 2026-09-27 C-4).
+- A capture decision has one size limit for its writer and every reader (audit 2026-09-27 B-3).
+- The redactor catches Google, Telegram, Slack-webhook and URL-parameter secrets, `sshpass -p` and `docker login -p`, and a PEM key without its END line, and no rule is quadratic (audit 2026-09-27 B-4, B-6).
+- Secrets are redacted before any text is cut, so a cut can no longer leave half a token visible (audit 2026-09-27 B-4).
+- A text block written to a daily log opens exactly one entry; a forged heading inside a captured path or preview is escaped (audit 2026-09-27 B-5).
 - Structured data is redacted as structure: a session transcript line stays JSON and loses its secret instead of being broken and dropped, a value under a secret-named key is blanked in event payloads too, and one walker serves the queue, the blackboard, events and transcripts (audit 2026-09-27 A-4).
 - Impact analysis splits a changed file into its edits with Git's own diff in a child that a deadline or a cancel stops, not an in-process quadratic match: a reformatted 7 000-line file takes 0.02 s instead of running past 110 s (audit 2026-09-27 A-5, my regression from B-8).
 - The 90-day history prune keeps every row that shows a quarantine was resolved (a retry of the same request, the parent chain, a commit of the same created file), so it no longer turns doctor permanently red; it deletes in short committed slices until the step's deadline and says when it is unfinished (audit 2026-09-27 A-6, B-1).
