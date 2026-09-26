@@ -7,6 +7,7 @@ is NOT a full DLP scanner. For CI secret scanning, rely on gitleaks.
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 
@@ -350,3 +351,68 @@ def redact_secrets(text: str) -> str:
     # `token=[REDACTED_API_KEY]`. Splitting them into their own pass must not
     # renumber that — the marker is asserted, hashed and stored downstream.
     return _redact_high_entropy(_redact_patterns(_redact_named_values(text)))
+
+
+# --- structured values ------------------------------------------------------
+#
+# A regex over serialized JSON cannot tell a value from the quote that ends it:
+# `export PASSWORD=x` inside a JSON string became `…=[REDACTED],"description"…`,
+# which is no longer JSON, and that turn dropped out of the session record
+# (audit 2026-09-27 A-4). Structured data is redacted as structure: every string
+# leaf through `redact_secrets`, every value under a secret-named key blanked.
+# One walker for the queue, the blackboard, event payloads and transcripts.
+# Research: docs/research/2026-09-27-a-secret-in-structure-is-redacted-as-structure.md
+SECRET_KEYS = frozenset(
+    {
+        "api_key", "apikey", "authorization", "cookie", "credential", "credentials", "pass",
+        "passwd", "passphrase", "password", "private_key", "secret", "set_cookie", "token",
+    }
+)
+_SECRET_KEY_SUFFIXES = ("_api_key", "_authorization", "_cookie", "_credential", "_password", "_secret", "_token")
+
+
+def is_secret_key(key: object) -> bool:
+    """Whether this mapping key names a secret; a non-string key names none.
+
+    JSON turns the other basic key types into "1", "true" and "null", so none of
+    them can spell a secret. See
+    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
+    """
+    if not isinstance(key, str):
+        return False
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+    return normalized in SECRET_KEYS or normalized.endswith(_SECRET_KEY_SUFFIXES)
+
+
+def _redacted_mapping(value: dict) -> dict:
+    return {key: "[REDACTED]" if is_secret_key(key) else redact_structure(item) for key, item in value.items()}
+
+
+def _redacted_container(value: object) -> object:
+    if isinstance(value, dict):
+        return _redacted_mapping(value)
+    if isinstance(value, (list, tuple)):
+        return [redact_structure(item) for item in value]
+    return value
+
+
+def redact_structure(value: object) -> object:
+    """A copy of a JSON-shaped value with its secrets removed, structure intact."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    return _redacted_container(value)
+
+
+def _redacted_line(line: str) -> str:
+    body = line.rstrip("\r\n")
+    try:
+        record = json.loads(body)
+    except ValueError:
+        return redact_secrets(line)
+    ending = line[len(body):]
+    return json.dumps(redact_structure(record), ensure_ascii=False, separators=(",", ":")) + ending
+
+
+def redact_jsonl(text: str) -> str:
+    """JSON Lines with each record redacted as structure; a line that is not JSON as text."""
+    return "".join(_redacted_line(line) for line in text.splitlines(keepends=True))

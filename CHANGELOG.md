@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- Structured data is redacted as structure: a session transcript line stays JSON and loses its secret instead of being broken and dropped, a value under a secret-named key is blanked in event payloads too, and one walker serves the queue, the blackboard, events and transcripts (audit 2026-09-27 A-4).
 - Impact analysis splits a changed file into its edits with Git's own diff in a child that a deadline or a cancel stops, not an in-process quadratic match: a reformatted 7 000-line file takes 0.02 s instead of running past 110 s (audit 2026-09-27 A-5, my regression from B-8).
 - The 90-day history prune keeps every row that shows a quarantine was resolved (a retry of the same request, the parent chain, a commit of the same created file), so it no longer turns doctor permanently red; it deletes in short committed slices until the step's deadline and says when it is unfinished (audit 2026-09-27 A-6, B-1).
 - Five released changelog sections no longer carry a 2026-09-26 line copied into them by mistake, and a test refuses any entry that appears in two sections (audit 2026-09-27 B-18).

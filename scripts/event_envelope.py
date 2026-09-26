@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
 
+from secret_redact import is_secret_key
+
 SCHEMA_VERSION = "1.0"
 AGENT_PATTERNS = (
     (re.compile(r"\bopencode\b", re.IGNORECASE), "opencode"),
@@ -116,7 +118,7 @@ def _redacted_mapping(value: Mapping[Any, Any], redact: Callable[[str], str]) ->
         safe_key = _redacted_key(key, redact)
         if safe_key in redacted:
             raise ValueError("event payload keys collide after redaction")
-        redacted[safe_key] = _redact(item, redact)
+        redacted[safe_key] = "[REDACTED]" if is_secret_key(key) else _redact(item, redact)
     return redacted
 
 

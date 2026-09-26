@@ -30,7 +30,7 @@ from project_journal import (
     ProjectStore,
     recover_project_handoff,
 )
-from secret_redact import redact_secrets
+from secret_redact import redact_jsonl, redact_secrets
 from session_start_project_state import _compute_slug
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -2796,7 +2796,7 @@ def _capture_path_evidence(
         path = _validated_capture_transcript_path(value)
     except FileNotFoundError:
         return None
-    redacted = redact_secrets(_capture_transcript_text(path, limit))
+    redacted = redact_jsonl(_capture_transcript_text(path, limit))
     if not redacted:
         return None
     return redacted

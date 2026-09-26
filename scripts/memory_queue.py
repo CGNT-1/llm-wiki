@@ -51,7 +51,7 @@ from reliable_memory import (
     sha256_bytes,
     validate_schema,
 )
-from secret_redact import redact_secrets
+from secret_redact import redact_secrets, redact_structure
 
 # A task fence's own length; a holder doing slow work renews it
 # (`heartbeat_task_fence`).
@@ -72,22 +72,6 @@ _MAX_CLI_DETAIL_CHARS = 240
 _MAX_QUEUE_STRING_BYTES = 256 * 1024
 _MAX_QUEUE_CONTAINER_MEMBERS = 1024
 _QUEUE_V3_CONTRACT = OperationalDatabaseContract(application_id=0x4C575133)
-_SECRET_KEYS = {
-    "api_key",
-    "apikey",
-    "authorization",
-    "cookie",
-    "credential",
-    "credentials",
-    "pass",
-    "passwd",
-    "passphrase",
-    "password",
-    "private_key",
-    "secret",
-    "set_cookie",
-    "token",
-}
 _CAPTURE_TERMINAL_DISPOSITION_FIELDS = {
     "markdown_committed": {
         "kind",
@@ -2872,22 +2856,6 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return _as_utc(datetime.fromisoformat(value)) if value is not None else None
 
 
-def _is_secret_key(key: object) -> bool:
-    """Whether this payload key names a secret; a non-string key names none.
-
-    JSON turns the other basic key types into "1", "true" and "null", so none of
-    them can spell a secret, and refusing to walk such a payload would have been
-    an `AttributeError` out of `enqueue`. See
-    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
-    """
-    if not isinstance(key, str):
-        return False
-    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
-    return normalized in _SECRET_KEYS or normalized.endswith(
-        ("_api_key", "_authorization", "_cookie", "_credential", "_password", "_secret", "_token")
-    )
-
-
 def _require_task_kind(kind: object) -> None:
     if not isinstance(kind, str) or not kind:
         raise ValueError("kind must be a non-empty bounded string")
@@ -2975,7 +2943,7 @@ def _require_enqueue_arguments(
 
 
 def _validated_payload_bytes(payload: Mapping[str, object]) -> tuple[bytes, str]:
-    payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+    payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
     input_hash = sha256_bytes(payload_bytes)
     validation = validate_payload_blob(payload_bytes, input_hash, parse=True)
     if validation.code is not None:
@@ -3118,7 +3086,7 @@ def _matching_capture_intent(
 
 
 def _validated_capture_payload(payload: Mapping[str, object]) -> tuple[bytes, str]:
-    payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+    payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
     input_hash = sha256_bytes(payload_bytes)
     if validate_payload_blob(payload_bytes, input_hash, parse=True).code is not None:
         raise ValueError("payload_hash_mismatch")
@@ -3348,28 +3316,6 @@ def _blocked_purge(task_id: str, code: str) -> CorruptPurgeProgress:
     return _purge_progress(task_id, "", 0, 0, state="blocked", code=code)
 
 
-def _redacted_mapping(value: dict[object, object]) -> dict[object, object]:
-    """A mapping with secret-named keys blanked and every other value walked."""
-    return {
-        key: "[REDACTED]" if _is_secret_key(key) else _redact_payload(item)
-        for key, item in value.items()
-    }
-
-
-def _redacted_container(value: object) -> object | None:
-    """The redacted copy of a container, or None when the value is not one."""
-    if isinstance(value, (list, tuple)):
-        return [_redact_payload(item) for item in value]
-    if isinstance(value, dict):
-        return _redacted_mapping(value)
-    return None
-
-
-def _redact_payload(value: object) -> object:
-    if isinstance(value, str):
-        return redact_secrets(value)
-    redacted = _redacted_container(value)
-    return value if redacted is None else redacted
 
 
 def _harden_owner_only(path: Path, mode: int) -> None:
@@ -5683,7 +5629,7 @@ class MemoryQueue:
         dedupe_key: str | None = None,
     ) -> str:
         _require_legacy_enqueue_arguments(kind, handler_version, priority, dedupe_key)
-        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+        payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
         payload_json = payload_bytes.decode("utf-8")
         input_hash = sha256_bytes(payload_bytes)
         now = _as_utc(self._clock())
@@ -7863,7 +7809,7 @@ class _QueueV3CandidateReader:
         capture_fence: object,
         owner: OwnerLease,
     ) -> CaptureTaskBinding:
-        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+        payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
         dedupe_key = f"capture:{intent_id}:{handler_version}"
         existing = self._capture_replay_binding(
             intent_id=intent_id,

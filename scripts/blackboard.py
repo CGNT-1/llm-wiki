@@ -56,7 +56,7 @@ from markdown_transaction import (  # noqa: E402
 )
 from memory_state import ROOT  # noqa: E402
 from reliable_memory import begin_immediate  # noqa: E402
-from secret_redact import redact_secrets  # noqa: E402
+from secret_redact import redact_structure  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 _MAX_RESOURCES = 64
@@ -172,7 +172,7 @@ def _bb_dir(project: str) -> Path:
 def _append_jsonl(
     path: Path, record: dict, operation_id: str | None = None
 ) -> None:
-    block = (redact_secrets(json.dumps(record, ensure_ascii=False)) + "\n").encode("utf-8")
+    block = (json.dumps(redact_structure(record), ensure_ascii=False) + "\n").encode("utf-8")
     append_knowledge(operation_id, path, block)
 
 
