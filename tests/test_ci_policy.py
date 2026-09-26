@@ -387,3 +387,22 @@ def test_no_expression_uses_a_double_quoted_string() -> None:
     ]
 
     assert offenders == []
+
+
+def test_the_whole_lock_is_audited_by_a_hash_pinned_auditor() -> None:
+    """Every locked package is read against advisories, by an auditor the lock pins.
+
+    A vulnerable anyio and cryptography sat in `uv.lock` because nothing read the
+    lock against advisories. The auditor comes from the `audit` group, synced
+    alone and `--locked`, so its own version and hashes are the lock's; the
+    export carries every extra and group, and `--disable-pip` makes pip-audit
+    check the export's hashes instead of resolving anything again.
+    """
+    audit = _workflow()["jobs"]["dependency-audit"]
+    commands = _commands(audit)
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "uv sync --locked --only-group audit" in commands
+    assert "uv export --locked --all-extras --all-groups --no-emit-project" in commands
+    assert "pip-audit --requirement" in commands and "--disable-pip" in commands
+    assert re.search(r'(?m)^audit = \[\n    "pip-audit[^"]*",\n\]', project)
