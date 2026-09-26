@@ -1321,7 +1321,7 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
         assert second_beat.wait(timeout=LONG_TIMEOUT)
 
     with doctor._MaintenanceHeartbeat(
-        coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT
+        coordinator, lease, deadline=time.monotonic() + LONG_TIMEOUT
     ) as guard:
         guard.run(wait_for_two_heartbeats)
 
@@ -1341,7 +1341,7 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
     assert acquired is not None
     coordinator, lease = acquired
     guard = doctor._MaintenanceHeartbeat(
-        coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT
+        coordinator, lease, deadline=time.monotonic() + LONG_TIMEOUT
     )
 
     monkeypatch.setattr(

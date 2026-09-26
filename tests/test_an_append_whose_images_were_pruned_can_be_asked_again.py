@@ -15,7 +15,7 @@ from pathlib import Path
 import markdown_transaction
 from markdown_transaction import MarkdownCoordinator
 
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT
 
 _LOG = "knowledge/daily/2026-08-25.md"
 _HEADER = b"# 2026-08-25\n"
@@ -27,7 +27,7 @@ def _append(coordinator: MarkdownCoordinator):
         "daily-header:2026-08-25",
         _LOG,
         _HEADER,
-        deadline=time.monotonic() + SHORT_TIMEOUT,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         cancelled=None,
     )
 

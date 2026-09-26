@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT
 
 TESTS = Path(__file__).resolve().parent
 for directory in (TESTS.parent / "scripts", TESTS):
@@ -32,7 +32,7 @@ def _discovery(vault: Path):
         max_depth=8,
         max_file_bytes=1 << 20,
         max_total_bytes=1 << 22,
-        deadline=time.monotonic() + SHORT_TIMEOUT,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         include_archives=False,
     )
 

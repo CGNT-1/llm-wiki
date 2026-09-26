@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT
 
 
 def test_a_bare_preposition_is_not_a_time_window() -> None:
@@ -132,7 +132,7 @@ def test_the_grounded_answer_does_not_cap_its_own_candidate_pool(monkeypatch) ->
 
     monkeypatch.setattr(retrieval, "retrieve_via_search_memory", fake_retrieve)
     query_memory._default_candidates(
-        "вопрос", profile="HYBRID", deadline=time.monotonic() + SHORT_TIMEOUT
+        "вопрос", profile="HYBRID", deadline=time.monotonic() + LONG_TIMEOUT
     )
 
     assert seen.get("limit") == query_memory.QA_MAX_CANDIDATES

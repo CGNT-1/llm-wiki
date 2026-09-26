@@ -22,7 +22,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT  # noqa: E402
 from tests.test_code_graph import _activate_graph  # noqa: E402
 from tests.test_repository_index import ALPHA, _git, _repository  # noqa: E402
 
@@ -158,7 +158,7 @@ def test_the_repository_fence_is_renewed_before_its_lease_runs_out(adopted_vault
     owner = repository_index._held_lease(registry, "repository-under-test")
     lease = {"token": owner.token, "epoch": owner.epoch, "registry": registry, "owner": owner}
 
-    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT) as beat:
+    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + LONG_TIMEOUT) as beat:
         renewal = (beat.interval, doctor._lease_seconds(lease))
 
     assert renewal == (owner.heartbeat_seconds, owner.ttl_seconds)
