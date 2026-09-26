@@ -11,32 +11,27 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 _WAITING_CALLS = frozenset({"run", "check_output", "check_call", "call"})
 
 
-def _starts_git(node: ast.Call) -> bool:
-    if not node.args or not isinstance(node.args[0], (ast.List, ast.Tuple)):
-        return False
-    elements = node.args[0].elts
-    return bool(elements) and isinstance(elements[0], ast.Constant) and elements[0].value == "git"
-
-
 def _waiting_call(node: ast.AST) -> bool:
     """`subprocess.run(...)` and the other calls that wait for the child."""
     if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
         return False
-    return node.func.attr in _WAITING_CALLS
+    return node.func.attr in _WAITING_CALLS and ast.unparse(node.func.value) == "subprocess"
 
 
-def _untimed_git(node: ast.AST) -> bool:
-    if not _waiting_call(node) or not _starts_git(node):
+def _untimed(node: ast.AST) -> bool:
+    if not _waiting_call(node):
         return False
     return "timeout" not in {keyword.arg for keyword in node.keywords}
 
 
-def test_no_script_waits_on_git_without_a_timeout() -> None:
+def test_no_script_waits_on_a_child_without_a_timeout() -> None:
+    """Any child, not only one whose argv literally starts with `git`: an argv built by a
+    helper (`_argv(cmd)`) hid two untimed git calls (audit 2026-09-27 C-9)."""
     found = [
         f"{path.name}:{node.lineno}"
         for path in sorted(SCRIPTS.rglob("*.py"))
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if _untimed_git(node)
+        if _untimed(node)
     ]
 
     assert found == []

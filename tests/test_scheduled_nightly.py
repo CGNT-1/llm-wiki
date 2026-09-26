@@ -302,9 +302,9 @@ def test_a_running_compile_is_followed_up_to_the_wait_bound_and_then_deferred(mo
     assert scheduled_nightly._wait_compile_finished() is True
 
     monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "not a number")
-    assert scheduled_nightly._compile_wait_seconds() == scheduled_nightly.COMPILE_WAIT_SECONDS
+    assert scheduled_nightly.compile_wait_seconds() == scheduled_nightly.COMPILE_WAIT_SECONDS
     monkeypatch.delenv(scheduled_nightly.COMPILE_WAIT_ENV)
-    assert scheduled_nightly._compile_wait_seconds() == 1800.0
+    assert scheduled_nightly.compile_wait_seconds() == 1800.0
 
 
 def test_a_compile_still_running_defers_the_pass_without_counting_a_failure(monkeypatch):

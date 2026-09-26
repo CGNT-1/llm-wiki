@@ -82,6 +82,13 @@ _LOCAL_GIT_ENVIRONMENT_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 # `docs/research/2026-09-14-a-repository-read-runs-no-config-command.md`.
 GIT_NO_CONFIG_COMMANDS = ("-c", "core.fsmonitor=false")
 
+# One local git call a script waits for. Measured 2026-09-27: `git archive` of this
+# whole repository, the slowest local call the scripts make, took 0.93 s (7.6 MB);
+# 60 s is the bound the nightly update already gives one git call. A hung git (a
+# lock, a filesystem that stopped answering) now ends instead of holding its caller
+# (audit 2026-09-27 C-9, docs/research/2026-09-27-every-child-a-script-waits-for-has-a-deadline.md).
+LOCAL_GIT_TIMEOUT_SECONDS = 60.0
+
 
 def sanitized_git_environment() -> dict[str, str]:
     """Return an environment with ambient repository/config selectors removed."""

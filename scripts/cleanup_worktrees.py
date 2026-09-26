@@ -34,6 +34,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from repository_scope import GIT_NO_CONFIG_COMMANDS, LOCAL_GIT_TIMEOUT_SECONDS
+
 MAIN_BRANCH = os.environ.get("LLM_WIKI_MAIN_BRANCH", "main")
 
 # Where an agent's work actually lands. Asking only about `main` kept 13
@@ -65,10 +67,6 @@ class WorktreeInfo:
         return self._git_permits_removal and self.is_clean and self.is_merged
 
 
-# A worktree's config may name a program for `core.fsmonitor`, which `git status` and
-# `git worktree remove` run. See
-# `docs/research/2026-09-14-a-repository-read-runs-no-config-command.md`.
-GIT_NO_CONFIG_COMMANDS = ("-c", "core.fsmonitor=false")
 
 
 def _argv(cmd: list[str]) -> list[str]:
@@ -76,14 +74,19 @@ def _argv(cmd: list[str]) -> list[str]:
     return [cmd[0], *GIT_NO_CONFIG_COMMANDS, *cmd[1:]]
 
 
+def _completed(cmd: list[str], cwd: Path | None, text: bool) -> subprocess.CompletedProcess:
+    """One git call, bounded: a git that stops answering ends as a failure, not a hang."""
+    try:
+        return subprocess.run(
+            _argv(cmd), cwd=str(cwd) if cwd else None, capture_output=True, text=text, check=False,
+            timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"command timed out: {' '.join(cmd)}") from error
+
+
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
-    result = subprocess.run(
-        _argv(cmd),
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _completed(cmd, cwd, text=True)
     if result.returncode != 0:
         raise RuntimeError(
             f"command failed: {' '.join(cmd)}\n"
@@ -93,12 +96,7 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
 
 
 def _run_bytes(cmd: list[str], cwd: Path | None = None) -> bytes:
-    result = subprocess.run(
-        _argv(cmd),
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        check=False,
-    )
+    result = _completed(cmd, cwd, text=False)
     if result.returncode != 0:
         error = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"command failed: {' '.join(cmd)}\nstderr: {error}")

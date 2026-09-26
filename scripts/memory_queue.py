@@ -14891,22 +14891,23 @@ def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
 
 
 def _manual_compile() -> bool:
-    """Run one compile pass in a child process."""
+    """Run one compile pass in a child process, for as long as one compile may run.
+
+    The bound is the nightly's (`scheduled_nightly.compile_wait_seconds`, measured and
+    operator-set); without one a hung compile held the queue worker for good (audit
+    2026-09-27 C-9).
+    """
+    from scheduled_nightly import compile_wait_seconds
+
     root = _vault_root()
-    command = [
-        sys.executable,
-        str(root / "scripts" / "compile_memory.py"),
-        "--trigger",
-        "auto",
-    ]
-    completed = subprocess.run(
-        command,
-        cwd=root,
-        check=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    command = [sys.executable, str(root / "scripts" / "compile_memory.py"), "--trigger", "auto"]
+    try:
+        completed = subprocess.run(
+            command, cwd=root, check=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=compile_wait_seconds(),
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return completed.returncode == 0
 
 

@@ -2668,6 +2668,13 @@ def file_back(question: str, answer_text: str) -> Path:
     return out
 
 
+# How long the index rebuild child may run. Measured 2026-09-27: 0.11-0.24 s for
+# this vault's 209 pages, interpreter start included; the builder refuses more than
+# `rebuild_memory_index.MAX_PAGE_COUNT` pages, so 60 s is far past its linear cost
+# at that ceiling (audit 2026-09-27 C-9).
+INDEX_REBUILD_SECONDS = 60.0
+
+
 def rebuild_index() -> bool:
     """Run the memory index rebuild. Returns True on success.
 
@@ -2675,13 +2682,14 @@ def rebuild_index() -> bool:
     correctly, but `knowledge/index.md` is now stale until the next
     successful rebuild.
     """
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "rebuild_memory_index.py")],
-        check=False,
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "rebuild_memory_index.py")],
+            check=False, cwd=str(ROOT), capture_output=True, text=True, timeout=INDEX_REBUILD_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"query_memory: rebuild_memory_index did not finish in {INDEX_REBUILD_SECONDS:.0f} s")
+        return False
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()[:500]
         print(f"query_memory: rebuild_memory_index FAILED (rc={result.returncode}): {err}")

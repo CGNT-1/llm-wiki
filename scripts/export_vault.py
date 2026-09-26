@@ -64,6 +64,7 @@ from model_dlp import (  # noqa: E402
     load_policy,
     require_safe_content,
 )
+from repository_scope import LOCAL_GIT_TIMEOUT_SECONDS  # noqa: E402
 
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 10_000
@@ -196,6 +197,7 @@ def _run(*cmd: str, check: bool = True, capture: bool = False) -> subprocess.Com
         check=check,
         text=True,
         capture_output=capture,
+        timeout=LOCAL_GIT_TIMEOUT_SECONDS,
     )
 
 

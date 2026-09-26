@@ -604,7 +604,8 @@ COMPILE_WAIT_SECONDS = 1800.0
 COMPILE_WAIT_ENV = "MEMORY_COMPILE_WAIT_SECONDS"
 
 
-def _compile_wait_seconds() -> float:
+def compile_wait_seconds() -> float:
+    """`MEMORY_COMPILE_WAIT_SECONDS`, else `COMPILE_WAIT_SECONDS`: how long one compile may run."""
     raw = os.environ.get(COMPILE_WAIT_ENV, "").strip()
     try:
         return max(0.0, float(raw))
@@ -614,7 +615,7 @@ def _compile_wait_seconds() -> float:
 
 def _wait_compile_finished() -> bool:
     """Follow a running compile until it stops or the wait bound passes."""
-    deadline = time.monotonic() + _compile_wait_seconds()
+    deadline = time.monotonic() + compile_wait_seconds()
     while _compile_running():
         if time.monotonic() >= deadline:
             return False
@@ -678,7 +679,7 @@ def worst_case_seconds() -> float:
     from self_update import WORST_CASE_SECONDS as UPDATE_SECONDS
 
     steps = [*_intake_steps(), _compile_step(), _fact_keys_step(), *_post_compile_steps()]
-    waits = COMPILE_IDLE_WAIT_SECONDS + _compile_wait_seconds()
+    waits = COMPILE_IDLE_WAIT_SECONDS + compile_wait_seconds()
     budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
     tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
     return float(sum(step.timeout for step in steps) + waits + budgets + tail)
