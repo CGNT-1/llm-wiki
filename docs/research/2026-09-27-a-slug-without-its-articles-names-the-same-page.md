@@ -61,3 +61,18 @@ folding (already merges an existing pair, so it would guess), asking the model a
 
 `tests/test_a_slug_without_its_articles_names_the_same_page.py` fails on the old code:
 a drafted `the-x-y` create beside an existing `x-y` stayed a create of a new page.
+
+## Follow-up: a regular plural, and the live page before its retired duplicate (2026-09-27)
+
+The live vault already held one near-duplicate the article rule could not see:
+`accuracy-denominators-answers-vs-questions` (2026-09-07) and
+`accuracy-denominator-answers-vs-questions` (2026-09-11), the same concept. Measured
+again read-only on the live vault (212 slugs): articles plus a regular plural `s`
+(not `ss`, `us`, `is`) join exactly that pair and no other; function words stay out
+because they would join `x-in-y` with `x-of-y`. The later page was marked
+`status: superseded` with `superseded_by` the earlier one through a recoverable
+transaction (rule 12), and the vault log records it.
+
+The key map now puts live pages before retired ones: when a key names a live page and
+its retired duplicate, a draft reaches the live page; when it names only a retired
+page, the draft is still refused as history, as before.

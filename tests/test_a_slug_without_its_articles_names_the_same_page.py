@@ -68,3 +68,25 @@ def test_the_page_it_names_is_still_refused_when_retired() -> None:
 def test_a_slug_of_only_articles_keys_to_itself() -> None:
     assert compile_memory._slug_key("the") == "the"
     assert compile_memory._slug_key("a-the-an") == "a-the-an"
+
+
+def test_a_plural_slug_updates_the_singular_page() -> None:
+    """The live vault held `accuracy-denominator(s)-answers-vs-questions` twice (2026-09-27)."""
+    assert _decided(
+        [_create("accuracy-denominators-answers-vs-questions")],
+        _page("accuracy-denominator-answers-vs-questions"),
+    ) == [("accuracy-denominator-answers-vs-questions", "update")]
+
+
+def test_a_word_that_only_ends_in_s_is_not_a_plural() -> None:
+    assert compile_memory._slug_key("class-status-analysis") == "class-status-analysis"
+
+
+def test_a_retired_duplicate_leaves_its_live_sibling_the_only_match() -> None:
+    pages = (
+        _page("accuracy-denominators-answers-vs-questions"),
+        _page("accuracy-denominator-answers-vs-questions", status="superseded"),
+    )
+    assert _decided([_create("accuracy-denominator-answers-vs-questions")], *pages) == [
+        ("accuracy-denominators-answers-vs-questions", "update")
+    ]

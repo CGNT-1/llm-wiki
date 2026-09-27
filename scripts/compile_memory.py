@@ -1740,25 +1740,56 @@ def _with_snapshot_actions(
     return kept
 
 
-# Words a slug can gain or lose without naming another page. The narrowest key that
-# caught the observed near-duplicate (`the-x-y` beside `x-y`) and merges no pair of
-# existing pages on the live vault; function words and plurals did merge or would
+# Words a slug can gain or lose without naming another page: articles, and (below) a
+# regular plural. Function words stay out: they would join `x-in-y` and `x-of-y`
 # (docs/research/2026-09-27-a-slug-without-its-articles-names-the-same-page.md).
 _SLUG_ARTICLES = frozenset({"the", "a", "an"})
 
 
+# A word whose last letter is a regular English plural `s`; `ss`, `us` and `is` endings
+# (class, status, analysis) are not plurals. On the live vault (212 slugs, 2026-09-27)
+# articles plus this rule join exactly one pair, a true duplicate the vault already held
+# (`accuracy-denominator(s)-answers-vs-questions`), and no two different pages.
+_NOT_PLURAL_ENDINGS = ("ss", "us", "is")
+
+
+def _singular(word: str) -> str:
+    plural = len(word) > 3 and word.endswith("s") and not word.endswith(_NOT_PLURAL_ENDINGS)
+    return word[:-1] if plural else word
+
+
 def _slug_key(slug: str) -> str:
-    """The slug without its articles; a slug made only of articles is its own key."""
-    return "-".join(word for word in slug.split("-") if word not in _SLUG_ARTICLES) or slug
+    """The slug without its articles, each word singular; a slug of articles alone is its own key."""
+    words = [_singular(word) for word in slug.split("-") if word not in _SLUG_ARTICLES]
+    return "-".join(words) or slug
 
 
 def _existing_slugs_by_key(inputs: CompileInputs) -> dict[str, list[str]]:
-    """Every existing note's slug, grouped by its key."""
+    """Every existing note's slug, grouped by its key; live pages before retired ones.
+
+    When a key names a live page and a retired duplicate of it, only the live page is
+    a candidate, so a draft reaches it. A key that names only a retired page keeps it,
+    so the draft is still refused as history (rule 12).
+    """
     keyed: dict[str, list[str]] = {}
-    slugs = [_note_slug(target.logical_path) for target in inputs.targets]
-    for slug in filter(None, slugs):
-        keyed.setdefault(_slug_key(slug), []).append(slug)
-    return keyed
+    retired: set[str] = set()
+    for target in inputs.targets:
+        _key_target(target, keyed, retired)
+    return {key: _live_first(slugs, retired) for key, slugs in keyed.items()}
+
+
+def _key_target(target: TargetSnapshot, keyed: dict[str, list[str]], retired: set[str]) -> None:
+    slug = _note_slug(target.logical_path)
+    if slug is None:
+        return
+    keyed.setdefault(_slug_key(slug), []).append(slug)
+    if is_retired(_target_status(target)):
+        retired.add(slug)
+
+
+def _live_first(slugs: list[str], retired: set[str]) -> list[str]:
+    live = [slug for slug in slugs if slug not in retired]
+    return live or slugs
 
 
 _NOTE_PREFIX, _NOTE_SUFFIX = "knowledge/notes/", ".md"
