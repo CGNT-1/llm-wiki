@@ -109,3 +109,22 @@ buffered writer is gone; `close()` closes the reader and the socket without send
 A real handler error still reaches `FakeLspServer.failures` and is raised by `close()`
 as before. Guard: `test_a_peer_closes_cleanly_after_its_client_left` — on the old peer
 it fails with `BrokenPipeError` from `close()`.
+
+## Follow-up: a closed stream has no descriptor (2026-09-27)
+
+CI run 36327902173 (PR #45 at 313dba83) failed 17 Windows jobs: every LSP close raised
+`ValueError: I/O operation on closed file`, and the owners left behind then exhausted
+the startup cleanup registry (901 cascading errors). Cause: on Windows the owner now
+closes its own stream, and `_descriptor_of` asked that already closed stream for
+`fileno()`. Python's io documentation: "Once the file is closed, any operation on the
+file (e.g. reading or writing) will raise a ValueError", while `fileno()` documents only
+"An OSError is raised if the IO object does not use a file descriptor." The helper
+caught OSError and AttributeError, not ValueError. The path is gated by
+`_CLOSE_WAITS_FOR_A_READ`, false on Linux, so no Linux run reached it.
+
+Fix: a closed stream has no descriptor (`ValueError` joins the caught errors).
+Guard: `tests/test_lsp_protocol.py` runs every case through both close paths
+(`posix-close`, `windows-close`) on every platform. On the unfixed code the Windows
+path fails on Linux too: 5 failed, 42 errors; fixed: 308 passed. With the Windows
+close path forced on, the 14 suites that failed on Windows CI pass on Linux (715).
+Real Windows remains the final check.

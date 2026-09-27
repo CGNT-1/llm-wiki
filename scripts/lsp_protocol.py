@@ -278,9 +278,16 @@ class _WriteTask:
 
 
 def _descriptor_of(stream: BinaryIO) -> int | None:
+    """The stream's descriptor, or None when it has none or is already closed.
+
+    A closed stream raises ValueError, not OSError ("Once the file is closed, any
+    operation on the file ... will raise a ValueError", io docs). On Windows the owner
+    thread closes its own stream, so close() met one already closed and every LSP
+    close on Windows CI failed (run 36327902173).
+    """
     try:
         return stream.fileno()
-    except (AttributeError, OSError):
+    except (AttributeError, OSError, ValueError):
         return None
 
 

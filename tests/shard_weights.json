@@ -511,7 +511,7 @@
   "test_lsp_positions.py": 0.18,
   "test_lsp_process.py": 356.7,
   "test_lsp_process_tree.py": 1.07,
-  "test_lsp_protocol.py": 5.23,
+  "test_lsp_protocol.py": 5.39,
   "test_lsp_security.py": 15.43,
   "test_lsp_server_profile.py": 0.06,
   "test_lsp_stderr_is_read_as_it_arrives_and_never_stalls_cleanup.py": 4.62,

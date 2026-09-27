@@ -43,6 +43,18 @@ from tests.fake_lsp_server import FakeLspPeer, FakeLspServer
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 
+@pytest.fixture(autouse=True, params=[False, True], ids=["posix-close", "windows-close"])
+def _close_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every case runs through both close paths, not only the one of the host.
+
+    The Windows path (an owner closes its own stream) never ran on Linux, so a
+    `fileno()` on a stream its owner had already closed raised ValueError out of
+    every close on Windows CI only (run 36327902173). A case that needs one path
+    sets the flag itself; its own monkeypatch runs after this one.
+    """
+    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", request.param)
+
+
 @pytest.fixture
 def fake_server() -> FakeLspServer:
     server = FakeLspServer()
