@@ -52,6 +52,7 @@ SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
 from daily_log_append import append_deadline, locked_append  # noqa: E402
 from event_envelope import canonical_agent  # noqa: E402
+from iso_time import local_now  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 # Match the Source line that session_start_project_state.py writes into
@@ -294,7 +295,7 @@ def _tag_session() -> bool:
     if project_dir is None:
         return False
     payload = _read_payload()
-    now = datetime.now()
+    now = local_now()
     slug = _compute_slug(project_dir, vault / "knowledge" / "projects")
     today_file = daily_dir / f"{now.strftime('%Y-%m-%d')}.md"
     _append_entry(

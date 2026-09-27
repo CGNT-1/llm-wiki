@@ -15052,9 +15052,10 @@ def _flush_inputs(payload: Mapping[str, Any], now: datetime):
 
 def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
     """Summarize one session into its daily log."""
+    from iso_time import local_now
     from llm_client import call_llm
 
-    now = _utc_now()
+    now = local_now()
     inputs = _flush_inputs(payload, now)
     if inputs is None:
         return False

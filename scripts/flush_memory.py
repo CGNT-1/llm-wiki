@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from iso_time import local_now  # noqa: E402
 from memory_state import (  # noqa: E402
     MAX_CAPTURE_INTENT_BYTES,
     ROOT,
@@ -593,7 +594,7 @@ def _capture_tier_outcome(tier: str) -> str:
 
 
 def _capture_now() -> datetime:
-    return datetime.now().astimezone()
+    return local_now()
 
 
 def _require_capture_time(value: object) -> datetime:

@@ -1672,13 +1672,12 @@ def _log_decision(
     summary: str, rationale: str = "", *, deadline: float | None = None
 ) -> dict:
     """Append a decision to the daily log."""
-    from datetime import datetime
-
     from daily_log_append import append_daily
+    from iso_time import local_now
     from memory_state import ROOT
 
     slug = "manual-decision"
-    now = datetime.now()
+    now = local_now()
     block = f"\n## [{now.strftime('%H:%M:%S')}] manual decision\n"
     block += f"Trigger: manual\nslug: {slug}\nroot: {ROOT}\n\n"
     block += f"Decision: {summary}\n"

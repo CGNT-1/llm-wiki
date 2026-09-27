@@ -51,6 +51,7 @@ STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve
 from capture_diagnostics import hook_object, record_capture_failure  # noqa: E402
 from capture_operation import claim_operation, complete_operation  # noqa: E402
 from event_envelope import build_event_envelope, canonical_agent  # noqa: E402
+from iso_time import local_now  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 from session_start_project_state import _compute_slug  # noqa: E402
 
@@ -185,7 +186,7 @@ def _append_tool_tag(
             append_deadline,
         )
 
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = local_now().strftime("%H:%M:%S")
         # One line, as the prompt breadcrumb: a line break in a path is not a line of the log.
         preview = " ".join(redact_secrets(target).split())[:MAX_TARGET_PREVIEW]
         source = canonical_agent(agent)

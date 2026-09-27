@@ -18,7 +18,7 @@ import re
 import sys
 import time
 from collections.abc import Callable
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -27,6 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
+from iso_time import local_now  # noqa: E402
 from markdown_transaction import append_knowledge, stable_operation_id  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -188,7 +189,7 @@ def append_daily(
         os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))
     ).resolve()
     daily_dir = root / "knowledge" / "daily"
-    day = datetime.now().strftime("%Y-%m-%d")
+    day = local_now().strftime("%Y-%m-%d")
     path = daily_dir / f"{day}.md"
     text = "\n" + block if not block.startswith("\n") else block
     if operation_id:

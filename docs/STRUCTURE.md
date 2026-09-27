@@ -571,7 +571,10 @@ or nonzero active state remains fail-closed.
 
 ### KNOWLEDGE zone (gitignored: the repository ships no memory)
 - `knowledge/daily/` — append-only `YYYY-MM-DD.md`. Private (gitignored);
-  no daily log is published.
+  no daily log is published. The day and every `## [HH:MM:SS]` heading are the
+  machine's local wall clock, read through `iso_time.local_now()` alone; a claim's
+  `observed_at` is that reading converted to UTC (2026-09-27,
+  `docs/research/2026-09-27-the-daily-log-keeps-one-clock.md`).
 - `knowledge/daily/receipts/` — authoritative immutable Markdown compile receipts.
   Current v2 is keyed by source digest. The proposed v3 target above adds logical
   path identity and commits one source receipt with compile output; v2 then remains

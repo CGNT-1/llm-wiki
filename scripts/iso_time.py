@@ -36,3 +36,34 @@ def utc_text(value: datetime) -> str:
     Research: docs/research/2026-09-26-every-stored-instant-has-one-width.md
     """
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def local_now() -> datetime:
+    """The one clock a daily-log writer reads: the machine's wall clock, aware.
+
+    The daily log is kept in local time, the day capture and session evidence
+    already use; an aware value lets a caller convert it and never guess.
+    Research: docs/research/2026-09-27-the-daily-log-keeps-one-clock.md
+    """
+    return datetime.now().astimezone()
+
+
+def block_instant(day: str, block: str) -> str:
+    """The UTC instant a daily block's local `HH:MM:SS` names, as `…Z` text."""
+    local = datetime.fromisoformat(f"{day}T{block}").astimezone()
+    return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Real zone offsets: whole quarter hours from −12:00 to +14:00 (the IANA range).
+_OFFSET_STEP_SECONDS = 15 * 60
+_OFFSET_RANGE_SECONDS = (-12 * 3600, 14 * 3600)
+
+
+def names_block(instant: str, day: str, block: str) -> bool:
+    """Whether a UTC instant is this local block's reading at some real zone offset.
+
+    Reads no machine zone, so a ledger stays valid after the machine moves.
+    """
+    offset = (datetime.fromisoformat(f"{day}T{block}") - parse_instant(instant).replace(tzinfo=None)).total_seconds()
+    low, high = _OFFSET_RANGE_SECONDS
+    return low <= offset <= high and offset % _OFFSET_STEP_SECONDS == 0

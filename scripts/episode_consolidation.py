@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from iso_time import local_now  # noqa: E402
 from memory_state import ROOT, update_state  # noqa: E402
 from session_evidence import SESSION_EVIDENCE_DIR  # noqa: E402
 
@@ -593,7 +594,7 @@ def consolidate_day(
     keys = [_batch_key(vault, day, batch) for batch in batches]
     progress = _day_progress(state, day)
     logged = _batches_to_find(vault, day, keys, progress)
-    run = _BatchRun(day, call, moment or datetime.now(), progress, deadline, logged)
+    run = _BatchRun(day, call, moment or local_now(), progress, deadline, logged)
     run.all(batches, keys)
     if not set(keys) <= progress.done:
         return _day_outcome("partial", progress, len(batches))
@@ -699,7 +700,7 @@ def pending_days(vault: Path, state: dict, today: str | None = None) -> list[str
 def _today_or(today: str | None) -> str:
     if today is not None:
         return today
-    return datetime.now().strftime("%Y-%m-%d")
+    return local_now().strftime("%Y-%m-%d")
 
 
 def _pending(vault: Path, day: str, before: str, state: dict) -> bool:
@@ -716,7 +717,7 @@ def _skip_reason(vault: Path, day: str, state: dict | None) -> str | None:
 
 
 def _default_day() -> str:
-    return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    return (local_now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

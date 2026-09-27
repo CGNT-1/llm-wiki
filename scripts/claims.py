@@ -25,6 +25,7 @@ from evidence_resolver import (
     EvidenceResolver,
     daily_entries,
 )
+from iso_time import block_instant, names_block
 from reliable_memory import (
     canonical_json_bytes,
     open_operational_db,
@@ -517,7 +518,7 @@ def _timestamp_block(
         digest,
         daily_id,
         block_id,
-        f"{daily_id}T{block_id}Z",
+        block_instant(daily_id, block_id),
         start,
         end,
         source[start:end],
@@ -719,9 +720,8 @@ def _require_observation(record: Mapping[str, object], ref: EvidenceRef) -> None
         raise ValueError(
             "observed evidence block is not a valid HH:MM:SS timestamp"
         ) from exc
-    if re.fullmatch(r"\d{2}:\d{2}:\d{2}", ref.block_id) is None or observed_at != (
-        f"{ref.daily_id}T{ref.block_id}Z"
-    ):
+    well_formed = re.fullmatch(r"\d{2}:\d{2}:\d{2}", ref.block_id) is not None
+    if not (well_formed and names_block(observed_at, ref.daily_id, ref.block_id)):
         raise ValueError("claim observation does not match its evidence block")
 
 

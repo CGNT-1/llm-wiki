@@ -77,6 +77,7 @@ from evidence_resolver import (  # noqa: E402
     _daily_part_bounds,
     daily_entries,
 )
+from iso_time import block_instant  # noqa: E402
 from llm_client import (  # noqa: E402
     call_candidate,
     call_ceiling,
@@ -2245,7 +2246,7 @@ def _derived_claim(
         "fingerprint": fingerprint,
         "text": quote,
         **semantic,
-        "observed_at": f"{date}T{timestamp}Z",
+        "observed_at": block_instant(date, timestamp),
         "lifecycle": "active",
         # The page this ledger lives on is written `confidence: medium` and
         # `source_authority: ai-derived`; a claim lifted from the same line by
