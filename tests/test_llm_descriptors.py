@@ -424,7 +424,7 @@ def test_cli_call_allows_requested_tokens_but_result_keeps_actual_descriptor(
     assert result.descriptor.inference_settings["max_tokens"] == "backend_default"
 
 
-@pytest.mark.parametrize("provider", ["openai", "ollama"])
+@pytest.mark.parametrize("provider", ["openai"])
 def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypatch):
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", "https://first.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -812,7 +812,7 @@ def _http_call(monkeypatch, provider, response_data):
     return result, json.loads(requests[0].data), requests[0].full_url
 
 
-@pytest.mark.parametrize("provider", ["openai", "ollama"])
+@pytest.mark.parametrize("provider", ["openai"])
 def test_openai_compatible_usage_and_request_limit(provider, monkeypatch):
     result, payload, url = _http_call(
         monkeypatch,
@@ -835,7 +835,7 @@ def test_openai_compatible_usage_and_request_limit(provider, monkeypatch):
     assert url.endswith("/v1/chat/completions")
 
 
-@pytest.mark.parametrize("provider", ["openai", "ollama"])
+@pytest.mark.parametrize("provider", ["openai"])
 def test_compatibility_usage_ignores_native_ollama_top_level_fields(provider, monkeypatch):
     result, _, _ = _http_call(
         monkeypatch,

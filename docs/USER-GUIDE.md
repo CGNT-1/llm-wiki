@@ -63,6 +63,13 @@ the selected model to appear in `/api/tags` with local size/digest metadata and 
 Ollama process was restarted with cloud disabled. Do not describe this state as
 verified network isolation.
 
+Calls go to Ollama's native `/api/chat` (the `/v1` in the base URL is accepted and
+stripped), because only that endpoint can set a context window. Each call asks for a
+window that holds its prompt and answer, rounded up to a power of two, at least 4 096
+tokens and never above the model's trained length. On a machine with little memory,
+cap it with `MEMORY_OLLAMA_MAX_CONTEXT=<tokens>`; a prompt that then fills the window
+fails as `context_overflow` rather than being answered half-read.
+
 ---
 
 ## One-time setup
