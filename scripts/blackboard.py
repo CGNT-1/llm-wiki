@@ -64,7 +64,9 @@ _MAX_RESOURCES = 64
 _MAX_RESOURCE_BYTES = 512
 _MAX_TASK_BYTES = 4096
 _MAX_AGENT_BYTES = 128
+# A claim's TTL is caller input: at least one second so the claim is observable at all.
 _MIN_TTL_SECONDS = 1
+# At most one day, so a claim an agent abandoned expires before the next daily nightly pass.
 _MAX_TTL_SECONDS = 86400
 # Settling a claim nobody was told about competes with whatever stopped the
 # announcement, so it is worth more than one try. Six attempts spread over

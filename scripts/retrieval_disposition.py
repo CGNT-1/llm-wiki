@@ -188,8 +188,15 @@ def _print_counts(title: str, counts: dict[str, int]) -> None:
     print(title)
     for name, count in list(counts.items())[:MAX_PRINTED_PAGES]:
         print(f"  {count:>5}  {name}")
-    if not counts:
+    _print_rest(len(counts))
+
+
+def _print_rest(total: int) -> None:
+    """Say what the printout left out, or that nothing was recorded."""
+    if not total:
         print("  (nothing recorded yet)")
+    if total > MAX_PRINTED_PAGES:
+        print(f"  … and {total - MAX_PRINTED_PAGES} more")
 
 
 def main() -> int:

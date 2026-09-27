@@ -43,7 +43,6 @@ _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")
 # that answers it in another (#24, D2): the generations never meet, but the
 # projection of each is one small file the other can read.
 MAX_HINT_ROUTES = 5_000
-MAX_ROUTE_MATCHES = 5
 
 _SCHEMA = (
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
@@ -357,8 +356,8 @@ def _file_routes(path: Path, method: str, route_path: str) -> list[dict]:
     with closing(_open_read_only(path)) as database:
         rows = database.execute(
             "SELECT handler, file, line FROM route WHERE method = ? AND path = ? "
-            "ORDER BY handler LIMIT ?",
-            (method, route_path, MAX_ROUTE_MATCHES),
+            "ORDER BY handler",
+            (method, route_path),
         ).fetchall()
     return [_foreign_route(meta, row) for row in rows]
 
@@ -390,11 +389,18 @@ def find_routes(
 
     A damaged or foreign file answers nothing rather than raising: the tables
     are disposable projections, and a cross-service hint is a convenience.
+
+    Every match is returned. The answer used to keep the first five and drop the
+    rest without a mark, though several services answering one method and path is
+    the misconfiguration a reader most needs to see in full. The bound is the one
+    each file already has — it holds at most `MAX_HINT_ROUTES` routes — and the
+    dependency answer's own row limit. See
+    `docs/research/2026-09-27-a-cut-says-what-it-left-out.md`.
     """
     found: list[dict] = []
     for path in _hint_files(state_root, exclude_checkout_id):
         found.extend(_quiet_file_routes(path, str(method), str(route_path)))
-    return found[:MAX_ROUTE_MATCHES]
+    return found
 
 
 def _quiet_file_routes(path: Path, method: str, route_path: str) -> list[dict]:

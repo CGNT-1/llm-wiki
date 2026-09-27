@@ -58,13 +58,16 @@ from reliable_memory import (  # noqa: E402
     sha256_bytes,
 )
 
-DEFAULT_HOT_DAYS = 90
+# The Stage 2 contract's 90 hot days (CLAUDE.md: "Archives keep 90 hot days"), from
+# its one definition rather than a second literal.
+DEFAULT_HOT_DAYS = DEFAULTS.archive_hot_days
 from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
 
 DEFAULT_TRANSACTION_RETENTION_DAYS = UNDO_RETENTION_DAYS
 MAX_POLICY_BYTES = 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10_000
 MAX_ARCHIVE_MONTHS = 1_200
+# An archive step yields to a live Markdown writer rather than queueing; the next nightly retries. basis unknown — value predates measurement; review when archive steps report the gate busy on consecutive nights.
 ARCHIVE_WRITER_WAIT_SECONDS = 0.25
 # Explicit access control entries survive `/inheritance:r`, which only drops
 # inherited ones. Windows images place explicit SYSTEM, Administrators and

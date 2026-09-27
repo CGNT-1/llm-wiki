@@ -109,6 +109,7 @@ from reliable_memory import (  # noqa: E402
     sha256_bytes,
     validate_schema,
 )
+from settings import raise_hint, setting_value  # noqa: E402
 from vault_log import LOG_NAME  # noqa: E402
 
 if TYPE_CHECKING:
@@ -139,8 +140,6 @@ COMPILER_VERSION = "2.0.0"
 NORMALIZATION_VERSION = "normalize-v2"
 # One daily log the compile reads; the evidence graph's source bound is 16 GiB.
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
-MAX_TOTAL_SOURCE_BYTES = 32 * 1024 * 1024
-MAX_SOURCE_COUNT = 2_000
 MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OPERATIONS = 100
 MAX_EVIDENCE_PER_OPERATION = 32
@@ -166,6 +165,10 @@ CLAIM_RECORD_SCHEMA = json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))[
 # `"fingerprint": "a1b2c3d4e5f6a1b2..."` and a `block:` naming a hex prefix
 # instead of a time — and the whole two-page plan died on it. See
 # `docs/research/2026-08-28-who-computes-a-claims-provenance.md`.
+# The plan's schema asks for at most this many claims per page (`maxItems`), so the
+# cap repeats the request; a claim past it is reported like any other drop
+# (`_report_dropped_claim`). Basis of the number unknown — review when pages
+# routinely reach it, which the drop log counts.
 MAX_CLAIMS_PER_OPERATION = 8
 CLAIM_CANDIDATE_SCHEMA = {
     "type": "object",
@@ -456,13 +459,15 @@ class _SourceBudget:
     def __init__(self, sources: list[SourceSnapshot]) -> None:
         self._sources = sources
         self._total_bytes = 0
+        self._max_sources = setting_value("compile.max_sources")
+        self._max_total_bytes = setting_value("compile.max_total_source_bytes")
 
     def add(self, source: SourceSnapshot) -> None:
-        if len(self._sources) >= MAX_SOURCE_COUNT:
-            raise ValueError("compile source count exceeds limit")
+        if len(self._sources) >= self._max_sources:
+            raise ValueError(f"compile source count exceeds limit; {raise_hint('compile.max_sources')}")
         self._total_bytes += len(source.content)
-        if self._total_bytes > MAX_TOTAL_SOURCE_BYTES:
-            raise ValueError("compile source bytes exceed limit")
+        if self._total_bytes > self._max_total_bytes:
+            raise ValueError(f"compile source bytes exceed limit; {raise_hint('compile.max_total_source_bytes')}")
         self._sources.append(source)
 
 
@@ -1428,6 +1433,13 @@ def _admitted_candidates(claims: object, slug: str) -> list[object]:
         _report_dropped_claim(slug, "claims is not an array")
         return []
     kept = [item for item in claims if _claim_candidate_admitted(item, slug)]
+    return _within_the_claim_cap(kept, slug)
+
+
+def _within_the_claim_cap(kept: list[object], slug: str) -> list[object]:
+    """The first claims the schema allows; each one past it is reported as dropped."""
+    for index in range(MAX_CLAIMS_PER_OPERATION, len(kept)):
+        _report_dropped_claim(slug, f"claim {index + 1} is past the {MAX_CLAIMS_PER_OPERATION} a page may carry")
     return kept[:MAX_CLAIMS_PER_OPERATION]
 
 
@@ -1712,10 +1724,71 @@ def _with_snapshot_actions(
     section, so the rewrite is mechanical and costs no tokens. See
     `docs/research/2026-09-17-the-compile-decides-what-the-snapshot-already-knows.md`.
     """
+    _adopt_existing_slugs(operations, inputs)
     kept = [item for item in operations if not _names_retired_page(item, inputs)]
     for operation in kept:
         _follow_snapshot(operation, inputs)
     return kept
+
+
+# Words a slug can gain or lose without naming another page. The narrowest key that
+# caught the observed near-duplicate (`the-x-y` beside `x-y`) and merges no pair of
+# existing pages on the live vault; function words and plurals did merge or would
+# (docs/research/2026-09-27-a-slug-without-its-articles-names-the-same-page.md).
+_SLUG_ARTICLES = frozenset({"the", "a", "an"})
+
+
+def _slug_key(slug: str) -> str:
+    """The slug without its articles; a slug made only of articles is its own key."""
+    return "-".join(word for word in slug.split("-") if word not in _SLUG_ARTICLES) or slug
+
+
+def _existing_slugs_by_key(inputs: CompileInputs) -> dict[str, list[str]]:
+    """Every existing note's slug, grouped by its key."""
+    keyed: dict[str, list[str]] = {}
+    slugs = [_note_slug(target.logical_path) for target in inputs.targets]
+    for slug in filter(None, slugs):
+        keyed.setdefault(_slug_key(slug), []).append(slug)
+    return keyed
+
+
+_NOTE_PREFIX, _NOTE_SUFFIX = "knowledge/notes/", ".md"
+
+
+def _note_slug(logical_path: str) -> str | None:
+    """`x` for `knowledge/notes/x.md`; None for anything a draft cannot name."""
+    name = logical_path.removeprefix(_NOTE_PREFIX).removesuffix(_NOTE_SUFFIX)
+    if f"{_NOTE_PREFIX}{name}{_NOTE_SUFFIX}" != logical_path or "/" in name:
+        return None
+    return name
+
+
+def _adopt_existing_slugs(operations: list[object], inputs: CompileInputs) -> None:
+    """A drafted slug that names an existing page without its articles becomes that page."""
+    keyed = _existing_slugs_by_key(inputs)
+    planned = {operation["slug"] for operation in operations}
+    for operation in operations:
+        _adopt_existing_slug(operation, _named_page(operation["slug"], keyed), planned)
+
+
+def _named_page(slug: str, keyed: Mapping[str, list[str]]) -> str:
+    """The one existing page this slug names, or the slug itself when none or several do."""
+    existing = keyed.get(_slug_key(slug), [])
+    if slug in existing or not existing:
+        return slug
+    if len(existing) > 1:
+        print(f"compile_memory: {slug}: kept, it names {len(existing)} existing pages", file=sys.stderr)
+        return slug
+    return existing[0]
+
+
+def _adopt_existing_slug(operation: dict[str, object], named: str, planned: set[str]) -> None:
+    """Rename to the existing page unless another operation of the plan already names it."""
+    if named == operation["slug"] or named in planned:
+        return
+    print(f"compile_memory: {operation['slug']}: names the existing page {named}", file=sys.stderr)
+    planned.add(named)
+    operation["slug"] = named
 
 
 def _names_retired_page(operation: dict[str, object], inputs: CompileInputs) -> bool:
@@ -4311,14 +4384,10 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
-# One compile call may run this long. Measured 2026-08-28 on the live vault:
-# the pass failed at the 90s default with `draft:claude:provider_timeout` and
-# the same daily compiled at 600s, the whole pass — a rejected draft, its retry
-# and the critique batches — taking 225s of wall time. So one call is over 90s
-# and under 225s, and this covers the observed pass with room without becoming
-# "no ceiling". The default stays short for everyone else: a stuck capture
-# flush should still be heard about in ninety seconds.
-COMPILE_PROVIDER_CEILING_S = 300
+# One compile call may run as long as the setting `provider.draft_ceiling_seconds`
+# (600 s by default; its measurements and reason are in scripts/settings.py). The
+# client's 90 s default stays for every other call, so a stuck capture flush is still
+# heard about quickly; MEMORY_LLM_TIMEOUT_S, when set, overrides both.
 
 
 def _report_deprecated_flags(args: argparse.Namespace) -> None:
@@ -4390,7 +4459,7 @@ def _compile_under_lock(
         return 1
     _mark_started_unless_dry(args)
     try:
-        with call_ceiling(COMPILE_PROVIDER_CEILING_S):
+        with call_ceiling(setting_value("provider.draft_ceiling_seconds")):
             return _run(args, deadline=deadline, cancelled=cancelled, owner=owner)
     except BaseException as e:  # noqa: BLE001
         _mark_error_unless_dry(args, e)

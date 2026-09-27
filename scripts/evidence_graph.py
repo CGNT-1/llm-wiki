@@ -1718,6 +1718,9 @@ def _format_validation_key(
 # file lives beside the generations, never inside one, so an activated
 # generation stays byte-for-byte immutable.
 _FORMAT_RECEIPT_NAME = "format-validated.json"
+# The newest verdicts kept, a cache: an evicted key costs one re-validation (about
+# twenty seconds), never a wrong answer, and 32 exceeds the artifacts one
+# installation uses between nightly refreshes.
 _MAX_FORMAT_RECEIPTS = 32
 _MAX_FORMAT_RECEIPT_BYTES = 64 * 1024
 

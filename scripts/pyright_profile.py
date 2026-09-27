@@ -124,7 +124,9 @@ MAX_PYRIGHT_MANIFEST_DOMAIN_DEPTH = 64
 MAX_PYRIGHT_MANIFEST_DOMAIN_NODES = 4096
 MAX_SERVER_BYTES = 64 * 1024 * 1024
 MAX_NODE_VERSION_BYTES = 128
+# `node --version` probe while qualifying Pyright. basis unknown — value predates measurement; review when the probe times out on a working Node.
 NODE_PROBE_TIMEOUT_SECONDS = 2.0
+# Time to reap the probe after its deadline; small, since the probe has already answered or failed.
 NODE_PROBE_CLEANUP_SECONDS = 0.5
 _MAX_NODE_PROBE_OWNERS = 8
 # How long one `node --version` answer stands for the executable it was taken

@@ -25,6 +25,7 @@ from bounded_io import (
 )
 from code_languages import language_for_path
 from page_status import is_retired
+from settings import raise_hint, setting_value
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
@@ -36,9 +37,7 @@ COLLECTOR_VERSION = "corpus-collector/v1"
 # `docs/research/2026-09-17-a-chunker-that-changes-changes-its-version.md`.
 EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
 
-MAX_CORPUS_FILES = 10_000
 MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-MAX_CORPUS_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_CORPUS_INSPECTED_ENTRIES = 50_000
 MAX_CORPUS_DIRECTORIES = 5_000
 MAX_CORPUS_DEPTH = 16
@@ -993,7 +992,7 @@ class _Discovery:
         self._count_bytes(content)
         self.candidates[relative] = _Candidate(path, relative, kind, project, seal, content)
         if len(self.candidates) > self.max_files:
-            raise ValueError("corpus file limit exceeded")
+            raise ValueError(f"corpus file limit exceeded; {raise_hint('corpus.max_files')}")
 
     def _require_unseen(self, relative: str) -> None:
         if relative in self.candidates:
@@ -1004,7 +1003,7 @@ class _Discovery:
             return
         self.total_bytes += len(content)
         if self.total_bytes > self.max_total_bytes:
-            raise ValueError("corpus total byte limit exceeded")
+            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
 
     def walk(self, root: Path, kind: str) -> None:
         if not root.exists():
@@ -2556,7 +2555,7 @@ class _Capture:
     def _count_bytes(self, size: int) -> None:
         self.total += size
         if self.total > self.policy.max_total_bytes:
-            raise ValueError("corpus total byte limit exceeded")
+            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
 
     def _store(
         self,
@@ -2673,6 +2672,11 @@ def _captured_after_retries(
     raise CorpusChanged(f"corpus never held still for one pass: {last}")
 
 
+def _or_setting(given: int | None, name: str, vault: Path) -> int:
+    """A ceiling the caller passed, else the vault's `settings` value for it."""
+    return setting_value(name, vault) if given is None else given
+
+
 def collect_corpus(
     vault: Path,
     *,
@@ -2681,9 +2685,9 @@ def collect_corpus(
     approved_code_roots: Iterable[str] = APPROVED_CODE_ROOTS,
     include_historical: bool = False,
     as_of: str | date | datetime | None = None,
-    max_files: int = MAX_CORPUS_FILES,
+    max_files: int | None = None,
     max_file_bytes: int = MAX_CORPUS_FILE_BYTES,
-    max_total_bytes: int = MAX_CORPUS_TOTAL_BYTES,
+    max_total_bytes: int | None = None,
     max_entries: int = MAX_CORPUS_INSPECTED_ENTRIES,
     max_directories: int = MAX_CORPUS_DIRECTORIES,
     max_depth: int = MAX_CORPUS_DEPTH,
@@ -2708,9 +2712,9 @@ def collect_corpus(
         approved_code_roots=approved_code_roots,
         include_historical=include_historical,
         as_of=as_of,
-        max_files=max_files,
+        max_files=_or_setting(max_files, "corpus.max_files", root),
         max_file_bytes=max_file_bytes,
-        max_total_bytes=max_total_bytes,
+        max_total_bytes=_or_setting(max_total_bytes, "corpus.max_total_bytes", root),
         max_entries=max_entries,
         max_directories=max_directories,
         max_depth=max_depth,

@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from corpus_snapshot import CapturedSource, read_frontmatter
 from graph_storable import storable_identity_key, storable_metadata
 from reliable_memory import canonical_json_bytes
+from settings import raise_hint, setting_value
 
 EXTRACTOR_VERSION = "knowledge-extractor/v1"
-MAX_SOURCES = 10_000
 # Records one extraction may produce; `episode_consolidation.MAX_RECORDS` is a day's session records.
 MAX_RECORDS = 100_000
 
@@ -577,8 +577,14 @@ def _require_extraction_arguments(
     _require_positive_bound(max_records, "max_records")
     _require_callable_cancel(cancelled)
     assert isinstance(max_sources, int) and isinstance(sources, Sequence)
-    if len(sources) > min(max_sources, MAX_SOURCES):
-        raise ValueError("knowledge extraction source ceiling exceeded")
+    if len(sources) > max_sources:
+        raise ValueError(f"knowledge extraction source ceiling exceeded; {raise_hint('extraction.max_sources')}")
+
+
+def source_ceiling(max_sources: int | None) -> int:
+    """The caller's bound, never above the `settings` extraction.max_sources ceiling."""
+    ceiling = setting_value("extraction.max_sources")
+    return ceiling if max_sources is None else min(max_sources, ceiling)
 
 
 def _require_captured_sources(ordered: Sequence[object]) -> None:
@@ -605,13 +611,14 @@ def extract_knowledge(
     sources: Sequence[CapturedSource],
     *,
     symbol_index: Mapping[str, str] | None = None,
-    max_sources: int = MAX_SOURCES,
+    max_sources: int | None = None,
     max_records: int = MAX_RECORDS,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
 ) -> ExtractionResult:
     """Extract deterministic graph rows without reading or mutating live files."""
+    max_sources = source_ceiling(max_sources)
     _require_extraction_arguments(sources, max_sources, max_records, cancelled)
     _check_stop(deadline, monotonic, cancelled)
     ordered = sorted(sources, key=lambda item: item.record.relative_path)

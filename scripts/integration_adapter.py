@@ -34,6 +34,7 @@ from secret_redact import describe_error, redact_jsonl, redact_secrets
 from session_start_project_state import _compute_slug
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
+# A delegate without its own budget stops here, inside the host hook's budget (see the note below).
 DELEGATE_TIMEOUT_SECONDS = 10
 # Delegates on the host's 5-second hooks stop before the host stops the hook, so
 # a hang is recorded here instead of vanishing with the process (audit B-11,
@@ -48,8 +49,10 @@ DELEGATE_TIMEOUTS = {
     "user_prompt_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
     "post_tool_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
 }
+# The unattended queue drain's ceiling; the nightly step it runs in is bounded separately. basis unknown — value predates measurement; review when the nightly queue step reports this drain timing out.
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 CAPTURE_DRAIN_MAX_TASKS = 20
+# The capture drain stops before MAINTENANCE_DRAIN_TIMEOUT_SECONDS (600) kills it, so it can report. basis unknown — value predates measurement; review when capture drains end unfinished.
 CAPTURE_DRAIN_SECONDS = 450
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
 MAX_CHECKPOINT_ERROR_CHARS = 500
@@ -1373,7 +1376,8 @@ MAX_PENDING_CHECKPOINT_ITEMS = 40
 # `_bounded_pending_batch_count` never accepts more than 100 evidence ids into
 # one batch: a smaller window would change how many events a batch carries, and
 # a larger one would only claim items no cycle can select.
-# See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
+# See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`. Items past
+# the window stay queued for the next cycle; nothing is dropped.
 PENDING_CLAIM_WINDOW = 100
 
 
@@ -2925,6 +2929,7 @@ def _encoded_capture_record(source: Mapping[str, object]) -> tuple[dict[str, obj
     return record, canonical_json_bytes(record)
 
 
+# Times the capture record is shrunk to fit its byte bound before it is refused. basis unknown — value predates measurement; review when a capture is refused as unfittable.
 CAPTURE_FIT_ATTEMPTS = 4
 
 

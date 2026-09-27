@@ -24,6 +24,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 
+# The Reliability v3 contract's coordination values, fixed in its plan
+# (docs/superpowers/plans/2026-07-13-reliable-memory.md) and pinned by
+# tests/test_reliable_memory.py. They are not operator settings (law 9 class c, kept):
+# leases and heartbeats are pairs whose ratio every live owner relies on (a heartbeat
+# at a third of its lease), attempt counts, busy waits and worker bounds are the
+# plan's, and retention days are the contract's undo/archive windows (CLAUDE.md,
+# Stage 2: "Archives keep 90 hot days"). Changing one means changing the contract.
 @dataclass(frozen=True)
 class ReliableMemoryDefaults:
     markdown_busy_ms: int = 10_000

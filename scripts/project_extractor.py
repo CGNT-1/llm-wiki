@@ -11,15 +11,16 @@ from dataclasses import dataclass
 from corpus_snapshot import CapturedSource
 from knowledge_extractor import (
     MAX_RECORDS,
-    MAX_SOURCES,
     ExtractionResult,
     _evidence,
     _identifier,
     _node,
     _occurrence,
+    source_ceiling,
 )
 from project_journal import parse_journal_events
 from reliable_memory import canonical_json_bytes
+from settings import raise_hint
 
 EXTRACTOR_VERSION = "project-extractor/v1"
 
@@ -50,13 +51,14 @@ def _check_stop(
 def extract_projects(
     sources: Sequence[CapturedSource],
     *,
-    max_sources: int = MAX_SOURCES,
+    max_sources: int | None = None,
     max_records: int = MAX_RECORDS,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
 ) -> ExtractionResult:
     """Project journal projection for graph construction; never writes the journal."""
+    max_sources = source_ceiling(max_sources)
     _require_extraction_options(sources, max_sources, max_records, cancelled)
     _check_stop(deadline, monotonic, cancelled)
     _require_intact_sources(sources)
@@ -76,8 +78,8 @@ def _require_extraction_options(
     _require_positive("max_records", max_records)
     if cancelled is not None and not callable(cancelled):
         raise TypeError("cancelled must be callable")
-    if len(sources) > min(max_sources, MAX_SOURCES):
-        raise ValueError("project extraction source ceiling exceeded")
+    if len(sources) > max_sources:
+        raise ValueError(f"project extraction source ceiling exceeded; {raise_hint('extraction.max_sources')}")
 
 
 def _require_source_sequence(sources: object) -> None:

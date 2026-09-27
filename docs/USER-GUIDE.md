@@ -718,6 +718,46 @@ when it would touch a locally modified file, and the nightly commit of the
 pushes either; it provides no persistent daemon, cloud
 service, remote queue/cache, or SQLite knowledge source.
 
+### Limits you can raise (`llm-wiki.toml`)
+
+A few pipelines hold their whole input in memory, so each stops at a size ceiling:
+the index rebuild and the compile at 2 000 pages or 32 MiB, the search corpus at
+10 000 files or 64 MiB, and a few more. When your vault grows past one, the pipeline
+stops with a message that names the setting to raise, for example
+`raise corpus.max_files in llm-wiki.toml or LLM_WIKI_CORPUS_MAX_FILES`. `doctor`
+warns earlier, once the vault is at 80 % of a ceiling.
+
+To raise one, create `llm-wiki.toml` in the vault root (it is gitignored):
+
+```toml
+[corpus]
+max_files = 20000
+```
+
+For a single run, set the variable instead: `LLM_WIKI_CORPUS_MAX_FILES=20000`. A
+misspelt key or a value that is not a positive integer stops the run with the key's
+name instead of being ignored. `uv run python scripts/doctor.py` shows every value you
+changed and where it came from. Every setting, with its default and the reason for it,
+is listed in `scripts/settings.py`.
+
+How long the vault keeps its own disposable history is a setting too (section
+`[retention]`), for a machine short of disk or an operator who wants a longer record:
+
+- `report_days` (30), `report_files` (60), `report_bytes` (32 MiB) — maintenance
+  reports under `logs/` and their step output;
+- `telemetry_days` (90) — retrieval telemetry;
+- `benchmark_run_days` (30) — benchmark run directories under `cache/benchmarks/`;
+- `config_backup_days` (90) — backups of agent configuration the installer rewrote.
+
+One more, section `[provider]`: `draft_ceiling_seconds` (600) is how long one compile
+draft or episode batch may wait for the model. Drafts measured 99 to 418 s on a loaded
+machine; raise it if compiles report `provider_timeout`. `MEMORY_LLM_TIMEOUT_S`, when
+set, still overrides every call.
+
+Other limits are not settings: they are protocol values, safety bounds on input, or
+the timing a lease and its heartbeat share. Each states its reason where it is defined,
+or is listed in `tests/fixtures/law9-unexplained-limits.txt` until it does.
+
 ### Skills (agent-side workflows)
 
 The 9 skills in `skills/` are invokable from your agent:

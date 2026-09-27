@@ -16,6 +16,7 @@ import urllib.request
 
 from bounded_io import IO_CHUNK_BYTES
 
+# One network read of a pinned download; the install's own deadline bounds the whole. basis unknown — value predates measurement; review when downloads time out on a working network.
 NETWORK_TIMEOUT_SECONDS = 30.0
 CHUNK_BYTES = IO_CHUNK_BYTES
 # The bounds every pinned archive install shares (Pyright and the three other

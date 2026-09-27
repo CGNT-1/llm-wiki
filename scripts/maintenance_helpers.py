@@ -25,6 +25,7 @@ from pathlib import Path
 import maybe_compile
 from memory_state import REPORTS_DIR, ROOT
 from secret_redact import redact_secrets
+from settings import setting_value
 from sync_memory import _run_process_tree as _run_tree
 
 ARTIFACT_DIR = REPORTS_DIR / "maintenance"
@@ -32,17 +33,16 @@ STEP_SUMMARY_LINES = 6
 STEP_ERROR_CHARS = 300
 MAX_STEP_TAIL_BYTES = 8 * 1024
 MAX_STEP_HEAD_BYTES = 8 * 1024
-REPORT_RETENTION_DAYS = 30
-REPORT_RETENTION_FILES = 60
-REPORT_RETENTION_BYTES = 32 * 1024 * 1024
+# Report retention is operator-set: settings `retention.report_days`,
+# `retention.report_files` and `retention.report_bytes` (law 9,
+# docs/research/2026-09-27-every-limit-states-its-reason.md).
 # Step artifacts live as long as the reports that point at them. Held to the
 # report count (60) they lasted about two nights, and a 30-day report's "full
 # output" pointer led nowhere (audit C-31,
 # docs/research/2026-09-25-a-report-link-outlives-no-report.md). Measured on this
 # vault 2026-09-23..25: 13 to 32 artifacts a day, 60 of them 260 KB; the size
-# bound above still caps the family.
+# bound still caps the family.
 ARTIFACTS_PER_DAY = 64
-ARTIFACT_RETENTION_FILES = REPORT_RETENTION_DAYS * ARTIFACTS_PER_DAY
 # The scheduler's own logs are appended to for the life of the vault (launchd's
 # StandardOutPath, the cron `>>`) and nothing rotates them, so the family size rule
 # above is their only bound. See
@@ -274,24 +274,38 @@ def _unlink(path: Path) -> bool:
     return True
 
 
+def _retention(max_age_days: int | None, max_files: int | None, max_bytes: int | None) -> tuple[int, int, int]:
+    """The caller's bounds, each one left unset read from the operator's settings."""
+    return (
+        setting_value("retention.report_days") if max_age_days is None else max_age_days,
+        setting_value("retention.report_files") if max_files is None else max_files,
+        setting_value("retention.report_bytes") if max_bytes is None else max_bytes,
+    )
+
+
 def prune_reports(
     directory: Path,
     pattern: str,
     *,
-    max_age_days: int = REPORT_RETENTION_DAYS,
-    max_files: int = REPORT_RETENTION_FILES,
-    max_bytes: int = REPORT_RETENTION_BYTES,
+    max_age_days: int | None = None,
+    max_files: int | None = None,
+    max_bytes: int | None = None,
 ) -> int:
-    """Bounded retention over one report family: age, count, and total size."""
+    """Bounded retention over one report family: age, count, and total size.
+
+    A bound left unset is the operator's `retention.report_*` setting.
+    """
     if not directory.exists():
         return 0
     entries = _report_entries(directory, pattern)
-    doomed = (
-        _expired(entries, max_age_days)
-        | _over_count(entries, max_files)
-        | _over_size(entries, max_bytes)
-    )
+    days, files, size = _retention(max_age_days, max_files, max_bytes)
+    doomed = _expired(entries, days) | _over_count(entries, files) | _over_size(entries, size)
     return sum(1 for path in doomed if _unlink(path))
+
+
+def artifact_retention_files() -> int:
+    """Step artifacts kept: as many days of them as reports are kept."""
+    return setting_value("retention.report_days") * ARTIFACTS_PER_DAY
 
 
 def prune_maintenance_output() -> int:
@@ -299,7 +313,7 @@ def prune_maintenance_output() -> int:
     removed = sum(
         prune_reports(REPORTS_DIR, pattern) for pattern in MAINTENANCE_REPORT_PATTERNS
     )
-    return removed + prune_reports(ARTIFACT_DIR, ARTIFACT_PATTERN, max_files=ARTIFACT_RETENTION_FILES)
+    return removed + prune_reports(ARTIFACT_DIR, ARTIFACT_PATTERN, max_files=artifact_retention_files())
 
 
 def _trim_in_place(path: Path, keep_bytes: int) -> None:

@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 MAX_INPUT_BYTES = 64 * 1024
+# Resolving the repository scope runs inside the host's 5-second hook, so it gets under half of it.
 SCOPE_DEADLINE_SECONDS = 2.0
 SOURCES = ("claude", "codex", "opencode")
 SEARCH_COMMANDS = frozenset({"rg", "grep", "egrep", "fgrep", "ag", "ack", "git-grep"})

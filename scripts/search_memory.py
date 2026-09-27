@@ -43,8 +43,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from corpus_snapshot import (  # noqa: E402
     MAX_CORPUS_FILE_BYTES,
-    MAX_CORPUS_FILES,
-    MAX_CORPUS_TOTAL_BYTES,
     CorpusSnapshot,
     canonical_retrieval_chunks,
     validate_canonical_source_manifest,
@@ -61,9 +59,9 @@ from reliable_memory import (  # noqa: E402
     validate_runtime_file,
 )
 from secret_redact import redact_secrets  # noqa: E402
+from settings import raise_hint, setting_value  # noqa: E402
 
 _INDEX_REPLACE_WAIT_SECONDS = 1.0
-MAX_SEARCHABLE_PAGES = 10_000
 MAX_SEARCH_ENTRIES = 20_000
 MAX_SEARCH_DIRECTORIES = 2_000
 MAX_SEARCH_DEPTH = 32
@@ -1366,6 +1364,7 @@ class _PageWalkLimits:
         self.deadline = deadline
         self.entries = 0
         self.directories = 0
+        self.max_pages = setting_value("search.max_pages")
 
     def check_deadline(self) -> None:
         if time.monotonic() >= self.deadline:
@@ -1482,8 +1481,8 @@ def _collect_directory_pages(
             continue
         seen.add(md)
         pages.append(md)
-        if len(pages) > MAX_SEARCHABLE_PAGES:
-            raise ValueError("searchable page limit exceeded")
+        if len(pages) > limits.max_pages:
+            raise ValueError(f"searchable page limit exceeded; {raise_hint('search.max_pages')}")
 
 
 def _require_depth_within_limit(depth: int) -> None:
@@ -2287,12 +2286,12 @@ def _validated_source_manifest(
 ) -> dict:
     source_manifest_path = generation_path / "source-manifest.json"
     expected = validate_runtime_file(
-        source_manifest_path, state_root, max_bytes=MAX_CORPUS_TOTAL_BYTES
+        source_manifest_path, state_root, max_bytes=setting_value("corpus.max_total_bytes")
     )
     raw = _read_identity_stable_bytes(
         source_manifest_path,
         expected,
-        max_bytes=MAX_CORPUS_TOTAL_BYTES,
+        max_bytes=setting_value("corpus.max_total_bytes"),
         label="generation source manifest",
         deadline=deadline,
         cancelled=cancelled,
@@ -2330,11 +2329,11 @@ def _valid_source_row(row: tuple[object, ...], seen: set[str]) -> bool:
 
 
 def _require_admissible_source_row(
-    row: tuple, metadata: list, seen: set[str]
+    row: tuple, metadata: list, seen: set[str], max_files: int
 ) -> None:
     """One more row is allowed only under the ceiling, and only if it is valid."""
-    if len(metadata) >= MAX_CORPUS_FILES:
-        raise ValueError("generation source row ceiling exceeded")
+    if len(metadata) >= max_files:
+        raise ValueError(f"generation source row ceiling exceeded; {raise_hint('corpus.max_files')}")
     if not _valid_source_row(row, seen):
         raise ValueError("generation evidence source rows are invalid")
 
@@ -2349,18 +2348,22 @@ def _source_metadata_rows(
     metadata: list[tuple[str, str, str, int]] = []
     seen: set[str] = set()
     total_bytes = 0
+    max_files = setting_value("corpus.max_files")
+    max_total_bytes = setting_value("corpus.max_total_bytes")
     rows = database.execute(
         "SELECT source_id, relative_path, sha256, size, length(content) FROM source "
         "ORDER BY relative_path, source_id LIMIT ?",
-        (MAX_CORPUS_FILES + 1,),
+        (max_files + 1,),
     )
     for row in rows:
         _check_generation_stop(deadline, cancelled)
-        _require_admissible_source_row(row, metadata, seen)
+        _require_admissible_source_row(row, metadata, seen, max_files)
         source_id, relative_path, digest, size, content_size = row
         total_bytes += content_size
-        if total_bytes > MAX_CORPUS_TOTAL_BYTES:
-            raise ValueError("generation evidence source bytes exceed their ceiling")
+        if total_bytes > max_total_bytes:
+            raise ValueError(
+                f"generation evidence source bytes exceed their ceiling; {raise_hint('corpus.max_total_bytes')}"
+            )
         seen.add(source_id)
         metadata.append((source_id, relative_path, digest, size))
     return metadata
@@ -3933,7 +3936,7 @@ def _retired_page_named(normalized_stem: str) -> Path | None:
         entries = sorted(KNOWLEDGE_DIR.glob("*.md"))
     except OSError:
         return None
-    for candidate in entries[:MAX_SEARCHABLE_PAGES]:
+    for candidate in entries[: setting_value("search.max_pages")]:
         if _normalized_filename_stem(candidate.name) == normalized_stem:
             return candidate
     return None

@@ -29,6 +29,7 @@ else:  # pragma: no cover - 3.10 reads the same documents through tomli
 
 from secret_redact import describe_error
 
+# One `git fetch` of the nightly update; the update's time limit counts one fetch. basis unknown — value predates measurement; review when fetches time out on a working network.
 FETCH_TIMEOUT_SECONDS = 120.0
 # One git call of the nightly update, which fetches over the network; the local-only git calls elsewhere allow 10-20 s.
 GIT_TIMEOUT_SECONDS = 60.0

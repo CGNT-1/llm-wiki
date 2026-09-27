@@ -2793,23 +2793,26 @@ def find_dependencies(
     )
 
 
+# Display cuts of one find_paths answer, stated in it: each end resolves to at most
+# five nodes (`<end>_nodes_truncated`), and at most ten paths are returned
+# (`paths_truncated`). docs/research/2026-09-27-a-cut-says-what-it-left-out.md
 PATH_MAX_ENDPOINTS = 5
 PATH_MAX_ROWS = 10
 
 
-def _paths_between(graph, sources: list[str], targets: list[str]) -> list[dict]:
-    """Paths for every resolved pair of ends, until the answer is full."""
+def _paths_between(graph, sources: list[str], targets: list[str]) -> tuple[list[dict], bool]:
+    """Paths for every resolved pair of ends until the answer is full, and whether it was cut."""
     paths: list[dict] = []
     pairs = [(source, target) for source in sources for target in targets]
     for source, target in pairs:
         if len(paths) >= PATH_MAX_ROWS:
-            break
+            return paths[:PATH_MAX_ROWS], True
         paths.extend(
             graph.path(
                 source, target, max_depth=8, max_rows=PATH_MAX_ROWS, max_work=10_000
             )
         )
-    return paths[:PATH_MAX_ROWS]
+    return paths[:PATH_MAX_ROWS], len(paths) > PATH_MAX_ROWS
 
 
 def _path_end_report(label: str, matched: list[str]) -> dict[str, object]:
@@ -2828,13 +2831,14 @@ def _store_find_paths(
     try:
         sources = _dependency_seed_nodes(graph, source)
         targets = _dependency_seed_nodes(graph, target)
-        paths = _paths_between(
+        paths, cut = _paths_between(
             graph, sources[:PATH_MAX_ENDPOINTS], targets[:PATH_MAX_ENDPOINTS]
         )
         report = {
             **_store_report(graph),
             **_path_end_report("source", sources),
             **_path_end_report("target", targets),
+            "paths_truncated": cut,
         }
         return _with_report("paths", paths, report, with_report)
     finally:
@@ -3399,6 +3403,8 @@ def main() -> int:
 # Research: docs/research/2026-09-11-argument-bindings-and-route-calls.md.
 FLOW_MAX_DEPTH = 8
 FLOW_DEFAULT_DEPTH = 2
+# Rows one argument-flow answer returns, a display cut stated in it as
+# `flow_count` / `flows_truncated`; each hop's query refuses more than this.
 FLOW_MAX_ROWS = 1000
 FLOW_MAX_SEEDS = 20
 FLOW_NOTE = (
@@ -3447,10 +3453,12 @@ def _flow_hop_reached(edges: list[dict], seen: set[str]) -> list[str]:
 
 def _flow_rows(
     graph, seeds: list[str], depth: int, deadline=None, cancelled=None
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
+    """Every row the walk found, and whether a hop's frontier had to be narrowed."""
     rows: list[dict] = []
     seen = set(seeds)
     frontier = list(seeds)
+    narrowed = False
     for hop in range(1, depth + 1):
         _check_generation_stop(deadline, cancelled)
         if not frontier:
@@ -3458,8 +3466,15 @@ def _flow_rows(
         hop_rows, reached = _flow_hop(graph, frontier, seen, hop)
         rows.extend(hop_rows)
         seen.update(reached)
-        frontier = sorted(set(reached))[:FLOW_MAX_ROWS]
-    return rows[:FLOW_MAX_ROWS]
+        following = sorted(set(reached))
+        narrowed = narrowed or len(following) > FLOW_MAX_ROWS
+        frontier = following[:FLOW_MAX_ROWS]
+    return rows, narrowed
+
+
+def _flow_cut_report(rows: list[dict], narrowed: bool) -> dict:
+    """What the row cut and a narrowed frontier left out of the answer."""
+    return {"flow_count": len(rows), "flows_truncated": narrowed or len(rows) > FLOW_MAX_ROWS}
 
 
 def _flow_report(graph, symbol: str, seeds: list[str], rows: list[dict], depth: int) -> dict:
@@ -3496,10 +3511,12 @@ def find_argument_flows(
         matched = _dependency_seed_nodes(graph, symbol)
         seeds = matched[:FLOW_MAX_SEEDS]
         depth = _flow_depth(max_depth)
-        rows = _flow_rows(graph, seeds, depth, deadline, cancelled)
+        found, narrowed = _flow_rows(graph, seeds, depth, deadline, cancelled)
+        rows = found[:FLOW_MAX_ROWS]
         report = {
             **_flow_report(graph, symbol, seeds, rows, depth),
             **_seed_cut_report(matched, FLOW_MAX_SEEDS),
+            **_flow_cut_report(found, narrowed),
         }
         return _with_report("flows", rows, report, with_report)
     finally:

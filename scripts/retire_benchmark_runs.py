@@ -5,7 +5,8 @@
 `DATASET_DIR` of each `benchmark/*_data.py`, which are expensive to fetch again
 and are kept; and run outputs an operator command wrote (`full-2026-09-17`,
 `locomo-2026-09-19`, with staged vaults inside), which nothing removed: 1.5 GB on
-2026-09-24. A run directory not modified for `RUN_RETENTION_DAYS` is removed;
+2026-09-24. A run directory not modified for the setting `retention.benchmark_run_days`
+(30 by default) is removed;
 `cache/` is disposable by contract, and the results worth keeping are published
 under `benchmark/*.json`. Run by the nightly pass. See
 `docs/research/2026-09-24-every-store-has-a-bound.md`.
@@ -21,10 +22,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from memory_state import ROOT  # noqa: E402
+from settings import setting_value  # noqa: E402
 
 # The `DATASET_DIR` names of `benchmark/*_data.py`; a test keeps them in step.
 DATASET_CACHES = frozenset({"beam", "litragbench", "locomo", "longmemeval", "refusalbench"})
-RUN_RETENTION_DAYS = 30
 
 
 def benchmarks_directory(root: Path = ROOT) -> Path:
@@ -38,8 +39,12 @@ def _newest_mtime(directory: Path) -> float:
     return max(times)
 
 
-def stale_runs(directory: Path, now: float, retention_days: int = RUN_RETENTION_DAYS) -> list[Path]:
-    """Run directories untouched past the window; dataset caches are never runs."""
+def stale_runs(directory: Path, now: float, retention_days: int | None = None) -> list[Path]:
+    """Run directories untouched past the window; dataset caches are never runs.
+
+    `retention_days` left unset is the operator's `retention.benchmark_run_days`.
+    """
+    retention_days = setting_value("retention.benchmark_run_days") if retention_days is None else retention_days
     horizon = now - retention_days * 86400
     return sorted(path for path in _runs(directory) if _newest_mtime(path) < horizon)
 

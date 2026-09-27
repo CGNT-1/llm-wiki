@@ -70,8 +70,9 @@ def test_an_in_process_compile_is_refused_while_another_compile_holds_the_lock(t
 
 
 def test_an_in_process_compile_runs_locked_stamped_and_under_the_compile_ceiling(tmp_path):
-    import compile_memory
+    import settings
 
     outcome = _in_a_fresh_vault(tmp_path, FREE)
 
-    assert outcome == [0, compile_memory.COMPILE_PROVIDER_CEILING_S, "live", "running", "absent"]
+    ceiling = settings.setting_value("provider.draft_ceiling_seconds", tmp_path, environ={})
+    assert outcome == [0, ceiling, "live", "running", "absent"]

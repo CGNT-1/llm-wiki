@@ -33,6 +33,7 @@ from reliable_memory import (
     validate_schema,
     validate_state_root,
 )
+from settings import raise_hint, setting_value
 
 SCHEMA_DIR = Path(__file__).with_name("schemas")
 LEDGER_SCHEMA = SCHEMA_DIR / "claim-ledger-v1.json"
@@ -1031,8 +1032,8 @@ class ClaimIndex:
         sources: Sequence[Path] | Callable[[], Sequence[Path]] | None,
     ) -> list[Path]:
         pages = self._discovered_pages(sources)
-        if len(pages) > 10_000:
-            raise ValueError("claim rebuild page discovery exceeds 10000 pages")
+        if len(pages) > setting_value("claims.max_pages", self.vault):
+            raise ValueError(f"claim rebuild page discovery exceeds its limit; {raise_hint('claims.max_pages')}")
         if any(not isinstance(page, Path) for page in pages):
             raise TypeError("claim rebuild provider must return Path values")
         return sorted(pages)

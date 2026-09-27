@@ -995,6 +995,10 @@ _CALL_CEILING: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "llm_call_ceiling", default=None
 )
 
+# One provider call's timeout, kept short so a stuck capture flush is heard about in
+# ninety seconds; whole-plan calls get `provider.draft_ceiling_seconds` through
+# `call_ceiling`. Not a second setting: MEMORY_LLM_TIMEOUT_S already overrides every
+# call (see `_timeout_s`). docs/research/2026-09-23-the-rest-of-the-live-audit.md
 DEFAULT_TIMEOUT_S = 90
 
 

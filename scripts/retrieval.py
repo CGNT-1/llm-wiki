@@ -401,6 +401,11 @@ DENSE_WEIGHT = 1.0
 GRAPH_WEIGHT = 0.5
 
 GRAPH_MAX_HOPS = 1
+# The graph lane's shape: the top-ranked hits a one-hop walk starts from, the
+# neighbours taken per seed and in all. Ranking parameters of the hybrid design, not
+# cuts of results: the lane adds candidates beside the lexical and dense ones
+# (docs/research/2026-09-22-the-walk-has-nothing-to-walk.md). Basis of the numbers
+# unknown — review when a rank evaluation measures the lane's recall.
 GRAPH_SEED_LIMIT = 5
 GRAPH_PER_SEED_LIMIT = 4
 GRAPH_GLOBAL_LIMIT = 12

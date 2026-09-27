@@ -403,6 +403,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         "tools",
         "backup",
         "models",
+        "settings",
         "hooks",
         "checkpoints",
         "mcp",
@@ -3203,6 +3204,10 @@ def test_doctor_windows_lsp_capability_failures_close_retained_handles(
     def fail() -> None:
         raise error_type("Windows workspace capability unavailable")
 
+    def fail_at(stage: str) -> None:
+        if failure_stage == stage:
+            fail()
+
     def open_root(path: Path) -> int:
         assert path == tmp_path / "run" / "lsp"
         if failure_stage == "open_root":
@@ -3211,8 +3216,7 @@ def test_doctor_windows_lsp_capability_failures_close_retained_handles(
 
     def list_directory(handle: int, *, max_entries: int):
         if handle == 10:
-            if failure_stage == "list_root":
-                fail()
+            fail_at("list_root")
             return [owner_entry]
         assert (handle, max_entries) == (20, len(doctor._LSP_OWNER_ENTRY_NAMES))
         if failure_stage == "cancellation_identity":
@@ -3228,12 +3232,10 @@ def test_doctor_windows_lsp_capability_failures_close_retained_handles(
 
     def identity(handle: int, *, directory: bool | None = None):
         if handle == 20:
-            if failure_stage == "owner_identity":
-                fail()
+            fail_at("owner_identity")
             return 1, owner_id, True
         if handle == 30:
-            if failure_stage == "cancellation_identity":
-                fail()
+            fail_at("cancellation_identity")
             return 1, cancellation_id, True
         assert (handle, directory) == (40, False)
         return 1, record_id, False

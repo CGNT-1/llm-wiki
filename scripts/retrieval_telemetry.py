@@ -18,6 +18,7 @@ from reliable_memory import (
     open_readonly_operational_db,
     validate_runtime_file,
 )
+from settings import setting_value
 
 SCHEMA_VERSION = 1
 EVENT_KINDS = frozenset({
@@ -29,7 +30,8 @@ EVENT_KINDS = frozenset({
     "task_outcome",
 })
 TELEMETRY_DB = STATE_ROOT / "cache" / "evidence-graph" / "telemetry.sqlite3"
-DEFAULT_RETENTION_DAYS = 90
+# Retention is the operator's setting `retention.telemetry_days` (default 90, the
+# archive's hot window); the row and delete bounds below hold per pass.
 DEFAULT_MAX_ROWS = 100_000
 DEFAULT_MAX_DELETE = 1_000
 MAX_READ_EVENTS = 1_000
@@ -637,13 +639,17 @@ def read_events_after(
 
 def compact(
     *,
-    retention_days: int = DEFAULT_RETENTION_DAYS,
+    retention_days: int | None = None,
     max_rows: int = DEFAULT_MAX_ROWS,
     max_delete: int = DEFAULT_MAX_DELETE,
     now: datetime | None = None,
     db_path: Path | None = None,
 ) -> int:
-    """Delete an oldest-first bounded slice of expired or excess telemetry."""
+    """Delete an oldest-first bounded slice of expired or excess telemetry.
+
+    `retention_days` left unset is the operator's `retention.telemetry_days`.
+    """
+    retention_days = setting_value("retention.telemetry_days") if retention_days is None else retention_days
     _require_compact_limits(retention_days, max_rows, max_delete)
     path = Path(db_path or TELEMETRY_DB)
     if not path.exists():

@@ -38,6 +38,13 @@ from reliable_memory import (
     read_runtime_bytes,
 )
 from secret_redact import describe_error
+from settings import (
+    DEFAULT_SOURCE,
+    SettingsError,
+    setting_value,
+    settings_path,
+)
+from settings import effective as effective_settings
 from transaction_lineage import committed_created_paths, outcome_was_written, resolved_by_lineage
 
 try:
@@ -79,16 +86,19 @@ MAX_INDEX_DB_BYTES = 1024 * 1024 * 1024
 MAX_LOCK_BYTES = 4096
 MAX_QUEUE_RESULT_BYTES = 8 * 1024 * 1024
 MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
+# Rows one health read takes from an operational table. A table past it is reported
+# (`*_truncated` codes) and refuses `run/` deletion; nothing is judged from rows unseen.
 MAX_OPERATIONAL_ROWS = 10_000
+# Entries one runtime directory listing takes; past it the scan is reported truncated
+# and deletion stays refused (`archive_scan_truncated`, `artifact_truncated`).
 MAX_RUNTIME_ENTRIES = 10_000
-LOCK_STALE_SECONDS = 10 * 60
+# doctor's whole-run budget; one run widens it with --time-budget. basis unknown — value predates measurement; review when checks report budget exhaustion on an idle machine.
 DEFAULT_TIME_BUDGET_SECONDS = 5.0
 # A commit on a rollback-journal database locks readers out for milliseconds.
 # Wait that out rather than reporting a healthy database as unreadable, but
 # stay far below the default time budget above.
 READ_BUSY_MS = 250
 DEFAULT_GENERATION_TIME_BUDGET_SECONDS = 60.0
-DEFAULT_GENERATION_SOURCE_LIMIT = 10_000
 GENERATION_FRESH_SECONDS = 24 * 60 * 60
 # An unregistered, invalid generation directory touched this recently may be a build
 # in flight under another fence; the longest builder bound is 15 minutes. See
@@ -2361,7 +2371,9 @@ def _count_claims(database: sqlite3.Connection, details: dict) -> None:
     details["diagnostics"] = min(len(rows), MAX_OPERATIONAL_ROWS)
     details["codes"] = sorted({str(row[0]) for row in rows})
     details["by_code"] = _claims_by_code(rows)
-    details["pages"] = sorted({str(row[1]) for row in rows})[:MAX_CLAIM_PAGES_NAMED]
+    pages = sorted({str(row[1]) for row in rows})
+    details["pages"] = pages[:MAX_CLAIM_PAGES_NAMED]
+    details["pages_omitted"] = len(pages) - len(details["pages"])
     if len(rows) > MAX_OPERATIONAL_ROWS or details["claims"] > MAX_OPERATIONAL_ROWS:
         details["codes"].append("claim_scan_truncated")
 
@@ -2391,6 +2403,8 @@ CLAIM_REPAIR = (
     "listed by page in details, and that page's evidence line must be re-bound "
     "by hand or by recompiling its daily with `compile_memory.py --file`."
 )
+# A display bound on the pages named in the claims finding (the remedy text above is
+# per page); the rest are counted in `pages_omitted`, never dropped silently.
 MAX_CLAIM_PAGES_NAMED = 8
 
 
@@ -2700,6 +2714,9 @@ def _deletion_codes_with_owner(
 
 
 LSP_FAILURE_RETENTION = timedelta(days=7)
+# doctor reads at most this many LSP owner roots; more is reported as an unreadable,
+# truncated LSP state, never as a partial healthy one. Normal is far below it: one live
+# owner per MCP process and at most `retire_lsp_evidence.KEEP_NEWEST` (20) kept failures.
 MAX_LSP_OWNER_ROWS = 128
 _LSP_OWNER_NONCE = re.compile(r"[0-9a-f]{32}\Z")
 _LSP_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z\Z")
@@ -4519,6 +4536,11 @@ def _checked_generation(
     return _generation_health_result(active, manifest, seal, catalog_info, now, facts)
 
 
+def _generation_source_limit(max_sources: int | None, root: Path) -> int:
+    """The caller's source bound, else the vault's `settings` corpus.max_files."""
+    return setting_value("corpus.max_files", root) if max_sources is None else max_sources
+
+
 def _require_positive_source_limit(max_sources: object) -> None:
     if (
         isinstance(max_sources, bool)
@@ -4564,10 +4586,11 @@ def _generation_check(
     now: datetime,
     deadline: float = float("inf"),
     *,
-    max_sources: int = DEFAULT_GENERATION_SOURCE_LIMIT,
+    max_sources: int | None = None,
     cancelled=None,
 ) -> dict:
     """Validate the catalog-selected immutable generation without writing."""
+    max_sources = _generation_source_limit(max_sources, root)
     _require_positive_source_limit(max_sources)
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
     kind, catalog_info = _safe_kind(catalog_path, state_root)
@@ -4762,6 +4785,74 @@ def _models_check() -> dict:
         + "; search answers by words alone until `uv run python scripts/install_models.py` runs.",
         details,
     )
+
+
+# Warn at 80 % of a vault-size ceiling: the research note's rule, so the operator
+# sees the stop coming while a quarter of the ceiling's growth is still left
+# (docs/research/2026-09-27-every-limit-states-its-reason.md).
+CEILING_WARNING_SHARE = 0.8
+# Which Markdown each vault-size ceiling counts, by the directories under
+# `knowledge/` its pipeline reads (the research note's table).
+_CEILING_SCOPES = {
+    "index.max_pages": ("notes",),
+    "index.max_total_bytes": ("notes",),
+    "search.max_pages": ("notes",),
+    "impact.max_note_files": ("notes",),
+    "impact.max_total_note_bytes": ("notes",),
+    "claims.max_pages": ("notes", "projects"),
+    "claims.max_total_bytes": ("notes", "projects"),
+    "compile.max_sources": ("notes", "daily"),
+    "compile.max_total_source_bytes": ("notes", "daily"),
+    "corpus.max_files": ("notes", "projects", "daily"),
+    "corpus.max_total_bytes": ("notes", "projects", "daily"),
+    "extraction.max_sources": ("notes", "projects", "daily"),
+}
+
+
+def _markdown_size(directory: Path) -> tuple[int, int]:
+    """How many Markdown files a knowledge directory holds, and their bytes."""
+    files = [path for path in directory.rglob("*.md") if path.is_file()] if directory.is_dir() else []
+    return len(files), sum(path.stat().st_size for path in files)
+
+
+def _vault_sizes(root: Path) -> dict[str, tuple[int, int]]:
+    return {name: _markdown_size(root / "knowledge" / name) for name in ("notes", "projects", "daily")}
+
+
+def _ceiling_use(name: str, ceiling: int, sizes: dict[str, tuple[int, int]]) -> dict:
+    """The live count a ceiling bounds: files for a count, bytes for a byte ceiling."""
+    measure = 1 if name.endswith("bytes") else 0
+    used = sum(sizes[scope][measure] for scope in _CEILING_SCOPES[name])
+    return {"used": used, "ceiling": ceiling, "share": round(used / ceiling, 3)}
+
+
+def _settings_result(overridden: dict, near: dict) -> dict:
+    details = {"overridden": overridden, "near_ceiling": near}
+    if near:
+        names = ", ".join(sorted(near))
+        return _result("settings", "degraded", f"The vault is past 80% of a size ceiling: {names}; raise it in llm-wiki.toml before it stops the pipeline.", details)
+    message = f"{len(overridden)} setting(s) differ from their defaults." if overridden else "Every setting has its default."
+    return _result("settings", "ok", message, details)
+
+
+def _settings_check(root: Path) -> dict:
+    """Operator overrides, where each came from, and how near the vault is to each size ceiling."""
+    try:
+        values = effective_settings(root)
+    except (SettingsError, OSError) as error:
+        return _result("settings", "error", f"Settings are invalid: {error}", {"path": str(settings_path(root))})
+    return _settings_result(_overridden_settings(values), _near_ceilings(root, values))
+
+
+def _overridden_settings(values: dict) -> dict:
+    changed = {name: item for name, item in values.items() if item.source != DEFAULT_SOURCE}
+    return {name: {"value": item.value, "source": item.source} for name, item in changed.items()}
+
+
+def _near_ceilings(root: Path, values: dict) -> dict:
+    sizes = _vault_sizes(root)
+    uses = {name: _ceiling_use(name, values[name].value, sizes) for name in _CEILING_SCOPES}
+    return {name: use for name, use in uses.items() if use["share"] >= CEILING_WARNING_SHARE}
 
 
 def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
@@ -7774,7 +7865,7 @@ def run_generation_maintenance(
     state_root: Path | str | None = None,
     *,
     time_budget_seconds: float = DEFAULT_GENERATION_TIME_BUDGET_SECONDS,
-    max_sources: int = DEFAULT_GENERATION_SOURCE_LIMIT,
+    max_sources: int | None = None,
     force_rebuild: bool = False,
     code_roots: tuple[str, ...] | None = None,
 ) -> dict:
@@ -7791,10 +7882,11 @@ def run_generation_maintenance(
     does not carry.
     """
     _require_positive_time_budget(time_budget_seconds)
-    _require_positive_source_limit(max_sources)
     root_path = Path(
         root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
     ).resolve()
+    max_sources = _generation_source_limit(max_sources, root_path)
+    _require_positive_source_limit(max_sources)
     state_path = Path(
         os.path.abspath(state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root_path))
     )
@@ -8013,7 +8105,7 @@ def _repair_generations_action(guard: Any, context: _RepairContext) -> None:
         context.state_path,
         deadline=context.deadline,
         cancelled=guard.cancelled,
-        max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
+        max_sources=setting_value("corpus.max_files", context.root_path),
         force_rebuild=True,
     )
     _record_generation_rebuild(result, context)
@@ -8380,6 +8472,7 @@ def _deferrable_checks(
             lambda _budget: _backup_check(home_path, generated_at, installed_at(state_path)),
         ),
         ("models", lambda _budget: _models_check()),
+        ("settings", lambda _budget: _settings_check(root_path)),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),
         ("mcp", lambda _budget: _mcp_check(root_path)),

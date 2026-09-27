@@ -69,9 +69,11 @@ from workspace_revision import (
     diff_workspace_revisions,
 )
 
+# A Pyright session's startup budget, capped by the caller's deadline (docs/superpowers/plans/2026-07-22-python-pyright-navigation.md).
 STARTUP_SECONDS = 60.0
 MAX_LSP_PROCESSES = 4
 
+# Cleanup budget of an owner that failed to start. basis unknown — value predates measurement; review when failed startups leave owners registered.
 _OWNER_CLEANUP_SECONDS = 2.0
 # How long a session may go unused before the next request closes the server it
 # owns. The manager keeps one clock: this bound and capacity eviction both read

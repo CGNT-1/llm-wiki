@@ -184,6 +184,7 @@ def test_young_evidence_is_kept_even_beyond_twenty(tmp_path) -> None:
 def test_consolidation_gives_its_provider_the_compile_ceiling(monkeypatch) -> None:
     import episode_consolidation
     import llm_client
+    import settings
 
     seen: list[int | None] = []
 
@@ -193,7 +194,8 @@ def test_consolidation_gives_its_provider_the_compile_ceiling(monkeypatch) -> No
 
     monkeypatch.setattr(llm_client, "call_llm", fake_call)
 
-    assert (episode_consolidation._call_provider("records"), seen) == ("ok", [300])
+    ceiling = settings.setting_value("provider.draft_ceiling_seconds")
+    assert (episode_consolidation._call_provider("records"), seen) == ("ok", [ceiling])
 
 
 # ---------------------------------------------------------------- D2 ----

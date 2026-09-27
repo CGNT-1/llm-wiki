@@ -9,13 +9,12 @@ from pathlib import Path
 
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes
 from reliable_memory import canonical_json_bytes, restricted_relative_path, sha256_bytes
+from settings import raise_hint, setting_value
 
-MAX_CLAIM_TREE_PAGES = 10_000
 # Eight megabytes: the same ceiling `project_journal.MAX_JOURNAL_BYTES` allows
 # a journal, so a page the journal accepts is never one the claim tree refuses.
 # Measured 2026-09-09: a 4.2 MB journal failed every compile since 09-07.
 MAX_CLAIM_TREE_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-MAX_CLAIM_TREE_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_CLAIM_TREE_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_GUARDRAIL_SOURCE_FILES = 10_000
 MAX_GUARDRAIL_INSPECTED_ENTRIES = 50_000
@@ -160,8 +159,8 @@ def _paths(vault: Path) -> list[Path]:
             continue
         _require_regular_directory(root, "claim tree root must be a regular directory")
         pages.extend(_claim_pages_under(root, project_only))
-    if len(pages) > MAX_CLAIM_TREE_PAGES:
-        raise ValueError("claim tree exceeds the page limit")
+    if len(pages) > setting_value("claims.max_pages", vault):
+        raise ValueError(f"claim tree exceeds the page limit; {raise_hint('claims.max_pages')}")
     return sorted(pages, key=lambda item: item.relative_to(vault).as_posix())
 
 
@@ -174,9 +173,9 @@ def _snapshot_claim_tree(
         vault,
         discovered,
         file_limit=MAX_CLAIM_TREE_FILE_BYTES,
-        total_limit=MAX_CLAIM_TREE_TOTAL_BYTES,
+        total_limit=setting_value("claims.max_total_bytes", vault),
         label="claim tree page",
-        total_message="claim tree exceeds the total byte limit",
+        total_message=f"claim tree exceeds the total byte limit; {raise_hint('claims.max_total_bytes')}",
         relative_of=_claim_relative,
     )
     if _relative_names(vault, discovered) != _relative_names(vault, _paths(vault)):
@@ -234,7 +233,7 @@ def validate_claim_tree_manifest(value: object) -> dict[str, object]:
     )
     entries = value["entries"]
     _require_entry_list(
-        entries, MAX_CLAIM_TREE_PAGES, "claim tree manifest entries are invalid"
+        entries, setting_value("claims.max_pages"), "claim tree manifest entries are invalid"
     )
     paths, normalized_entries = _claim_tree_entries(entries)
     _require_sorted_unique(paths, "claim tree manifest paths are not unique and sorted")

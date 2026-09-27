@@ -32,10 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
 import process_liveness  # noqa: E402
-from doctor import (  # noqa: E402
-    DEFAULT_GENERATION_SOURCE_LIMIT,
-    run_generation_maintenance,
-)
+from doctor import run_generation_maintenance  # noqa: E402
 from maintenance_helpers import prune_maintenance_output, trim_scheduler_logs  # noqa: E402
 from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
@@ -58,6 +55,7 @@ from reclaim_runtime_state import RECLAIM_STEP_SECONDS  # noqa: E402
 from repository_index import REFRESH_ALL_BUDGET_SECONDS  # noqa: E402
 from repository_retention import RETIRE_BUDGET_SECONDS  # noqa: E402
 from secret_redact import describe_error  # noqa: E402
+from settings import setting_value  # noqa: E402
 
 # How long the nightly pass will spend rebuilding the evidence generation.
 # The interactive default is one minute, which is the right bound for a doctor
@@ -86,7 +84,7 @@ def _generation_result() -> dict:
         root=ROOT,
         state_root=STATE_ROOT,
         time_budget_seconds=NIGHTLY_GENERATION_BUDGET_SECONDS,
-        max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
+        max_sources=setting_value("corpus.max_files", ROOT),
     )
 
 
@@ -661,7 +659,7 @@ COMPILE_IDLE_WAIT_SECONDS = 30
 # The two tail tasks are bounded by work rather than by wall time: the telemetry
 # compaction deletes at most `retrieval_telemetry.DEFAULT_MAX_DELETE` rows under
 # a 5 s busy timeout, and the retention pass looks at at most
-# `maintenance_helpers.REPORT_RETENTION_FILES` reports. This is what the pass
+# `retention.report_files` reports (a setting; raising it far lengthens this tail). This is what the pass
 # allows them together; outliving it is caught at the next step boundary.
 MAINTENANCE_TAIL_BUDGET_SECONDS = 120
 

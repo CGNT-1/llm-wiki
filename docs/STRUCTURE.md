@@ -161,6 +161,24 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
 | `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai` → `ollama`) | LLM backend for compile/flush/query. `fake` for tests. |
 | `$LLM_WIKI_DLP_POLICY` | Unset | Optional absolute path to an external bounded-literal/fingerprint policy. Invalid or digest-mismatched required policy fails closed. |
+| `$LLM_WIKI_<SECTION>_<KEY>` | Unset | One run's override of a registered limit in `scripts/settings.py` (for example `LLM_WIKI_CORPUS_MAX_FILES`); beats `llm-wiki.toml`. An invalid value stops the caller with its name. |
+
+### Operator limits (`llm-wiki.toml`, 2026-09-27)
+
+Limits that depend on the vault and the machine are declared once in
+`scripts/settings.py`, each with its default, unit, lower bound and reason, and are
+read only through `settings.setting_value`. An optional `llm-wiki.toml` at the vault
+root overrides them; it is gitignored and absent by default, so a vault without it
+runs on the defaults, which are the constants the registry replaced. Precedence is
+default < file < `LLM_WIKI_<SECTION>_<KEY>`. An unknown section or key, a non-integer
+or a value below its bound stops the caller naming the key and its source; nothing
+falls back silently. `doctor` has a `settings` check: it lists every value that
+differs from its default with its source, errors on an invalid file, and warns at 80 %
+of a vault-size ceiling. The first registered limits are the vault-size ceilings
+(`index`, `compile`, `corpus`, `claims`, `extraction`, `search`, `impact`); every
+refusal at one names the setting that raises it. Decision and sources:
+`docs/research/2026-09-27-every-limit-states-its-reason.md`; inventory:
+`docs/LIMITS-2026-09-27.md`.
 
 ## External integration configuration preimages
 

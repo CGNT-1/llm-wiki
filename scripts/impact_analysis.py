@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -28,6 +28,7 @@ from corpus_snapshot import (  # noqa: E402
 )
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from repository_scope import sanitized_git_environment  # noqa: E402
+from settings import raise_hint, setting_value  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
@@ -61,10 +62,10 @@ class ImpactLimits:
     max_graph_rows: int = 10_000
     max_symbols: int = 2_000
     max_depth: int = 8
-    max_note_files: int = 2_000
+    max_note_files: int = field(default_factory=lambda: setting_value("impact.max_note_files"))
     max_note_dirs: int = 256
     max_note_bytes: int = 2 * 1024 * 1024
-    max_total_note_bytes: int = 32 * 1024 * 1024
+    max_total_note_bytes: int = field(default_factory=lambda: setting_value("impact.max_total_note_bytes"))
     timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
@@ -702,7 +703,7 @@ class _NoteWalk:
     def _add_file(self, entry: os.DirEntry, metadata: os.stat_result) -> None:
         self.file_count += 1
         if self.file_count > self.bounds.max_note_files:
-            raise ValueError("impact note file ceiling exceeded")
+            raise ValueError(f"impact note file ceiling exceeded; {raise_hint('impact.max_note_files')}")
         if entry.name.casefold().endswith(".md"):
             self._add_markdown(entry, metadata)
 
@@ -711,7 +712,7 @@ class _NoteWalk:
             raise ValueError("impact note file byte ceiling exceeded")
         self.total_bytes += metadata.st_size
         if self.total_bytes > self.bounds.max_total_note_bytes:
-            raise ValueError("impact note total byte ceiling exceeded")
+            raise ValueError(f"impact note total byte ceiling exceeded; {raise_hint('impact.max_total_note_bytes')}")
         self.markdown.append((Path(entry.path), metadata.st_size))
 
 

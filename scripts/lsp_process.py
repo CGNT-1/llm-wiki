@@ -94,7 +94,10 @@ _STDERR_REDACTION_WINDOW_BYTES = 64 * 1024
 _MAX_ACL_OUTPUT_BYTES = 16 * 1024
 _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
+# A server's graceful exit before it is killed; 2 s held on a loaded hosted Windows runner except once in
+# 200 (docs/research/2026-09-25-the-clean-run-after-the-audit-fixes.md).
 _GRACEFUL_CLEANUP_SECONDS = 2.0
+# The first recovery retry beat; it doubles up to the ceiling below. No contract depends on the value.
 _RECOVERY_RETRY_SECONDS = 0.05
 # Where the recovery beat stops doubling. A cleanup that is stuck is stuck;
 # past this the retries cost more than they can win back.
@@ -105,6 +108,7 @@ _MAX_STARTUP_CLEANUP_OWNERS = 8
 _MAX_GENERATION_LAUNCH_ARGUMENTS = 64
 _MAX_GENERATION_LAUNCH_BYTES = 64 * 1024
 _WINDOWS_LEASE_RETRY_ERRORS = frozenset({5, 32, 33})
+# Pause between retries of a Windows lease write refused by a sharing error (5, 32, 33), bounded by the lease expiry.
 _WINDOWS_LEASE_RETRY_SECONDS = 0.01
 _LIFECYCLE_REENTRANCY_ERROR = (
     "LSP lifecycle operations are not reentrant from protocol callbacks"

@@ -100,11 +100,16 @@ _SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v1.json"
 _PROJECT_CHECKPOINT_SCHEMA = (
     Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
 )
+# The writer gate's lease; it must outlive many heartbeats (below) so one late beat never loses the gate.
 _WRITER_LEASE_SECONDS = 30.0
+# The writer's heartbeat: 60 beats per lease. Coordination interval, not operator-tunable.
 _WRITER_HEARTBEAT_SECONDS = 0.5
 _WRITER_WAIT_SECONDS = DEFAULTS.markdown_busy_ms / 1_000
+# First retry delay for a busy writer gate, doubled per attempt up to the cap below.
 _WRITER_RETRY_BASE_SECONDS = 0.005
+# Retry delay cap: short against the hook budgets, so a waiting hook still sees the gate free within them.
 _WRITER_RETRY_CAP_SECONDS = 0.05
+# Deadline for validating a v3 candidate during offline adoption. basis unknown — value predates measurement; review when adoption reports this deadline on a real vault.
 _ADOPTION_VALIDATION_SECONDS = 30.0
 _ADOPTION_VALIDATION_CACHE: set[tuple[object, ...]] = set()
 _ADOPTION_VALIDATION_LOCK = threading.Lock()

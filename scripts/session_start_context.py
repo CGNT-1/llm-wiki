@@ -85,6 +85,7 @@ SECTION_PRIORITIES: dict[str, int] = {
 INDEX_KNOWLEDGE_SECTIONS = 3
 INDEX_MAX_CHARS = 1200
 DAILY_EXCERPT_LINES = 6
+# Session start's recovery read: a tenth of a second, inside SESSION_START_RECOVERY_SECONDS (0.25).
 RECOVERY_LIMIT_SECONDS = 0.1
 RECOVERY_MAX_TRANSACTIONS = 4
 MAX_TRANSACTION_DATABASE_BYTES = 64 * 1024 * 1024
@@ -621,7 +622,10 @@ def _audit_line(last_audit: dict) -> str:
     )
 
 
-# The most recent capture decisions the advisory reads, and each one's bound.
+# The most recent capture decisions the advisory reads, and each one's bound. A
+# window, not a cut: the advisory is a ratio over it and prints its own total; 200
+# bounds the files session start reads. Basis of the number unknown — review when
+# the advisory's total no longer covers a week of sessions.
 MAX_DECISIONS_READ = 200
 MAX_DECISION_BYTES = 64 * 1024
 

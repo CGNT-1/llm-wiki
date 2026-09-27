@@ -54,9 +54,14 @@ MAX_FRAME_BYTES = 8 * 1024 * 1024
 # (audit C-38, docs/research/2026-09-25-an-oversized-reply-fails-its-request-not-its-server.md).
 MAX_SKIPPED_FRAME_BYTES = 256 * 1024 * 1024
 _SKIP_CHUNK_BYTES = 64 * 1024
+# The bytes kept from each end of a refused oversized frame, enough for the
+# `"jsonrpc":"2.0","id":…` of either field order (`_oversized_response_id`); the frame
+# itself is refused whole, so nothing is cut from an answer.
 _FRAME_EDGE_BYTES = 256
 _HEAD_RESPONSE_ID = re.compile(rb'\A\s*\{\s*(?:"jsonrpc"\s*:\s*"2\.0"\s*,\s*)?"id"\s*:\s*(\d{1,15})\s*,')
 _TAIL_RESPONSE_ID = re.compile(rb'[,{]\s*"id"\s*:\s*(\d{1,15})\s*\}\s*\Z')
+# LSP headers are two short lines (Content-Length, Content-Type); 8 KiB refuses a
+# peer that never ends its header block. Security bound on untrusted input.
 MAX_HEADER_BYTES = 8 * 1024
 MAX_PENDING_REQUESTS = 32
 # Locations one LSP reply may carry before it is refused as unbounded; the answer joiners keep 5.
@@ -64,6 +69,7 @@ MAX_LOCATIONS = 10_000
 MAX_DIAGNOSTICS = 10_000
 MAX_HOVER_BYTES = 256 * 1024
 MAX_JSON_DEPTH = 64
+# A cancelled request's late answer is drained for 2 s (docs/superpowers/plans/2026-07-23-lsp-cancellation-token.md).
 CANCEL_DRAIN_GRACE_SECONDS = 2.0
 METHOD_NOT_FOUND = -32601
 
@@ -99,12 +105,16 @@ _FLAT_SEMANTIC_RESULT_METHODS = frozenset(
 _JSON_RPC_INTEGER_MIN = -(2**31)
 _JSON_RPC_INTEGER_MAX = 2**31 - 1
 _TOMBSTONE_LIMIT = MAX_PENDING_REQUESTS * 4
+# How often a repeated CancelSynchronousIo checks its owner left (docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md).
 _CANCELLATION_POLL_SECONDS = 0.01
 _UNKNOWN_NOTIFICATION_WARNING = "dropped unknown server notification"
 _MAX_JSON_VALUES = MAX_FRAME_BYTES // 2
 _MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
 _MAX_ORDINARY_WRITES = _MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
+# Deadline for a write the protocol sends on its own ($/cancelRequest, error replies). basis unknown — value predates measurement; review when internal writes time out on a healthy server.
 _INTERNAL_WRITE_SECONDS = 1.0
+# close() waits this long for its reader and writer threads, then raises TimeoutError instead of hanging
+# (docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md).
 _OWNER_JOIN_SECONDS = 1.0
 # On Windows a pipe stream is a C-runtime descriptor: the UCRT's `_read` holds the
 # descriptor's lock for the whole blocking `ReadFile`, and `_close` takes the same lock,

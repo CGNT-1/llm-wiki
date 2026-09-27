@@ -2670,7 +2670,7 @@ def file_back(question: str, answer_text: str) -> Path:
 
 # How long the index rebuild child may run. Measured 2026-09-27: 0.11-0.24 s for
 # this vault's 209 pages, interpreter start included; the builder refuses more than
-# `rebuild_memory_index.MAX_PAGE_COUNT` pages, so 60 s is far past its linear cost
+# `settings` index.max_pages (2 000 by default), so 60 s is far past its linear cost
 # at that ceiling (audit 2026-09-27 C-9).
 INDEX_REBUILD_SECONDS = 60.0
 

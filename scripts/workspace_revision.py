@@ -55,10 +55,12 @@ PYTHON_CONFIG_NAMES = frozenset(
 MAX_REVISION_FILES = 100_000
 MAX_REVISION_BYTES = 2 * 1024 * 1024 * 1024
 MAX_GIT_STATUS_BYTES = 16 * 1024 * 1024
+# `git status` when the caller gave no deadline (docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
 GIT_STATUS_TIMEOUT_SECONDS = 5.0
 _GIT_COMMIT_RE = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+# Time to reap a git child after it was stopped; the stop itself is already bounded.
 _PROCESS_CLEANUP_SECONDS = 0.2
 _MAX_PRIVATE_INDEX_BYTES = 64 * 1024 * 1024
 _MAX_PRIVATE_UNMATCHED_TRACKED_FILES = 4096

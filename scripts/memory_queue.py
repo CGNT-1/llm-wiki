@@ -60,9 +60,12 @@ TASK_FENCE_SECONDS = 120
 _STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
+# A provider's retry-after is honoured up to a week, the one bound on that reading
+# (docs/research/2026-09-17-the-adopted-queue-waits-as-long-as-it-was-told.md).
 _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
 _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
+# Ceiling on a task's configured attempts and on its attempt history. basis unknown — value predates measurement; review when a task reaches it in normal operation.
 _MAX_RUNTIME_ATTEMPTS = 100
 _MAX_QUEUE_PAYLOAD_BYTES = 1024 * 1024
 _MAX_QUEUE_DEPTH = 32

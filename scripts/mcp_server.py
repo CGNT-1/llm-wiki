@@ -78,6 +78,8 @@ MAX_MCP_CONTEXT_INCLUDE = 10
 MAX_MCP_INCLUDE_LENGTH = 64
 MAX_MCP_CONTEXT_TOKENS = 32_768
 MAX_MCP_ERROR_CHARS = 256
+# Every MCP tool call's default deadline unless a longer one is declared
+# (docs/research/2026-09-25-a-grounded-recall-has-the-time-it-needs-and-no-more.md).
 MCP_OPERATION_SECONDS = 10.0
 # What a lexical-only pass needs, kept back from the hybrid run: 0.13-0.19 s
 # measured on the live vault on 2026-09-25, five times over.
@@ -92,6 +94,10 @@ MCP_LSP_STARTUP_SECONDS = 60.0
 # is written, fsynced and validated.
 MCP_REPOSITORY_INDEX_SECONDS = 600.0
 MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
+# Graph facts one navigation answer may gather (nodes of a symbol, locations, cached
+# sources). Answers render at most `code_navigation_renderer.MAX_LIMIT` rows and say
+# how many they left out; this bound is a hundred times that. CALLS edges are read
+# anchored on the symbol's nodes (`_anchored_call_edges`), so the bound is per symbol.
 MAX_NAVIGATION_GRAPH_FACTS = 10_000
 MAX_NAVIGATION_SOURCE_CACHE_BYTES = 64 * 1024 * 1024
 PRECISE_ARCHITECTURE_MODES = frozenset(
@@ -3068,6 +3074,27 @@ def _call_edge_source_key(direction: str) -> str:
     return "source_node_id"
 
 
+def _anchored_call_edges(graph, node_key: str, node_ids: set, deadline) -> list:
+    """The CALLS edges whose `node_key` end is one of these nodes, read anchored in SQL.
+
+    Reading every CALLS edge up to the fact bound and filtering afterwards lost a
+    symbol's calls silently once the repository held more CALLS edges than the bound
+    (law 9 class d, docs/research/2026-09-27-a-cut-says-what-it-left-out.md). The ids go
+    in slices of `evidence_graph.MAX_NODE_FILTER`, which the reader refuses past.
+    """
+    from evidence_graph import MAX_NODE_FILTER
+
+    ordered = sorted(node_ids)
+    edges: list = []
+    for start in range(0, len(ordered), MAX_NODE_FILTER):
+        _check_navigation_stop(deadline)
+        anchor = {f"{node_key}s": ordered[start : start + MAX_NODE_FILTER]}
+        edges.extend(
+            graph.edges(edge_types=("CALLS",), max_rows=MAX_NAVIGATION_GRAPH_FACTS, deadline=deadline, **anchor)
+        )
+    return edges
+
+
 def _matching_call_edges(edges, source_key: str, node_ids: set, deadline):
     for edge in edges:
         _check_navigation_stop(deadline)
@@ -3109,13 +3136,9 @@ def _collected_call_locations(graph, symbol, scope, direction, deadline, source_
         node["node_id"] for node in _graph_nodes_for_symbol(graph, symbol, deadline)
     }
     _check_navigation_stop(deadline)
-    edges = graph.edges(
-        edge_types=("CALLS",),
-        max_rows=MAX_NAVIGATION_GRAPH_FACTS,
-        deadline=deadline,
-    )
-    _check_navigation_stop(deadline)
     source_key = _call_edge_source_key(direction)
+    edges = _anchored_call_edges(graph, source_key, node_ids, deadline)
+    _check_navigation_stop(deadline)
     version = _graph_generation_version(graph)
     locations = []
     remaining = MAX_NAVIGATION_GRAPH_FACTS
@@ -3397,11 +3420,7 @@ def _verified_call_edge(graph, source, target, scope, deadline, source_cache) ->
         graph, target_symbol, target_anchor, scope, deadline, source_cache
     )
     _check_navigation_stop(deadline)
-    edges = graph.edges(
-        edge_types=("CALLS",),
-        max_rows=MAX_NAVIGATION_GRAPH_FACTS,
-        deadline=deadline,
-    )
+    edges = _anchored_call_edges(graph, "source_node_id", source_ids, deadline)
     _check_navigation_stop(deadline)
     return _edge_connects(edges, source_ids, target_ids, deadline)
 

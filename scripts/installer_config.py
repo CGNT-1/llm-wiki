@@ -482,10 +482,12 @@ def _profile_with_block(existing: str, block: str) -> str:
     return existing[:start] + block + existing[end:]
 
 
+# Time to stop a debug child after its answer. basis unknown — value predates measurement; review when a cleanup times out on a slow runner.
 CLEANUP_SECONDS = 2.0
 
 READ_CHUNK_BYTES = 64 * 1024
 
+# Poll interval while reading a child's output; small against CLEANUP_SECONDS, no correctness depends on it.
 POLL_SECONDS = 0.005
 
 

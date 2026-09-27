@@ -5105,9 +5105,13 @@ def test_real_navigation_adapters_return_only_contained_exact_graph_evidence(
                     }
                 ]
 
-        def edges(self, *, edge_types, max_rows, deadline):
-            assert edge_types == ("CALLS",)
-            assert max_rows == 10_000
+        def edges(self, *, edge_types, max_rows, deadline, source_node_ids=None, target_node_ids=None):
+            # As EvidenceGraph.edges: the read is anchored on the symbol's nodes, and an
+            # anchor that names no node selects nothing.
+            assert (edge_types, max_rows) == (("CALLS",), 10_000)
+            anchored = {*(source_node_ids or ()), *(target_node_ids or ())}
+            if not anchored & {"caller-node", "callee-node"}:
+                return []
             return [
                 {
                     "assertion_id": "call-edge",

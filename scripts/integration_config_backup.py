@@ -11,10 +11,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from reliable_memory import fsync_directory
+from settings import setting_value
 
 MAX_BACKUPS = 10
-MAX_BACKUP_AGE_SECONDS = 90 * 24 * 60 * 60
+# Backups older than the setting `retention.config_backup_days` (90 by default) go,
+# the newest always kept; the count and byte bounds hold alongside.
 MAX_BACKUP_BYTES = 100 * 1024 * 1024
+_DAY_SECONDS = 86_400
 _UNSET = object()
 
 
@@ -240,7 +243,7 @@ def _expired_backup(
 def _prune_expired(
     backups: list[tuple[Path, os.stat_result]], protected: Path
 ) -> None:
-    cutoff = time.time() - MAX_BACKUP_AGE_SECONDS
+    cutoff = time.time() - setting_value("retention.config_backup_days") * _DAY_SECONDS
     for item in list(backups):
         if _expired_backup(item, protected, cutoff) and len(backups) > 1:
             item[0].unlink()
