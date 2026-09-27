@@ -299,29 +299,39 @@ def _definition_site(graph, node: dict, deadline: float) -> dict | None:
     }
 
 
-def _graph_definition_sites(graph, symbol: str, deadline: float) -> list[dict]:
+def _graph_definition_report(graph, symbol: str, deadline: float) -> dict:
+    """The first MAX_LOCATIONS definition sites, and how many matching nodes were left out."""
     try:
         nodes = _matching_nodes(graph, symbol, deadline)
     except ValueError:
-        return []
-    sites = [_definition_site(graph, node, deadline) for node in nodes[:MAX_LOCATIONS]]
-    return [site for site in sites if site is not None]
+        return {"sites": [], "sites_omitted": 0}
+    shown = nodes[:MAX_LOCATIONS]
+    sites = [_definition_site(graph, node, deadline) for node in shown]
+    return {"sites": [site for site in sites if site is not None], "sites_omitted": len(nodes) - len(shown)}
 
 
-def definition_sites(directory: Path, symbol: str, deadline: float) -> list[dict]:
-    """Every definition of the symbol the active generation knows, without source.
+def definition_report(directory: Path, symbol: str, deadline: float) -> dict:
+    """Where the symbol is defined, without source, and how many definitions were left out.
 
     A "where is X defined" question is answered by a path and a line, and the
     generation already stores both as the `definition` occurrence of the node.
     The parity run of 2026-09-12 graded our symbol answer `partial` because it
-    carried call-site lines and not this one.
+    carried call-site lines and not this one. The list is cut at MAX_LOCATIONS
+    like the snippet answer and says so in `sites_omitted`, so a name shared by
+    more definitions is never answered as if five were all
+    (docs/research/2026-09-27-a-cut-says-what-it-left-out.md).
     """
     from code_graph import _active_evidence_graph
 
     graph = _active_evidence_graph(directory)
     if graph is None:
-        return []
+        return {"sites": [], "sites_omitted": 0}
     try:
-        return _graph_definition_sites(graph, symbol, deadline)
+        return _graph_definition_report(graph, symbol, deadline)
     finally:
         graph.close()
+
+
+def definition_sites(directory: Path, symbol: str, deadline: float) -> list[dict]:
+    """The definition sites alone; `definition_report` also says how many were left out."""
+    return definition_report(directory, symbol, deadline)["sites"]

@@ -57,6 +57,7 @@
   "test_a_dead_task_can_be_purged_when_it_is_asked_for.py": 18.58,
   "test_a_dead_task_names_its_reason.py": 0.01,
   "test_a_decorator_is_a_call_until_it_is_a_route.py": 0.02,
+  "test_a_definition_and_a_service_walk_say_what_they_left_out.py": 0.99,
   "test_a_definition_under_a_platform_test_is_still_a_definition.py": 0.01,
   "test_a_derived_field_is_derived_again.py": 0.01,
   "test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py": 1.23,

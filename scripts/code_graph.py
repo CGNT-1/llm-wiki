@@ -3654,27 +3654,41 @@ def _service_hop(graph, frontier: list[str], depth: int) -> list[dict]:
 
 
 def _service_frontier(rows: list[dict], seen: set[str]) -> list[str]:
-    """A foreign handler carries no node id here: its graph is a different one."""
+    """Every node this hop reached first; a foreign handler carries no node id here."""
     identifiers = [str(row["symbol_id"]) for row in rows if row["symbol_id"]]
     reached = [identity for identity in identifiers if identity not in seen]
     seen.update(reached)
-    return sorted(set(reached))[:FLOW_MAX_ROWS]
+    return sorted(set(reached))
 
 
 def _service_walk(
     graph, seeds: list[str], depth: int, deadline=None, cancelled=None
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
+    """Every row the walk found, and whether a hop's frontier had to be narrowed.
+
+    Like `_flow_rows`: the frontier and the answer are cut at FLOW_MAX_ROWS, and
+    both cuts are reported instead of silently shortening the walk
+    (docs/research/2026-09-27-a-cut-says-what-it-left-out.md).
+    """
     rows: list[dict] = []
     seen = set(seeds)
     frontier = list(seeds)
+    narrowed = False
     for hop in range(1, depth + 1):
         _check_generation_stop(deadline, cancelled)
         if not frontier:
             break
         hop_rows = _service_hop(graph, frontier, hop)
         rows.extend(hop_rows)
-        frontier = _service_frontier(hop_rows, seen)
-    return rows[:FLOW_MAX_ROWS]
+        following = _service_frontier(hop_rows, seen)
+        narrowed = narrowed or len(following) > FLOW_MAX_ROWS
+        frontier = following[:FLOW_MAX_ROWS]
+    return rows, narrowed
+
+
+def _service_cut_report(rows: list[dict], narrowed: bool) -> dict:
+    """What the row cut and a narrowed frontier left out of the answer."""
+    return {"hop_count": len(rows), "hops_truncated": narrowed or len(rows) > FLOW_MAX_ROWS}
 
 
 def _service_report(graph, symbol: str, seeds: list[str], rows: list[dict], depth: int) -> dict:
@@ -3713,10 +3727,12 @@ def find_service_paths(
         matched = _dependency_seed_nodes(graph, symbol)
         seeds = matched[:FLOW_MAX_SEEDS]
         depth = _flow_depth(max_depth)
-        rows = _service_walk(graph, seeds, depth, deadline, cancelled)
+        found, narrowed = _service_walk(graph, seeds, depth, deadline, cancelled)
+        rows = found[:FLOW_MAX_ROWS]
         report = {
             **_service_report(graph, symbol, seeds, rows, depth),
             **_seed_cut_report(matched, FLOW_MAX_SEEDS),
+            **_service_cut_report(found, narrowed),
         }
         return _with_report("hops", rows, report, with_report)
     finally:

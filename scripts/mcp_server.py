@@ -2065,14 +2065,18 @@ def _with_lines_from_disk(answer, request: dict):
     return refreshed_answer(answer, request["resolved"], _definition_row_keys(answer))
 
 
-def _architecture_definition(request: dict) -> list:
-    """Where the symbol is defined, from the generation's definition occurrence."""
-    from symbol_snippet import definition_sites
+def _architecture_definition(request: dict) -> dict:
+    """Where the symbol is defined, from the generation's definition occurrence.
 
-    return _with_lines_from_disk(
-        definition_sites(request["resolved"], request["symbol"], request["deadline"]),
-        request,
-    )
+    `definition_omitted` appears only when the list was cut, like the other keys
+    this answer carries only when the source has them.
+    """
+    from symbol_snippet import definition_report
+
+    report = definition_report(request["resolved"], request["symbol"], request["deadline"])
+    answer = {"definition": _with_lines_from_disk(report["sites"], request)}
+    omitted = {"definition_omitted": report["sites_omitted"]} if report["sites_omitted"] else {}
+    return {**answer, **omitted}
 
 
 def _architecture_symbol(request: dict) -> dict:
@@ -2087,7 +2091,7 @@ def _architecture_symbol(request: dict) -> dict:
         "symbol": request["symbol"],
         # A "where is it" question is answered by the definition, not by the
         # call sites around it (parity run 2026-09-12, task T04).
-        "definition": _architecture_definition(request),
+        **_architecture_definition(request),
         "callers": callers.get("callers", []),
         "callees": callees.get("callees", []),
         "dependencies": dependencies.get("dependencies", []),

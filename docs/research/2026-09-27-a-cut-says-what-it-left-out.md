@@ -74,3 +74,20 @@ record); `fact_keys.MAX_KEYS_PER_TURN`, `refusal_pass.MAX_QUERIES` and
 
 Guard: `tests/test_a_route_and_a_snippet_say_what_they_left_out.py` (3 tests, all
 three fail on the code before this change).
+
+## The last two silent cuts (2026-09-27)
+
+- `symbol_snippet.definition_sites` showed the first `MAX_LOCATIONS` (5)
+  definitions of a shared name and returned a bare list. The cut stays a display
+  bound (the same one the snippet answer uses; `MAX_NAME_MATCHES` = 200 is the
+  data bound past which the query refuses), and the new `definition_report`
+  returns `sites_omitted`; `get_architecture`'s symbol answer carries
+  `definition_omitted` when the list was cut, following the answer's rule of only
+  keys the source has. `definition_sites` stays as the list alone for its callers.
+- `code_graph._service_walk` cut its rows and each hop's frontier at
+  `FLOW_MAX_ROWS` without a mark. It now returns every row and whether a frontier
+  was narrowed, like `_flow_rows`; `find_service_paths` cuts the answer and
+  reports `hop_count` and `hops_truncated`, the pair the argument-flow answer
+  already carries as `flow_count` / `flows_truncated`.
+- Guard: `tests/test_a_definition_and_a_service_walk_say_what_they_left_out.py`,
+  over real generations; all four fail on the code before this change.
