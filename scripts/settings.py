@@ -61,6 +61,11 @@ _DRAFT_CEILING_REASON = (
     "a whole-plan provider call; 99-418 s measured under load, 600 s compiled "
     "(docs/research/2026-09-27-every-limit-states-its-reason.md)"
 )
+_RETRIEVAL_BUDGET_REASON = (
+    "recall and get_decisions wait for the reranker; its warm p95 was 5.68 s on 4 idle "
+    "cores, and 14 s leaves it a 6.25 s window (7.95 s under load: raise it there) "
+    "(docs/research/2026-09-27-a-rerank-has-the-window-it-was-measured-to-need.md)"
+)
 _REPORT_REASON = (
     "maintenance reports and step output are diagnostics "
     "(docs/research/2026-09-25-a-report-link-outlives-no-report.md)"
@@ -115,6 +120,7 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("retention", "benchmark_run_days", 30, "days", "a benchmark run directory is evidence for the report written from it"),
     Setting("retention", "config_backup_days", 90, "days", "agent-config backups undo an installer rewrite; the archive's 90 hot days"),
     Setting("provider", "draft_ceiling_seconds", 600, "seconds", _DRAFT_CEILING_REASON),
+    Setting("mcp", "retrieval_seconds", 14, "seconds", _RETRIEVAL_BUDGET_REASON, lower=5),
 )
 _BY_NAME = {setting.name: setting for setting in REGISTRY}
 _SECTIONS = frozenset(setting.section for setting in REGISTRY)

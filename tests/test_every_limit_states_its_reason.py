@@ -39,6 +39,9 @@ REPLACED = {
     "retention.config_backup_days": 90,
     # Was COMPILE_PROVIDER_CEILING_S = 300; raised to 600 on the 2026-09-27 measurements.
     "provider.draft_ceiling_seconds": 600,
+    # Not a replaced constant: recall and get_decisions had MCP_OPERATION_SECONDS (10 s);
+    # 14 s is the budget measured for the reranker (B-9).
+    "mcp.retrieval_seconds": 14,
 }
 RETIRED_NAMES = (
     "MAX_PAGE_COUNT",

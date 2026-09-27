@@ -247,10 +247,18 @@ def _architecture_operation_seconds(arguments: dict) -> float:
     )
 
 
+def _retrieval_operation_seconds(_arguments: dict | None = None) -> float:
+    """A retrieval answer waits for its reranker: `mcp.retrieval_seconds` (B-9,
+    docs/research/2026-09-27-a-rerank-has-the-window-it-was-measured-to-need.md)."""
+    from settings import setting_value
+
+    return float(setting_value("mcp.retrieval_seconds"))
+
+
 def _recall_operation_seconds(arguments: dict) -> float:
     """A grounded answer waits on a provider: one round trip measured 32.5 s (A-17)."""
     if arguments.get("grounded") is not True:
-        return MCP_OPERATION_SECONDS
+        return _retrieval_operation_seconds()
     from query_memory import QA_DEADLINE_SECONDS
 
     return QA_DEADLINE_SECONDS
@@ -259,6 +267,7 @@ def _recall_operation_seconds(arguments: dict) -> float:
 _TOOL_BUDGETS = {
     "get_architecture": _architecture_operation_seconds,
     "recall": _recall_operation_seconds,
+    "get_decisions": _retrieval_operation_seconds,
 }
 
 

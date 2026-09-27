@@ -1926,7 +1926,10 @@ class TestHandleToolCall:
         envelope = json.loads(self._run(tool_name, VALID_TOOL_CALLS[tool_name]))
 
         assert "error" not in envelope["data"]
-        assert seen == [100.0 + mcp_server.MCP_OPERATION_SECONDS]
+        # The tool's own budget: 10 s, or `mcp.retrieval_seconds` for recall and
+        # get_decisions, whose answer waits for the reranker (B-9).
+        budget = mcp_server._tool_operation_seconds(tool_name, VALID_TOOL_CALLS[tool_name])
+        assert seen == [100.0 + budget]
 
     def test_get_context_does_not_replace_the_handler_deadline(self, monkeypatch):
         import corpus_snapshot
@@ -4087,9 +4090,10 @@ def test_navigation_deadline_is_10s_for_existing_modes() -> None:
         )
         == mcp_server.MCP_OPERATION_SECONDS
     )
+    # recall waits for its reranker on `mcp.retrieval_seconds` (B-9), not the 10 s default.
     assert (
         mcp_server._tool_operation_seconds("recall", {"query": "x"})
-        == mcp_server.MCP_OPERATION_SECONDS
+        == mcp_server._retrieval_operation_seconds()
     )
 
 

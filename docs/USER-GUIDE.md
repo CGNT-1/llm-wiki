@@ -754,6 +754,12 @@ draft or episode batch may wait for the model. Drafts measured 99 to 418 s on a 
 machine; raise it if compiles report `provider_timeout`. `MEMORY_LLM_TIMEOUT_S`, when
 set, still overrides every call.
 
+Section `[mcp]`: `retrieval_seconds` (14) is the time an MCP `recall` or
+`get_decisions` answer may take, so the cross-encoder reranker fits in it: warm, it took
+a median 3.5 s and a 95th percentile 5.7 s on four idle cores. On a slower or busy
+machine the answer comes back without the rerank more often; raise it there. Every
+other tool keeps 10 s.
+
 Other limits are not settings: they are protocol values, safety bounds on input, or
 the timing a lease and its heartbeat share. Each states its reason where it is defined,
 or is listed in `tests/fixtures/law9-unexplained-limits.txt` until it does.
