@@ -872,7 +872,10 @@ def _compared_lines(old_lines: list[bytes], new_lines: list[bytes]) -> tuple[lis
 # interrupted, 110 s past a 5 s deadline on a reformatted file (audit 2026-09-27
 # A-5, docs/research/2026-09-27-an-impact-diff-can-be-stopped.md).
 _HUNK_HEADER = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
-_DIFF_ARGUMENTS = ["diff", "--no-index", "--no-color", "--no-ext-diff", "--text", "--unified=0", "--", "old", "new"]
+# The byte diff of two scratch files must not inherit the user's end-of-line
+# conversion (`core.autocrlf=true` on Windows hid a CRLF-only change);
+# docs/research/2026-09-27-a-byte-diff-ignores-the-users-line-ending-setting.md.
+_DIFF_ARGUMENTS = ["-c", "core.autocrlf=false", "diff", "--no-index", "--no-color", "--no-ext-diff", "--text", "--unified=0", "--", "old", "new"]
 # A hunk header is at most this many bytes beyond the changed lines themselves.
 _HUNK_HEADER_BYTES = 64
 

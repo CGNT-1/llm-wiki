@@ -7,7 +7,21 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
 from impact_analysis import _changed_ranges, analyze_impact
+
+
+@pytest.fixture(autouse=True)
+def _windows_line_ending_setting(tmp_path_factory, monkeypatch) -> None:
+    """Every case meets `core.autocrlf = true`, the setting Git for Windows installs.
+
+    Without it the byte diff's CRLF blindness only showed on Windows CI;
+    docs/research/2026-09-27-a-byte-diff-ignores-the-users-line-ending-setting.md.
+    """
+    home = tmp_path_factory.mktemp("home")
+    (home / ".gitconfig").write_text("[core]\n\tautocrlf = true\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
 
 COMMITTED = b"def alpha():\n    return 1\n\n\ndef beta():\n    return 1\n"
 CHECKED_OUT = COMMITTED.replace(b"\n", b"\r\n")
