@@ -96,6 +96,7 @@ from memory_queue import active_or_legacy_memory_queue  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
+    closed_daily_logs,
     daily_logs,
     load_state,
     update_state,
@@ -3869,6 +3870,12 @@ def parse_args() -> argparse.Namespace:
         help="The compile lock written for this run by the process that spawned "
         "it. Passed by maybe_compile; a direct CLI run has none.",
     )
+    p.add_argument(
+        "--closed-days-only",
+        action="store_true",
+        help="Leave out the newest daily log, the one still being appended to. "
+        "Passed by the session start; the nightly and a manual run take every day.",
+    )
     return p.parse_args()
 
 
@@ -4073,9 +4080,16 @@ def select_dailies(
     compiled_hashes = _compiled_hashes(state)
     return [
         path
-        for path in _canonical_dailies()
+        for path in _offered_dailies(args)
         if not _daily_already_compiled(path, compiled_hashes, coordinator)
     ]
+
+
+def _offered_dailies(args: argparse.Namespace) -> list[Path]:
+    """Every day, or every closed day when the session start asked (`closed_daily_logs`)."""
+    if getattr(args, "closed_days_only", False):
+        return closed_daily_logs(DAILY_DIR)
+    return _canonical_dailies()
 
 
 def _explicit_daily(path: Path, coordinator: MarkdownCoordinator) -> list[Path]:

@@ -61,7 +61,7 @@ def test_a_session_start_drain_that_fails_is_logged(tmp_path: Path, monkeypatch)
 
 
 def test_a_compile_that_cannot_be_started_is_logged(tmp_path: Path, monkeypatch) -> None:
-    def refuse() -> None:
+    def refuse(**_kwargs) -> None:
         raise OSError("no fork")
 
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", tmp_path)

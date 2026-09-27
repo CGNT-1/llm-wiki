@@ -1181,7 +1181,9 @@ class TestHelperFunctions:
             )
         monkeypatch.setattr(memory_state, "ROOT", tmp_path)
 
-        package = mcp_server._get_context(["alpha", "beta"], token_budget=256)
+        # 512 holds the bytes 256 did under the earlier 4-bytes estimate; at the
+        # measured 2 bytes per token, 256 cannot hold this answer's item list.
+        package = mcp_server._get_context(["alpha", "beta"], token_budget=512)
 
         assert package["repo_map"] == [
             "knowledge/notes/alpha.md",
@@ -1363,7 +1365,7 @@ class TestHelperFunctions:
         monkeypatch.setattr(
             maybe_compile,
             "spawn_compile_if_idle",
-            lambda: pytest.fail("MCP compile must not detach unbounded work"),
+            lambda **_kwargs: pytest.fail("MCP compile must not detach unbounded work"),
         )
         deadline = time.monotonic() + 5
 

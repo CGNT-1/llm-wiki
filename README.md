@@ -28,7 +28,7 @@ You work with an agent as usual
       ↓  thin hooks send each session event to integration_adapter.py
 Session record  →  knowledge/raw/sessions/<date>/  (redacted, kept for every session)
 Daily log       →  knowledge/daily/<date>.md
-      ↓  compile (at session start when idle, and every night)
+      ↓  compile (closed days at session start when idle; every day each night)
 Knowledge pages →  knowledge/notes/<slug>.md   (every quote checked against its source)
       ↓
 Next session, in any agent: learned rules, open threads, last decision,

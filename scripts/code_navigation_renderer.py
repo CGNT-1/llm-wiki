@@ -19,7 +19,11 @@ from code_navigation import (
 DEFAULT_LIMIT = 10
 # Largest row count a rendered navigation answer accepts; `graph_query` accepts 200.
 MAX_LIMIT = 100
-MAX_ESTIMATED_TOKENS = 1_200
+# The 4 800 bytes a rendered navigation answer has been built for, stated in tokens
+# at the measured `answer_budget.BYTES_PER_TOKEN` (2): 1 200 under the earlier
+# 4-bytes estimate. Only the unit moved, not the answer. See
+# docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md.
+MAX_ESTIMATED_TOKENS = 2_400
 _HOVER_BYTE_CEILING = 2048
 _MAX_JSON_SAFE_INTEGER = 2**53 - 1
 _SIGNATURE_BYTE_CEILING = 1024

@@ -2398,7 +2398,8 @@ def _run_session_start_maintenance() -> int:
     _run_maintenance_command("memory_queue.py", "work")
     _catch_up_missed_nightly()
     try:
-        spawn_compile_if_idle()
+        # The open day waits for the nightly; see `memory_state.closed_daily_logs`.
+        spawn_compile_if_idle(closed_days_only=True)
     except Exception as error:  # noqa: BLE001 - session start never fails over a compile spawn
         _log_hook_error("session-start compile", describe_error(error))
     return 0

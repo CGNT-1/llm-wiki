@@ -41,7 +41,8 @@ def vault(tmp_path: Path, monkeypatch) -> Path:
     return tmp_path
 
 
-@pytest.mark.parametrize("budget", [400, 1200])
+# The same bytes these budgets held under the earlier 4-bytes estimate (400 and 1200).
+@pytest.mark.parametrize("budget", [800, 2400])
 def test_the_whole_answer_fits_the_budget_not_only_its_text(vault: Path, budget: int) -> None:
     answer = mcp_server._get_context(SLUGS, token_budget=budget)
 
@@ -68,11 +69,11 @@ def test_every_answer_counts_tokens_one_way(vault: Path) -> None:
         answer["packed_tokens"] == answer_budget.estimate_text_tokens(answer["text"]),
         code_navigation_renderer.estimate_tokens is answer_budget.estimate_text_tokens,
         answer_cost.ESTIMATE_METHOD,
-    ) == (True, True, "utf8_bytes/4")
+    ) == (True, True, "utf8_bytes/2")
 
 
 def test_the_estimate_counts_bytes_so_cyrillic_is_not_undercounted() -> None:
-    assert (answer_budget.estimate_text_tokens("abcd"), answer_budget.estimate_text_tokens("привет")) == (1, 3)
+    assert (answer_budget.estimate_text_tokens("abcd"), answer_budget.estimate_text_tokens("привет")) == (2, 6)
 
 
 def test_a_budget_the_item_list_cannot_fit_is_refused_not_exceeded(vault: Path, monkeypatch) -> None:

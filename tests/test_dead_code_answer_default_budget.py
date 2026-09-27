@@ -133,15 +133,19 @@ def test_an_answer_with_nothing_at_all_to_drop_stays_byte_identical():
 # --- what the cut is allowed to take ---------------------------------------
 
 
-def test_the_cut_takes_the_doubtful_rows_and_leaves_every_defensible_one():
+def test_the_cut_takes_every_doubtful_row_before_a_defensible_one():
     """`unresolved_receiver` claims nothing, so it is what a budget drops first.
 
-    Sorted by name, the same cut lost 97 defensible candidates.
+    Sorted by name, the same cut lost 97 defensible candidates. Counted at the
+    measured 2 bytes per token (2026-09-27) the 461 defensible rows alone exceed
+    the 25 000-token client ceiling, so the cut reaches them - but only once no
+    doubtful row is left. See
+    docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md.
     """
     shaped = answer_budget.shape_code_answer(_live_shaped_answer())
     kept = _reasons(shaped)
-    assert kept["zero_confirmed_incoming_calls"] == _DEFENSIBLE
-    assert kept["unresolved_receiver"] < _DOUBTFUL
+    assert kept.get("unresolved_receiver", 0) == 0
+    assert 0 < kept["zero_confirmed_incoming_calls"] <= _DEFENSIBLE
 
 
 def test_the_defensible_candidates_come_first_so_a_tail_cut_is_survivable():

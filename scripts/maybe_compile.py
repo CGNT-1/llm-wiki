@@ -40,6 +40,7 @@ from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
     atomic_write,
+    closed_daily_logs,
     daily_logs,
     file_hash,
     load_state,
@@ -275,33 +276,45 @@ def _is_compile_running() -> tuple[bool, str]:
     return (state == "live", reason)
 
 
-def _has_pending_work() -> bool:
+def _has_pending_work(closed_days_only: bool = False) -> bool:
     """Quick check: are there daily logs whose hash differs from last compile?
 
     Reads state.json (cheap) and compares against current daily files.
-    Under 50ms even for 100 daily logs.
+    Under 50ms even for 100 daily logs. `closed_days_only` leaves out the day
+    still being appended to (`memory_state.closed_daily_logs`).
     """
     state = load_state()
     compiled_hashes = state.get("compiled_daily_hashes", {}) or {}
     return any(
         compiled_hashes.get(p.name) != file_hash(p)
-        for p in daily_logs(ROOT / "knowledge" / "daily")
+        for p in _candidate_logs(closed_days_only)
     )
 
 
-def spawn_compile_if_idle(force: bool = False) -> tuple[bool, str]:
+def _candidate_logs(closed_days_only: bool) -> list[Path]:
+    daily_dir = ROOT / "knowledge" / "daily"
+    if closed_days_only:
+        return closed_daily_logs(daily_dir)
+    return daily_logs(daily_dir)
+
+
+def spawn_compile_if_idle(
+    force: bool = False, closed_days_only: bool = False
+) -> tuple[bool, str]:
     """Spawn a detached compile unless one is running or nothing is pending.
 
     Returns (spawned, reason). Never raises. ``force`` bypasses the
-    "no pending work" gate but never steals a live lock.
+    "no pending work" gate but never steals a live lock. ``closed_days_only``
+    is the session start's: the day still being appended to waits for the
+    nightly (`memory_state.closed_daily_logs`).
     """
-    spawned, _skipped, reason = _spawn_outcome(force)
+    spawned, _skipped, reason = _spawn_outcome(force, closed_days_only)
     return (spawned, reason)
 
 
-def _spawn_outcome(force: bool) -> tuple[bool, bool, str]:
+def _spawn_outcome(force: bool, closed_days_only: bool = False) -> tuple[bool, bool, str]:
     """(spawned, skipped, reason): a skip is a named refusal, not a failure."""
-    refusal = _refusal_before_claim(force)
+    refusal = _refusal_before_claim(force, closed_days_only)
     if refusal is not None:
         return (False, True, refusal)
     if not _claim_lock():
@@ -309,14 +322,14 @@ def _spawn_outcome(force: bool) -> tuple[bool, bool, str]:
         # what holds it now rather than a race the reader cannot verify.
         _state, reason = _lock_state()
         return (False, True, f"skipped: {reason}")
-    return _spawn_claimed()
+    return _spawn_claimed(closed_days_only)
 
 
-def _refusal_before_claim(force: bool) -> str | None:
+def _refusal_before_claim(force: bool, closed_days_only: bool = False) -> str | None:
     is_running, reason = _is_compile_running()
     if is_running:
         return _live_lock_refusal(force, reason)
-    if not force and not _has_pending_work():
+    if not force and not _has_pending_work(closed_days_only):
         return "skipped: no pending work (all daily logs compiled)"
     return None
 
@@ -339,20 +352,27 @@ def _claim_lock() -> bool:
     return _try_claim_lock()
 
 
-def _spawn_claimed() -> tuple[bool, bool, str]:
+def _compile_command(placeholder: str, closed_days_only: bool) -> list[str]:
+    command = [
+        sys.executable,
+        str(COMPILE_SCRIPT),
+        "--trigger",
+        "auto",
+        "--lock-token",
+        placeholder,
+    ]
+    if closed_days_only:
+        command.append("--closed-days-only")
+    return command
+
+
+def _spawn_claimed(closed_days_only: bool = False) -> tuple[bool, bool, str]:
     # The placeholder's token is ours to clear if the spawn fails, and the
     # child's proof that the lock it finds was written for it — whether it
     # looks before or after the PID below is replaced.
     placeholder = lock_owner_token() or ""
     pid = spawn_detached(
-        [
-            sys.executable,
-            str(COMPILE_SCRIPT),
-            "--trigger",
-            "auto",
-            "--lock-token",
-            placeholder,
-        ],
+        _compile_command(placeholder, closed_days_only),
         stdout_path=LOG_OUT,
         stderr_path=LOG_ERR,
     )

@@ -456,7 +456,7 @@ def _exercise_maintenance_runs_work_then_compile(
         order.append(args[0][-1])
         return subprocess.CompletedProcess(args[0], 1, "secret stdout", "secret stderr")
 
-    def compile_after_work():
+    def compile_after_work(**_kwargs):
         assert pending_daily.exists()
         order.append("compile")
         return True, "spawned"
