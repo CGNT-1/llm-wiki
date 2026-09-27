@@ -46,3 +46,14 @@ owner; it is not bypassed. The guard names both functions with the removal condi
 
 `tests/test_a_function_holds_two_ifs.py` now walks all of `scripts/` and asserts the
 offenders are exactly the two named ones.
+
+## Closed: private_vault_backup.py (2026-09-27)
+
+The machine owner changed the law-8 leftover-copy rule: a backup extension (`.bak`,
+`.orig`, `.old`, `.rej`, `~`) is still refused always, while a word suffix (`_old`,
+`_backup`, `_copy`, ...) is refused only when the original it copies exists beside it
+(the gate's own suite: 223 of 223). `private_vault_backup.py` copies nothing, so it can be
+edited: `_validate_command` and `_validate_root_locations` are split
+(`_valid_command_item`, `_require_separate_sources`), and its four limits state their
+basis. Both exception lists are gone: the two-if guard and the limit guard now require
+zero offenders across the code.

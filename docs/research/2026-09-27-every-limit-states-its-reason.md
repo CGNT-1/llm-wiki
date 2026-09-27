@@ -225,3 +225,14 @@ Added to phase 2a on 2026-09-27:
   loss in audit 3, A14). Guard: `tests/test_a_cut_in_the_core_says_what_it_left_out.py`
   (5 tests, all fail on the code before; one of them fails on any unanchored
   `graph.edges` call).
+
+## Closed: private_vault_backup.py (2026-09-27)
+
+The machine owner changed the law-8 leftover-copy rule: a backup extension (`.bak`,
+`.orig`, `.old`, `.rej`, `~`) is still refused always, while a word suffix (`_old`,
+`_backup`, `_copy`, ...) is refused only when the original it copies exists beside it
+(the gate's own suite: 223 of 223). `private_vault_backup.py` copies nothing, so it can be
+edited: `_validate_command` and `_validate_root_locations` are split
+(`_valid_command_item`, `_require_separate_sources`), and its four limits state their
+basis. Both exception lists are gone: the two-if guard and the limit guard now require
+zero offenders across the code.

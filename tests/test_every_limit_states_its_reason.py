@@ -64,7 +64,6 @@ RETIRED_NAMES = (
     "COMPILE_PROVIDER_CEILING_S",
     "CONSOLIDATION_PROVIDER_CEILING_S",
 )
-UNEXPLAINED = ROOT / "tests" / "fixtures" / "law9-unexplained-limits.txt"
 # A limit by its name, as docs/LIMITS-2026-09-27.md inventories them.
 LIMIT_NAME = re.compile(
     r"(^|_)(MAX|MIN|LIMIT|TIMEOUT|DEADLINE|BUDGET|CAP|CEILING|WINDOW|THRESHOLD|RETRIES|ATTEMPTS|"
@@ -245,15 +244,10 @@ def _bare_limits(path: Path) -> set[str]:
     return {f"{path.relative_to(ROOT).as_posix()}::{_assigned(node)[0]}" for node in bare}
 
 
-def _unexplained() -> set[str]:
-    lines = UNEXPLAINED.read_text(encoding="utf-8").splitlines()
-    return {line for line in lines if line and not line.startswith("#")}
-
-
 def test_every_limit_is_a_setting_or_states_its_basis() -> None:
-    """A new bare constant fails, and so does a basis written without leaving the debt list."""
+    """Every module-level limit in scripts/ has a worded basis in its own block or is a setting."""
     bare = set().union(*(_bare_limits(path) for path in sorted((ROOT / "scripts").rglob("*.py"))))
-    assert bare == _unexplained()
+    assert bare == set()
 
 
 def test_the_limit_scanner_sees_a_bare_constant() -> None:
