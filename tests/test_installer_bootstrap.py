@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.powershell_literal import ps_literal
+
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY_URL = "https://github.com/Ekgardt/llm-wiki.git"
 REQUIRED_FILES = (
@@ -145,7 +147,7 @@ def _powershell_functions(source: Path, names: tuple[str, ...]) -> str:
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @({', '.join(json.dumps(name) for name in names)})) {{
             $fn = $ast.Find({{ param($node)
@@ -249,7 +251,7 @@ def test_pipe_mode_ignores_caller_checkout_and_verifies_exact_head(
             pytest.skip("PowerShell unavailable")
         source = (ROOT / "install.ps1").read_text(encoding="utf-8").replace(
             f'$repositoryUrl = "{REPOSITORY_URL}"',
-            f"$repositoryUrl = {powershell_quote(str(remote))}",
+            f"$repositoryUrl = {ps_literal(str(remote))}",
         )
         result = subprocess.run(
             [executable, "-NoProfile", "-NonInteractive", "-Command", "-"],
@@ -281,9 +283,6 @@ def shlex_quote(value: str) -> str:
     return shlex.quote(value)
 
 
-def powershell_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
 
 @pytest.mark.parametrize("shell", ["bash", "powershell"])
 def test_remote_bootstrap_rejects_missing_required_file(
@@ -314,7 +313,7 @@ def test_remote_bootstrap_rejects_missing_required_file(
             pytest.skip("PowerShell unavailable")
         source = (ROOT / "install.ps1").read_text(encoding="utf-8").replace(
             f'$repositoryUrl = "{REPOSITORY_URL}"',
-            f"$repositoryUrl = {powershell_quote(str(remote))}",
+            f"$repositoryUrl = {ps_literal(str(remote))}",
         )
         result = subprocess.run(
             [executable, "-NoProfile", "-NonInteractive", "-Command", "-"],
@@ -403,7 +402,7 @@ def _invoke_push_helper(
         ) + textwrap.dedent(
             f"""
             Protect-PushUrlsIfAuthorized `
-                -VaultRoot {json.dumps(str(repository))} `
+                -VaultRoot {ps_literal(str(repository))} `
                 -InstallerCreatedClone ${str(created).lower()} `
                 -ProtectPush ${str(explicit).lower()}
             """

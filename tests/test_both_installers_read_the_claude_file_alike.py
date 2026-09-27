@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from installer_config import claude_mcp_state
 
+from tests.powershell_literal import ps_literal
 from tests.slow_machine import LONG_TIMEOUT
 from tests.test_the_installer_says_what_it_needs import (
     INSTALL_PS1,
@@ -97,7 +98,7 @@ def test_install_sh_reads_a_file_whose_keys_differ_by_case(tmp_path: Path) -> No
 def test_install_ps1_reads_a_file_whose_keys_differ_by_case(tmp_path: Path) -> None:
     config = _config(tmp_path, CASE_KEYS.replace(VAULT, json.dumps(str(ROOT))[1:-1]))
     script = UV_STUB_PS1 + _powershell_functions(ROOT / "install.ps1", ("Get-ClaudeMcpState",)) + (
-        f"Get-ClaudeMcpState -Config {json.dumps(str(config))} -VaultRoot {json.dumps(str(ROOT))}\n"
+        f"Get-ClaudeMcpState -Config {ps_literal(str(config))} -VaultRoot {ps_literal(str(ROOT))}\n"
     )
 
     result = subprocess.run(

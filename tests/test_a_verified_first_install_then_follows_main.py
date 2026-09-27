@@ -7,7 +7,6 @@ Research: `docs/research/2026-09-17-a-verified-first-install-then-follows-main.m
 """
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +20,7 @@ for entry in (str(TESTS), str(ROOT / "scripts")):
         sys.path.insert(0, entry)
 
 import self_update  # noqa: E402
+from powershell_literal import ps_literal  # noqa: E402
 from slow_machine import LONG_TIMEOUT  # noqa: E402
 from test_installer_bootstrap import (  # noqa: E402
     _bash,
@@ -73,7 +73,7 @@ def _bash_bootstrap(target: Path, url: str, commit: str) -> int:
 
 def _pwsh_bootstrap(target: Path, url: str, commit: str) -> int:
     command = _powershell_functions(ROOT / "install.ps1", ("Get-PinnedCheckout",)) + (
-        f"$ok = Get-PinnedCheckout -Target {json.dumps(str(target))} -Url {json.dumps(url)} "
+        f"$ok = Get-PinnedCheckout -Target {ps_literal(str(target))} -Url {ps_literal(url)} "
         f"-Commit {commit} 6>$null 2>$null\n"
         "if ($ok) { exit 0 }\nexit 1\n"
     )

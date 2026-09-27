@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.powershell_literal import ps_literal
 from tests.slow_machine import SHORT_TIMEOUT
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -2501,8 +2502,8 @@ def _compiled_fake_uv(compiler: str, source: Path, executable: Path) -> Path:
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                f"Add-Type -Path {json.dumps(str(source))} "
-                f"-OutputAssembly {json.dumps(str(executable))} "
+                f"Add-Type -Path {ps_literal(str(source))} "
+                f"-OutputAssembly {ps_literal(str(executable))} "
                 "-OutputType ConsoleApplication",
             ],
             capture_output=True,
@@ -3510,7 +3511,7 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
         function Ok($msg) {{ Write-Output "[OK] $msg" }}
         function Warn($msg) {{ Write-Output "[WARN] $msg" }}
         {section}
-        New-Item -ItemType File -Path {json.dumps(str(later))} | Out-Null
+        New-Item -ItemType File -Path {ps_literal(str(later))} | Out-Null
         """
     )
     env = os.environ.copy()
@@ -3647,7 +3648,7 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -3659,9 +3660,9 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
             $all = @($args)
             $index = [Array]::IndexOf($all, 'config-state')
             if ($index -lt 0) {{ throw 'config-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
+            & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        $code = Install-CodexMcp -VaultRoot {json.dumps(str(ROOT))} -Config {json.dumps(str(config))}
+        $code = Install-CodexMcp -VaultRoot {ps_literal(str(ROOT))} -Config {ps_literal(str(config))}
         exit $code
         """
     )
@@ -3789,7 +3790,7 @@ def test_windows_installer_probe_reports_absent_without_touching_the_file(tmp_pa
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -3801,9 +3802,9 @@ def test_windows_installer_probe_reports_absent_without_touching_the_file(tmp_pa
             $all = @($args)
             $index = [Array]::IndexOf($all, 'hooks-state')
             if ($index -lt 0) {{ throw 'hooks-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
+            & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        Get-CodexInlineHooksState -VaultRoot {ps_literal(str(ROOT))} -CodexDir {ps_literal(str(codex_dir))}
         """
     )
 
@@ -3836,7 +3837,7 @@ def test_windows_installer_probe_reports_conflict_for_partial_inline_hooks(tmp_p
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -3848,9 +3849,9 @@ def test_windows_installer_probe_reports_conflict_for_partial_inline_hooks(tmp_p
             $all = @($args)
             $index = [Array]::IndexOf($all, 'hooks-state')
             if ($index -lt 0) {{ throw 'hooks-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
+            & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        Get-CodexInlineHooksState -VaultRoot {ps_literal(str(ROOT))} -CodexDir {ps_literal(str(codex_dir))}
         """
     )
 
@@ -3921,7 +3922,7 @@ def test_windows_installer_probe_reports_disabled_when_the_feature_is_off(tmp_pa
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -3933,9 +3934,9 @@ def test_windows_installer_probe_reports_disabled_when_the_feature_is_off(tmp_pa
             $all = @($args)
             $index = [Array]::IndexOf($all, 'hooks-state')
             if ($index -lt 0) {{ throw 'hooks-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
+            & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        Get-CodexInlineHooksState -VaultRoot {ps_literal(str(ROOT))} -CodexDir {ps_literal(str(codex_dir))}
         """
     )
 
@@ -4443,7 +4444,7 @@ def test_windows_installer_resolves_one_external_state_root(tmp_path):
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(install_path))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(install_path))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -4478,15 +4479,13 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
     state = str(tmp_path / "state's data")
     uv_path = str(tmp_path / "bin's tools" / "uv.exe")
 
-    def ps_literal(value: str) -> str:
-        return "'" + value.replace("'", "''") + "'"
 
     command = textwrap.dedent(
         f"""
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -4555,15 +4554,13 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
     uv_path = str(tmp_path / "uv.exe")
     runner = str(tmp_path / "vault/scripts/run-scheduled-task.ps1")
 
-    def ps_literal(value: str) -> str:
-        return "'" + value.replace("'", "''") + "'"
 
     command = textwrap.dedent(
         f"""
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @(
             'Get-LLMWikiLimitHours', 'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',

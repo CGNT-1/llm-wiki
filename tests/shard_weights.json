@@ -148,6 +148,7 @@
   "test_a_pinned_zip_is_unpacked_as_a_zip.py": 0.16,
   "test_a_platform_without_a_pin_is_refused_by_name.py": 0.01,
   "test_a_position_names_its_units.py": 0.0,
+  "test_a_powershell_path_is_a_single_quoted_literal.py": 1.93,
   "test_a_preference_is_graded_by_its_rubric.py": 0.07,
   "test_a_previous_state_is_a_different_file.py": 0.04,
   "test_a_project_context_page_has_a_command.py": 0.0,

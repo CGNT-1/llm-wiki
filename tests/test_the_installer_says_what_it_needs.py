@@ -16,6 +16,7 @@ TESTS = Path(__file__).resolve().parent
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
+from powershell_literal import ps_literal  # noqa: E402
 from test_installer_bootstrap import (  # noqa: E402
     _bash,
     _powershell_functions,
@@ -149,10 +150,10 @@ def test_the_windows_installer_says_the_same(checkout: Path, tmp_path: Path) -> 
     names = ("Get-PinnedCheckout", "Get-ExistingTargetAdvice", "Get-CodeUpdateNote")
     target = tmp_path / "LLM-wiki"
     command = UV_STUB_PS1 + _powershell_functions(ROOT / "install.ps1", names) + (
-        f"$fetched = Get-PinnedCheckout -Target {json.dumps(str(target))} "
-        f"-Url {json.dumps(str(tmp_path / 'no-such-repository'))} -Commit {'a' * 40} 6>$null 2>$null\n"
-        f"$note = Get-CodeUpdateNote {json.dumps(str(checkout))}\n"
-        f"$advice = Get-ExistingTargetAdvice {json.dumps(str(checkout))}\n"
+        f"$fetched = Get-PinnedCheckout -Target {ps_literal(str(target))} "
+        f"-Url {ps_literal(str(tmp_path / 'no-such-repository'))} -Commit {'a' * 40} 6>$null 2>$null\n"
+        f"$note = Get-CodeUpdateNote {ps_literal(str(checkout))}\n"
+        f"$advice = Get-ExistingTargetAdvice {ps_literal(str(checkout))}\n"
         "ConvertTo-Json -Compress @([bool]$fetched, $note.Contains('pinned'), $advice.Contains('move it away'))\n"
     )
 

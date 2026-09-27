@@ -18,6 +18,7 @@ TESTS = Path(__file__).resolve().parent
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
+from powershell_literal import ps_literal  # noqa: E402
 from slow_machine import LONG_TIMEOUT  # noqa: E402
 from test_installer_bootstrap import (  # noqa: E402
     _bash,
@@ -61,7 +62,7 @@ def test_only_a_fresh_vault_is_adopted_without_the_operator(state, confirmed, ex
 @needs_pwsh
 def test_the_windows_installer_plans_the_same() -> None:
     calls = "\n".join(
-        f"$plans += Get-AdoptionPlan -State {json.dumps(state)} -Confirmed ${bool(confirmed)}"
+        f"$plans += Get-AdoptionPlan -State {ps_literal(state)} -Confirmed ${bool(confirmed)}"
         for state, confirmed, _expected in PLAN
     )
     command = _powershell_functions(ROOT / "install.ps1", ("Get-AdoptionPlan",)) + (
