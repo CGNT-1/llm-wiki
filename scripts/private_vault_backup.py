@@ -34,9 +34,20 @@ from reliable_memory import (
     sha256_bytes,
 )
 
+# Entries one source walk may list before it refuses with `source_entry_limit`; the
+# list is held in memory. Basis unknown beyond that: value predates measurement; the
+# live vault walked about 74 000 entries (2026-09-27). Review when a vault nears it.
 _MAX_ENTRIES = 1_000_000
+# The read size for hashing a file, a throughput choice with the deadline checked
+# between chunks. Basis unknown: value predates measurement; review if hashing a large
+# file misses its deadline.
 _CHUNK_BYTES = 1024 * 1024
+# The repository file holds one restic repository location, a path or URL (PATH_MAX is
+# 4 096 bytes on Linux); 16 KiB refuses a wrong file before it is parsed.
 _MAX_REPOSITORY_FILE_BYTES = 16 * 1024
+# The `git ls-files -z` listing that decides what the image may leave to git. The live
+# vault's listing is about 100 KB (2026-09-27); past this bound the listing counts as
+# absent and the image keeps everything, so the bound can only make a backup larger.
 _MAX_GIT_LISTING_BYTES = 8 * 1024 * 1024
 
 # What the image never carries. `cache/`, `logs/` and `run/` are the runtime
@@ -145,13 +156,15 @@ def _deadline(deadline: float) -> None:
         raise TimeoutError("backup deadline reached")
 
 
+def _valid_command_item(item: object) -> bool:
+    return isinstance(item, str) and bool(item)
+
+
 def _validate_command(command: list[str]) -> None:
     if not command:
         raise ValueError("invalid bounded command")
     for item in command:
-        if not isinstance(item, str):
-            raise ValueError("invalid bounded command")
-        if not item:
+        if not _valid_command_item(item):
             raise ValueError("invalid bounded command")
 
 
@@ -697,10 +710,16 @@ def _resolve_staging(path: Path) -> Path:
     return _resolve_directory(selected, "backup_path_invalid")
 
 
+def _require_separate_sources(vault: Path, state: Path) -> None:
+    """The state root may be the vault itself; otherwise the two must not overlap."""
+    if vault == state:
+        return
+    if _paths_overlap(vault, state):
+        raise BackupError("source_roots_overlap")
+
+
 def _validate_root_locations(vault: Path, state: Path, staging: Path) -> None:
-    if vault != state:
-        if _paths_overlap(vault, state):
-            raise BackupError("source_roots_overlap")
+    _require_separate_sources(vault, state)
     for source in {vault, state}:
         if _paths_overlap(staging, source):
             raise BackupError("staging_overlaps_source")
