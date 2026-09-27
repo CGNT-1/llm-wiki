@@ -554,6 +554,33 @@ def test_cancellation_is_checked_inside_markdown_line_scan(vault: Path):
     assert checks == 10
 
 
+def _edit_in_place(vault: Path, target: Path, original: os.stat_result) -> None:
+    """Change the bytes and put the old timestamps back."""
+    target.write_bytes(b"# Page\nChanged\n")
+    os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+
+def _add_page(vault: Path, target: Path, original: os.stat_result) -> None:
+    write(vault / "knowledge/notes/added.md", "# Added\nNew.\n")
+
+
+def _delete_page(vault: Path, target: Path, original: os.stat_result) -> None:
+    target.unlink()
+
+
+def _replace_page(vault: Path, target: Path, original: os.stat_result) -> None:
+    target.unlink()
+    target.write_bytes(b"# Page\nReplaced.\n")
+
+
+_VAULT_MUTATIONS = {
+    "edit": _edit_in_place,
+    "add": _add_page,
+    "delete": _delete_page,
+    "replace": _replace_page,
+}
+
+
 @pytest.mark.parametrize("mutation", ["edit", "add", "delete", "replace"])
 def test_a_vault_that_moved_on_no_longer_blocks_publication(vault: Path, mutation: str):
     """The fence used to demand the vault hold still for the length of a build.
@@ -573,16 +600,7 @@ def test_a_vault_that_moved_on_no_longer_blocks_publication(vault: Path, mutatio
     snapshot = collect_corpus(vault)
     original = target.stat()
 
-    if mutation == "edit":
-        target.write_bytes(b"# Page\nChanged\n")
-        os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
-    elif mutation == "add":
-        write(vault / "knowledge/notes/added.md", "# Added\nNew.\n")
-    elif mutation == "delete":
-        target.unlink()
-    else:
-        target.unlink()
-        target.write_bytes(b"# Page\nReplaced.\n")
+    _VAULT_MUTATIONS[mutation](vault, target, original)
 
     validate_live_snapshot(snapshot, vault)
 

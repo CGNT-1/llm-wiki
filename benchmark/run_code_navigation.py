@@ -977,13 +977,21 @@ def _resolved_matches(resolved: tuple[tuple[object, ...], str] | None, expected_
     return resolved is not None and resolved[1] == expected_hashes.get(resolved[0])
 
 
-def _direct_result_keys(
-    scope: RepositoryScope, result: object, encoding: PositionEncoding, expected_hashes: dict, deadline: float
-) -> set[tuple[object, ...]] | None:
+def _provider_locations(result: object) -> tuple | None:
+    """The locations of a provider-reported result, or None for any other result."""
     if getattr(result, "coverage", None) != "provider_reported":
         return None
     locations = getattr(result, "locations", None)
     if not isinstance(locations, tuple):
+        return None
+    return locations
+
+
+def _direct_result_keys(
+    scope: RepositoryScope, result: object, encoding: PositionEncoding, expected_hashes: dict, deadline: float
+) -> set[tuple[object, ...]] | None:
+    locations = _provider_locations(result)
+    if locations is None:
         return None
     actual: set[tuple[object, ...]] = set()
     for location in locations:
@@ -1166,6 +1174,30 @@ def _query_position(content: bytes, byte_start: int) -> tuple[int, int, int]:
     )
 
 
+def _mutation_expected(
+    needle: bytes, target_path: str, target_content: bytes | None
+) -> tuple[GoldLocation, ...]:
+    """The declaration a mutation query must reach; none when the target is gone."""
+    if target_content is None:
+        return ()
+    declaration = target_content.find(needle)
+    if declaration < 0:
+        raise ValueError("mutation workload target symbol is missing")
+    target_line, target_character, _target_codepoint = _query_position(
+        target_content, declaration
+    )
+    return (
+        GoldLocation(
+            target_path,
+            target_line,
+            target_character,
+            declaration,
+            declaration + len(needle),
+            hashlib.sha256(target_content).hexdigest(),
+        ),
+    )
+
+
 def _mutation_query(
     query_id: str,
     query_path: str,
@@ -1182,26 +1214,7 @@ def _mutation_query(
         raise ValueError("mutation workload probe symbol is missing")
     line, character, codepoint = _query_position(query_content, use)
     query_digest = hashlib.sha256(query_content).hexdigest()
-    expected: tuple[GoldLocation, ...]
-    if target_content is None:
-        expected = ()
-    else:
-        declaration = target_content.find(needle)
-        if declaration < 0:
-            raise ValueError("mutation workload target symbol is missing")
-        target_line, target_character, _target_codepoint = _query_position(
-            target_content, declaration
-        )
-        expected = (
-            GoldLocation(
-                target_path,
-                target_line,
-                target_character,
-                declaration,
-                declaration + len(needle),
-                hashlib.sha256(target_content).hexdigest(),
-            ),
-        )
+    expected = _mutation_expected(needle, target_path, target_content)
     return GoldQuery(
         query_id,
         "definition",

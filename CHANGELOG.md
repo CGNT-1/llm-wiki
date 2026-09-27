@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- Every function in tests/ and benchmark/ holds at most two if statements (36 split, assertions unchanged), and the two-if guard now walks scripts/, tests/ and benchmark/.
 - LspProtocol.close repeats a lost CancelSynchronousIo until the reader leaves and never closes a Windows stream under its own reader, which could hang a CI job for its whole hour; pytest's faulthandler_timeout (600 s, 1.5 times the slowest test of the last green main run) now prints every thread's stack on a hang, and the fake server sends with one sendall so its close no longer re-raises a broken pipe.
 - Every function in scripts/ holds at most two if statements (law 5): 89 functions were split into helpers without changing messages, exceptions or the order of effects, and four duplicated bodies became one; two functions in private_vault_backup.py remain because the machine's rule-8 gate refuses every edit of that file, and the guard names them.
 - A PowerShell command a test builds quotes its values as single-quoted literals through one helper instead of JSON, which doubled every backslash of a Windows path; a guard test refuses the JSON form.

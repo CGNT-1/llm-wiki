@@ -2157,6 +2157,17 @@ def _replace_server_with_link(root: Path, monkeypatch: pytest.MonkeyPatch) -> No
         _report_server_as_link(server, monkeypatch)
 
 
+def _damage_installed(root: Path, damage: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Damage a completed installation in the named way."""
+    if damage == "manifest":
+        (root / "install-manifest.json").write_bytes(b"{}")
+        return
+    if damage == "server":
+        (root / "package/langserver.index.js").write_bytes(b"changed")
+        return
+    _replace_server_with_link(root, monkeypatch)
+
+
 def _damage_existing_install(
     state_root: Path,
     root: Path,
@@ -2169,13 +2180,7 @@ def _damage_existing_install(
         root.mkdir(parents=True)
         return
     install_pyright(state_root=state_root, artifact=artifact.path)
-    if damage == "manifest":
-        (root / "install-manifest.json").write_bytes(b"{}")
-        return
-    if damage == "server":
-        (root / "package/langserver.index.js").write_bytes(b"changed")
-        return
-    _replace_server_with_link(root, monkeypatch)
+    _damage_installed(root, damage, monkeypatch)
 
 
 @pytest.mark.parametrize("damage", ["empty", "manifest", "server", "symlink"], ids=str)

@@ -779,16 +779,16 @@ def _python_direct_runtime_root_deletions(source: str) -> list[int]:
         def _bind(self, target: ast.AST, value: ast.AST) -> None:
             if not isinstance(target, ast.Name):
                 return
-            parts = self._path_parts(value)
-            if parts is None:
-                self.paths[-1].pop(target.id, None)
-            else:
-                self.paths[-1][target.id] = parts
-            api = self._delete_api(value)
-            if api is None:
-                self.functions[-1].pop(target.id, None)
-            else:
-                self.functions[-1][target.id] = api
+            self._bind_name(self.paths[-1], target.id, self._path_parts(value))
+            self._bind_name(self.functions[-1], target.id, self._delete_api(value))
+
+        @staticmethod
+        def _bind_name(scope: dict, name: str, bound: object) -> None:
+            """Bind `name` in this scope, or forget it when the value binds nothing."""
+            if bound is None:
+                scope.pop(name, None)
+                return
+            scope[name] = bound
 
         def visit_Assign(self, node: ast.Assign) -> None:
             self.visit(node.value)

@@ -870,6 +870,13 @@ def test_real_manifest_rejects_malformed_nested_inputs(tmp_path, mutate):
         )
 
 
+def _rev_parse_output(runner, manifest: dict, cwd: Path) -> str:
+    """The commit `git rev-parse` names: the repository's in its checkout, else Graphify's."""
+    if cwd == Path(manifest["repository"]["path"]):
+        return manifest["repository"]["commit"]
+    return runner.GRAPHIFY_COMMIT
+
+
 def test_preflight_requires_exact_graphify_commit_lock_and_model_identity(tmp_path):
     runner = _runner_module()
     contract = runner.load_contract(CONTRACT, SCHEMA)
@@ -880,10 +887,8 @@ def test_preflight_requires_exact_graphify_commit_lock_and_model_identity(tmp_pa
 
     def fake_probe(command, **kwargs):
         cwd = Path(kwargs.get("cwd", tmp_path))
-        if command[:2] == ["git", "rev-parse"] and cwd == Path(manifest["repository"]["path"]):
-            return subprocess.CompletedProcess(command, 0, manifest["repository"]["commit"] + "\n", "")
         if command[:2] == ["git", "rev-parse"]:
-            return subprocess.CompletedProcess(command, 0, runner.GRAPHIFY_COMMIT + "\n", "")
+            return subprocess.CompletedProcess(command, 0, _rev_parse_output(runner, manifest, cwd) + "\n", "")
         if command[:3] == ["git", "hash-object", "uv.lock"]:
             return subprocess.CompletedProcess(command, 0, "0" * 40 + "\n", "")
         return subprocess.CompletedProcess(command, 0, "fixture/other@v2\n", "")

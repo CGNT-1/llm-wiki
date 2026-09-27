@@ -45,6 +45,28 @@ def _git(cwd: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+def _write_required_file(path: Path, relative: str) -> None:
+    """One required file: the two installers record how they were called."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if relative == "install.sh":
+        path.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n%s\\n%s' \"${BASH_SOURCE[0]}\" \"$LLM_WIKI_ROOT\" \"$PWD\" > \"$CALLER_MARKER\"\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return
+    if relative == "install.ps1":
+        path.write_text(
+            "[System.IO.File]::WriteAllText($env:CALLER_MARKER, "
+            "$PSCommandPath + [Environment]::NewLine + $env:LLM_WIKI_ROOT + "
+            "[Environment]::NewLine + (Get-Location).Path)\n",
+            encoding="utf-8",
+        )
+        return
+    path.write_text(f"fixture {relative}\n", encoding="utf-8")
+
+
 def _bare_repository(tmp_path: Path, *, missing: str | None = None) -> tuple[Path, str]:
     source = tmp_path / "source"
     remote = tmp_path / "remote.git"
@@ -53,24 +75,7 @@ def _bare_repository(tmp_path: Path, *, missing: str | None = None) -> tuple[Pat
     for relative in REQUIRED_FILES:
         if relative == missing:
             continue
-        path = source / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if relative == "install.sh":
-            path.write_text(
-                "#!/usr/bin/env bash\n"
-                "printf '%s\\n%s\\n%s' \"${BASH_SOURCE[0]}\" \"$LLM_WIKI_ROOT\" \"$PWD\" > \"$CALLER_MARKER\"\n",
-                encoding="utf-8",
-            )
-            path.chmod(0o755)
-        elif relative == "install.ps1":
-            path.write_text(
-                "[System.IO.File]::WriteAllText($env:CALLER_MARKER, "
-                "$PSCommandPath + [Environment]::NewLine + $env:LLM_WIKI_ROOT + "
-                "[Environment]::NewLine + (Get-Location).Path)\n",
-                encoding="utf-8",
-            )
-        else:
-            path.write_text(f"fixture {relative}\n", encoding="utf-8")
+        _write_required_file(source / relative, relative)
     _git(source, "add", ".")
     _git(
         source,
@@ -161,6 +166,41 @@ def _powershell_functions(source: Path, names: tuple[str, ...]) -> str:
     )
 
 
+def _bash_stdin_command() -> list[str]:
+    executable = _bash()
+    if executable is None:
+        pytest.skip("supported POSIX Bash unavailable")
+    return [executable, "-s"]
+
+
+def _pwsh_stdin_command() -> list[str]:
+    executable = _pwsh()
+    if executable is None:
+        pytest.skip("PowerShell unavailable")
+    return [executable, "-NoProfile", "-NonInteractive", "-Command", "-"]
+
+
+def _bash_source_from(remote: Path) -> str:
+    return (ROOT / "install.sh").read_text(encoding="utf-8").replace(
+        f'REPOSITORY_URL="{REPOSITORY_URL}"',
+        f"REPOSITORY_URL={shlex_quote(str(remote))}",
+    )
+
+
+def _pwsh_source_from(remote: Path) -> str:
+    return (ROOT / "install.ps1").read_text(encoding="utf-8").replace(
+        f'$repositoryUrl = "{REPOSITORY_URL}"',
+        f"$repositoryUrl = {ps_literal(str(remote))}",
+    )
+
+
+# Per shell: the command that reads an installer on stdin (or skips when the shell
+# is absent), the installer itself, and the installer pointed at another remote.
+_STDIN_COMMANDS = {"bash": _bash_stdin_command, "powershell": _pwsh_stdin_command}
+_INSTALLERS = {"bash": ROOT / "install.sh", "powershell": ROOT / "install.ps1"}
+_REMOTE_SOURCES = {"bash": _bash_source_from, "powershell": _pwsh_source_from}
+
+
 @pytest.mark.parametrize(
     "value",
     [None, "", "main", "v4.0.0", "abc123", "g" * 40, "a" * 39, "a" * 41],
@@ -175,38 +215,47 @@ def test_remote_bootstrap_rejects_non_full_oid(
         environment.pop("LLM_WIKI_COMMIT", None)
     else:
         environment["LLM_WIKI_COMMIT"] = value
-    if shell == "bash":
-        executable = _bash()
-        if executable is None:
-            pytest.skip("supported POSIX Bash unavailable")
-        result = subprocess.run(
-            [executable, "-s"],
-            input=(ROOT / "install.sh").read_text(encoding="utf-8"),
-            cwd=tmp_path,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    else:
-        executable = _pwsh()
-        if executable is None:
-            pytest.skip("PowerShell unavailable")
-        result = subprocess.run(
-            [executable, "-NoProfile", "-NonInteractive", "-Command", "-"],
-            input=(ROOT / "install.ps1").read_text(encoding="utf-8"),
-            cwd=tmp_path,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+    command = _STDIN_COMMANDS[shell]()
+    result = subprocess.run(
+        command,
+        input=_INSTALLERS[shell].read_text(encoding="utf-8"),
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
 
     assert result.returncode != 0
     assert "full 40-hex commit OID" in result.stdout + result.stderr
     assert not (tmp_path / "home" / "LLM-wiki").exists()
+
+
+def _pipe_environment(home: Path, oid: str, marker: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        LLM_WIKI_COMMIT=oid.upper(),
+        CALLER_MARKER=str(marker),
+    )
+    return environment
+
+
+def _assert_the_checkout_ran(values: list[str], checkout: Path, caller: Path) -> None:
+    """The marker names the installer that ran, its checkout, and the caller's directory."""
+    assert Path(values[0]).resolve() in {
+        (checkout / "install.sh").resolve(),
+        (checkout / "install.ps1").resolve(),
+    }
+    assert Path(values[1]).resolve() == checkout.resolve()
+    assert Path(values[2]).resolve() == caller.resolve()
+
+
+def _assert_the_exact_head(checkout: Path, oid: str, remote: Path) -> None:
+    assert _git(checkout, "rev-parse", "HEAD") == oid
+    assert _git(checkout, "remote", "get-url", "origin") == str(remote)
 
 
 @pytest.mark.parametrize("shell", ["bash", "powershell"])
@@ -220,61 +269,23 @@ def test_pipe_mode_ignores_caller_checkout_and_verifies_exact_head(
     home = tmp_path / "home"
     home.mkdir()
     marker = tmp_path / f"{shell}.marker"
-    environment = os.environ.copy()
-    environment.update(
-        HOME=str(home),
-        USERPROFILE=str(home),
-        LLM_WIKI_COMMIT=oid.upper(),
-        CALLER_MARKER=str(marker),
+    environment = _pipe_environment(home, oid, marker)
+    command = _STDIN_COMMANDS[shell]()
+    result = subprocess.run(
+        command,
+        input=_REMOTE_SOURCES[shell](remote),
+        cwd=caller,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
-    if shell == "bash":
-        executable = _bash()
-        if executable is None:
-            pytest.skip("supported POSIX Bash unavailable")
-        source = (ROOT / "install.sh").read_text(encoding="utf-8").replace(
-            f'REPOSITORY_URL="{REPOSITORY_URL}"',
-            f"REPOSITORY_URL={shlex_quote(str(remote))}",
-        )
-        result = subprocess.run(
-            [executable, "-s"],
-            input=source,
-            cwd=caller,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    else:
-        executable = _pwsh()
-        if executable is None:
-            pytest.skip("PowerShell unavailable")
-        source = (ROOT / "install.ps1").read_text(encoding="utf-8").replace(
-            f'$repositoryUrl = "{REPOSITORY_URL}"',
-            f"$repositoryUrl = {ps_literal(str(remote))}",
-        )
-        result = subprocess.run(
-            [executable, "-NoProfile", "-NonInteractive", "-Command", "-"],
-            input=source,
-            cwd=caller,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    values = marker.read_text(encoding="utf-8").splitlines()
     checkout = home / "LLM-wiki"
-    assert Path(values[0]).resolve() in {
-        (checkout / "install.sh").resolve(),
-        (checkout / "install.ps1").resolve(),
-    }
-    assert Path(values[1]).resolve() == checkout.resolve()
-    assert Path(values[2]).resolve() == caller.resolve()
-    assert _git(checkout, "rev-parse", "HEAD") == oid
-    assert _git(checkout, "remote", "get-url", "origin") == str(remote)
+    _assert_the_checkout_ran(marker.read_text(encoding="utf-8").splitlines(), checkout, caller)
+    _assert_the_exact_head(checkout, oid, remote)
 
 
 def shlex_quote(value: str) -> str:
@@ -295,31 +306,11 @@ def test_remote_bootstrap_rejects_missing_required_file(
     environment.update(
         HOME=str(home), USERPROFILE=str(home), LLM_WIKI_COMMIT=oid
     )
-    if shell == "bash":
-        executable = _bash()
-        if executable is None:
-            pytest.skip("supported POSIX Bash unavailable")
-        source = (ROOT / "install.sh").read_text(encoding="utf-8").replace(
-            f'REPOSITORY_URL="{REPOSITORY_URL}"',
-            f"REPOSITORY_URL={shlex_quote(str(remote))}",
-        )
-        result = subprocess.run(
-            [executable, "-s"], input=source, cwd=tmp_path, env=environment,
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-    else:
-        executable = _pwsh()
-        if executable is None:
-            pytest.skip("PowerShell unavailable")
-        source = (ROOT / "install.ps1").read_text(encoding="utf-8").replace(
-            f'$repositoryUrl = "{REPOSITORY_URL}"',
-            f"$repositoryUrl = {ps_literal(str(remote))}",
-        )
-        result = subprocess.run(
-            [executable, "-NoProfile", "-NonInteractive", "-Command", "-"],
-            input=source, cwd=tmp_path, env=environment, capture_output=True,
-            text=True, timeout=30, check=False,
-        )
+    command = _STDIN_COMMANDS[shell]()
+    result = subprocess.run(
+        command, input=_REMOTE_SOURCES[shell](remote), cwd=tmp_path, env=environment,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
 
     assert result.returncode != 0
     assert "missing scripts/installer_config.py" in result.stdout + result.stderr
@@ -368,49 +359,57 @@ def test_authorized_checkout_disables_every_remote_push_url(
         ).splitlines() == ["no-push"]
 
 
+def _bash_push_helper(repository: Path, *, created: bool, explicit: bool):
+    executable = _bash()
+    if executable is None:
+        pytest.skip("supported POSIX Bash unavailable")
+    source = (ROOT / "install.sh").read_text(encoding="utf-8")
+    functions = "\n".join(
+        _shell_function(source, name)
+        for name in ("clear_push_urls", "protect_remote_push_url", "protect_push_urls", "protect_push_urls_if_authorized")
+    )
+    runner = repository.parent / "push-helper.sh"
+    runner.write_text(
+        "set -euo pipefail\n"
+        "fail() { printf '%s' \"$1\" >&2; return 1; }\n"
+        + functions
+        + f"\nVAULT_ROOT={shlex_quote(str(repository))}\n"
+        + f"INSTALLER_CREATED_CLONE={1 if created else 0}\n"
+        + f"PROTECT_PUSH={1 if explicit else 0}\n"
+        + "protect_push_urls_if_authorized\n",
+        encoding="utf-8",
+    )
+    return _run([executable, str(runner)], cwd=repository)
+
+
+def _pwsh_push_helper(repository: Path, *, created: bool, explicit: bool):
+    executable = _pwsh()
+    if executable is None:
+        pytest.skip("PowerShell unavailable")
+    command = _powershell_functions(
+        ROOT / "install.ps1",
+        ("Invoke-NativeCommand", "Protect-PushUrls", "Protect-PushUrlsIfAuthorized"),
+    ) + textwrap.dedent(
+        f"""
+        Protect-PushUrlsIfAuthorized `
+            -VaultRoot {ps_literal(str(repository))} `
+            -InstallerCreatedClone ${str(created).lower()} `
+            -ProtectPush ${str(explicit).lower()}
+        """
+    )
+    return _run(
+        [executable, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=repository,
+    )
+
+
+_PUSH_HELPERS = {"bash": _bash_push_helper, "powershell": _pwsh_push_helper}
+
+
 def _invoke_push_helper(
     repository: Path, shell: str, *, created: bool, explicit: bool
 ) -> None:
-    if shell == "bash":
-        executable = _bash()
-        if executable is None:
-            pytest.skip("supported POSIX Bash unavailable")
-        source = (ROOT / "install.sh").read_text(encoding="utf-8")
-        functions = "\n".join(
-            _shell_function(source, name)
-            for name in ("clear_push_urls", "protect_remote_push_url", "protect_push_urls", "protect_push_urls_if_authorized")
-        )
-        runner = repository.parent / "push-helper.sh"
-        runner.write_text(
-            "set -euo pipefail\n"
-            "fail() { printf '%s' \"$1\" >&2; return 1; }\n"
-            + functions
-            + f"\nVAULT_ROOT={shlex_quote(str(repository))}\n"
-            + f"INSTALLER_CREATED_CLONE={1 if created else 0}\n"
-            + f"PROTECT_PUSH={1 if explicit else 0}\n"
-            + "protect_push_urls_if_authorized\n",
-            encoding="utf-8",
-        )
-        result = _run([executable, str(runner)], cwd=repository)
-    else:
-        executable = _pwsh()
-        if executable is None:
-            pytest.skip("PowerShell unavailable")
-        command = _powershell_functions(
-            ROOT / "install.ps1",
-            ("Invoke-NativeCommand", "Protect-PushUrls", "Protect-PushUrlsIfAuthorized"),
-        ) + textwrap.dedent(
-            f"""
-            Protect-PushUrlsIfAuthorized `
-                -VaultRoot {ps_literal(str(repository))} `
-                -InstallerCreatedClone ${str(created).lower()} `
-                -ProtectPush ${str(explicit).lower()}
-            """
-        )
-        result = _run(
-            [executable, "-NoProfile", "-NonInteractive", "-Command", command],
-            cwd=repository,
-        )
+    result = _PUSH_HELPERS[shell](repository, created=created, explicit=explicit)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

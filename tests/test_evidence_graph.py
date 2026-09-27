@@ -512,19 +512,36 @@ def test_logical_nodes_are_separate_from_occurrences_and_metadata_is_canonical(t
     graph.close()
 
 
+def _break_source_hash(records: dict) -> None:
+    records["sources"][0]["sha256"] = "0" * 64
+
+
+def _break_range(records: dict) -> None:
+    records["evidence"][0]["byte_end"] = len(records["source_bytes"]["src-code"]) + 1
+
+
+def _break_span_hash(records: dict) -> None:
+    records["evidence"][0]["span_sha256"] = "0" * 64
+
+
+def _add_unknown_field(records: dict) -> None:
+    records["nodes"][0]["unknown"] = True
+
+
+# Each damage the creation must refuse; any other name adds an unknown field.
+_RECORD_DAMAGES = {
+    "source_hash": _break_source_hash,
+    "range": _break_range,
+    "span_hash": _break_span_hash,
+}
+
+
 @pytest.mark.parametrize("damage", ["source_hash", "range", "span_hash", "unknown_field"])
 def test_create_fails_closed_on_invalid_sources_evidence_and_records(tmp_path, damage):
     import evidence_graph
 
     records = _records()
-    if damage == "source_hash":
-        records["sources"][0]["sha256"] = "0" * 64
-    elif damage == "range":
-        records["evidence"][0]["byte_end"] = len(records["source_bytes"]["src-code"]) + 1
-    elif damage == "span_hash":
-        records["evidence"][0]["span_sha256"] = "0" * 64
-    else:
-        records["nodes"][0]["unknown"] = True
+    _RECORD_DAMAGES.get(damage, _add_unknown_field)(records)
 
     with pytest.raises((TypeError, ValueError), match="hash|range|unknown|closed"):
         evidence_graph.create_generation_database(tmp_path / "evidence.sqlite3", **records)

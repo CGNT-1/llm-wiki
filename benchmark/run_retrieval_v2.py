@@ -359,10 +359,14 @@ def _require_candidate_contract(candidate: dict, kind: str, contract: dict) -> N
         raise ValueError(f"matrix {kind} batch size mismatch")
 
 
+def _require_shippable(candidate: dict, kind: str) -> None:
+    if candidate["license"] not in {"Apache-2.0", "MIT"} or candidate["exclusion_reasons"]:
+        raise ValueError(f"matrix {kind} shipping policy is inconsistent")
+
+
 def _require_shipping_policy(candidate: dict, kind: str) -> None:
     if candidate["shipping_eligible"]:
-        if candidate["license"] not in {"Apache-2.0", "MIT"} or candidate["exclusion_reasons"]:
-            raise ValueError(f"matrix {kind} shipping policy is inconsistent")
+        _require_shippable(candidate, kind)
         return
     if not candidate["exclusion_reasons"]:
         raise ValueError(f"matrix {kind} exclusion lacks a reason")
@@ -838,11 +842,15 @@ def _require_gold_contract(query: dict) -> None:
         raise ValueError(f"invalid answerable gold contract: {query['query_id']}")
 
 
+def _require_current_scope(query: dict, scope: dict) -> None:
+    if scope["as_of"] is not None:
+        raise ValueError(f"current query has as_of: {query['query_id']}")
+
+
 def _require_temporal_scope(query: dict) -> None:
     scope = query["temporal_scope"]
     if scope["mode"] == "current":
-        if scope["as_of"] is not None:
-            raise ValueError(f"current query has as_of: {query['query_id']}")
+        _require_current_scope(query, scope)
         return
     if scope["as_of"] is None:
         raise ValueError(f"historical query lacks as_of: {query['query_id']}")
@@ -1510,6 +1518,14 @@ def _next_segment(iterator) -> object:
 
 
 
+def _trigram_match_query(query_text: str) -> str | None:
+    """A trigram index matches only three or more characters, quoted as one phrase."""
+    normalized = unicodedata.normalize("NFKC", query_text).casefold()
+    if len(normalized) < 3:
+        return None
+    return f'"{normalized.replace(chr(34), chr(34) * 2)}"'
+
+
 class SQLiteLexicalAdapter:
     kind = "sqlite-fts5-bm25"
 
@@ -1688,10 +1704,7 @@ class SQLiteLexicalAdapter:
 
     def _fts_match_query(self, index_name: str, query_text: str) -> str | None:
         if index_name == "chinese_trigram":
-            normalized = unicodedata.normalize("NFKC", query_text).casefold()
-            if len(normalized) < 3:
-                return None
-            return f'"{normalized.replace(chr(34), chr(34) * 2)}"'
+            return _trigram_match_query(query_text)
         terms = self._query_terms(index_name, query_text)
         if not terms:
             return None

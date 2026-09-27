@@ -2,7 +2,7 @@
 
 The rule counts every `if` in one function, nested ones included; a nested
 function is its own function. Audit 2026-09-27 found 93 functions over it in
-`scripts/`; all but two were split, and this guard holds every module to the
+`scripts/` (and 36 in `tests/` and `benchmark/`); all but two were split, and this guard holds every module to the
 rule. See `docs/research/2026-09-27-a-function-holds-two-ifs.md` and
 `docs/research/2026-09-27-every-function-holds-two-ifs.md`.
 """
@@ -50,6 +50,12 @@ def test_the_counter_sees_nested_ifs_and_skips_nested_functions() -> None:
     assert _ifs(function) == 3
 
 
-def test_no_function_in_scripts_holds_more_than_two_ifs() -> None:
-    offenders = set().union(*(_over_the_rule(path) for path in sorted((ROOT / "scripts").rglob("*.py"))))
+def _code_files() -> list[Path]:
+    """The project's Python; `tests/fixtures/` holds inputs, some deliberately unparseable."""
+    files = [path for folder in ("scripts", "tests", "benchmark") for path in (ROOT / folder).rglob("*.py")]
+    return sorted(path for path in files if "fixtures" not in path.relative_to(ROOT).parts)
+
+
+def test_no_function_holds_more_than_two_ifs() -> None:
+    offenders = set().union(*(_over_the_rule(path) for path in _code_files()))
     assert offenders == BLOCKED_BY_THE_BACKUP_NAME_GATE

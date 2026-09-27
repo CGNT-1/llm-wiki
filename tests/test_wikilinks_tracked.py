@@ -11,6 +11,11 @@ from pathlib import Path
 import lint_memory
 
 
+def _is_compiled_page_path(line: str) -> bool:
+    """A tracked Markdown page outside `daily/`."""
+    return line.endswith(".md") and "/daily/" not in line.replace("\\", "/")
+
+
 def _tracked_knowledge_pages() -> list[Path]:
     raw = subprocess.check_output(
         ["git", "ls-files", "knowledge"],
@@ -19,9 +24,7 @@ def _tracked_knowledge_pages() -> list[Path]:
     )
     pages: list[Path] = []
     for line in raw.splitlines():
-        if not line.endswith(".md"):
-            continue
-        if "/daily/" in line.replace("\\", "/"):
+        if not _is_compiled_page_path(line):
             continue
         p = lint_memory.ROOT / line
         if p.is_file():
