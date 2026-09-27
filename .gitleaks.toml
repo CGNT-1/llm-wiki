@@ -59,11 +59,3 @@ targetRules = ["generic-api-key"]
 regexTarget = "match"
 paths = ['''^tests/test_the_redactor_knows_the_missing_shapes\.py$''']
 regexes = ['''ya29\.a0AfH6SMBxQwErTy12345''']
-
-[[allowlists]]
-description = "Slack's documented placeholder webhook URL quoted in the redactor research note"
-condition = "AND"
-targetRules = ["slack-webhook-url"]
-regexTarget = "match"
-paths = ['''^docs/research/2026-09-27-the-redactor-knows-the-missing-shapes\.md$''']
-regexes = ['''hooks\.slack\.com/services/T00000000/B00000000/X{24}''']
