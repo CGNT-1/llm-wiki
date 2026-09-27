@@ -675,6 +675,7 @@
   "test_the_health_line_names_what_needs_attention.py": 0.01,
   "test_the_http_guard_refuses_what_it_cannot_judge.py": 0.02,
   "test_the_index_is_regenerated_not_edited.py": 0.0,
+  "test_the_install_checks_itself_last.py": 0.03,
   "test_the_installed_choice_of_provider_travels_whole.py": 0.01,
   "test_the_installer_does_not_vouch_for_agents_it_cannot_see.py": 0.9,
   "test_the_installer_says_what_it_needs.py": 5.32,

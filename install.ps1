@@ -694,7 +694,21 @@ if ($adoptionPlan -eq "adopted") {
     Warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
 }
 
-# --- 8a. Bounded runtime sync -------------------------------------
+# --- 8a. Pinned model weights ------------------------------------
+# The read path loads weights local-only. Every pinned model whose runtime is
+# installed is fetched now, verified; the script's own lines say which.
+# This comes before the runtime sync: the sync builds the first generation, whose
+# vectors need these weights, and ends with the doctor check that decides whether
+# the install ends with warnings. See
+# docs/research/2026-09-27-the-install-checks-itself-last.md.
+uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
+switch ($LASTEXITCODE) {
+    0 { Ok "Model weights step done" }
+    2 { Info "huggingface_hub is not installed; model weights are fetched once it is" }
+    default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
+}
+
+# --- 8b. Bounded runtime sync -------------------------------------
 
 Info "Synchronizing runtime state and derived indexes..."
 # The first generation is built here (the generation is the only index since
@@ -707,16 +721,6 @@ switch ($syncExit) {
     default { Fail "Runtime synchronization failed" }
 }
 
-# --- 8b. Pinned model weights ------------------------------------
-# The read path loads weights local-only. Every pinned model whose runtime is
-# installed is fetched now, verified; the script's own lines say which.
-uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
-switch ($LASTEXITCODE) {
-    0 { Ok "Model weights step done" }
-    2 { Info "huggingface_hub is not installed; model weights are fetched once it is" }
-    default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
-}
-
 # --- 9. Summary ---------------------------------------------------
 
 Write-Host ""
@@ -724,8 +728,8 @@ Write-Host "==============================================" -ForegroundColor Gre
 if ($syncWarning -or $schedulerWarning) {
     Write-Host "  LLM-Wiki installed with warnings" -ForegroundColor Yellow
     if ($syncWarning) {
-        Write-Host "  The runtime synchronization named the checks that needed attention (the doctor line above);"
-        Write-Host "  some are settled by the later steps. For the state now: uv run --locked --no-sync python scripts/doctor.py"
+        Write-Host "  The runtime synchronization ran after every other step and named the checks that need"
+        Write-Host "  attention (the doctor line above). For the state now: uv run --locked --no-sync python scripts/doctor.py"
     }
 } else {
     Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green

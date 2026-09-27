@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- Both installers fetch the pinned model weights before the runtime sync, so its final doctor check runs after every step that changes what it checks and the first generation is built with the weights present (audit 2026-09-27, installer order).
 - A redriven capture reuses the semantic decision its dead ancestor already indexed, and a block that ancestor committed is recognised as its own, instead of failing its one second chance with semantic_decision_conflict; a decision sealed outside the redrive chain is still refused (audit 2026-09-27 B-14).
 - A quarantined transaction the rows show resolved (its retry committed, or a commit created its files) gives up its before/after images and keeps its row; the rule is one module shared by the prune, doctor and the refused-append repair (audit 2026-09-27 B-2).
 - A backup copies what the session hooks write (run/state.json, run/capture-intents/) as a snapshot at read time instead of refusing while any agent runs, and leaves their lock file out; every other file still must not change during the copy (audit 2026-09-27 B-16, owner approved).

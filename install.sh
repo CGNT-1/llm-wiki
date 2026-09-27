@@ -775,7 +775,24 @@ case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
     ;;
 esac
 
-# ─── 8a. Bounded runtime sync ──────────────────────────────────────
+# ─── 8a. Pinned model weights ──────────────────────────────────────
+# The read path loads weights local-only. Every pinned model whose runtime is
+# installed is fetched now, verified; with none installed, nothing is expected,
+# and the script's own lines say which it was.
+# This comes before the runtime sync: the sync builds the first generation, whose
+# vectors need these weights, and ends with the doctor check that decides whether
+# the install ends with warnings. Fetched after it, the weights left the first
+# generation without vectors and every fresh install warning about weights it was
+# about to fetch. See docs/research/2026-09-27-the-install-checks-itself-last.md.
+MODELS_EXIT=0
+uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
+case "$MODELS_EXIT" in
+  0) ok "Model weights step done" ;;
+  2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
+  *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
+esac
+
+# ─── 8b. Bounded runtime sync ──────────────────────────────────────
 
 info "Synchronizing runtime state and derived indexes..."
 SYNC_EXIT=0
@@ -787,18 +804,6 @@ case "$SYNC_EXIT" in
   0) ok "Runtime state synchronized" ;;
   1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;
   *) fail "Runtime synchronization failed" ;;
-esac
-
-# ─── 8b. Pinned model weights ──────────────────────────────────────
-# The read path loads weights local-only. Every pinned model whose runtime is
-# installed is fetched now, verified; with none installed, nothing is expected,
-# and the script's own lines say which it was.
-MODELS_EXIT=0
-uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
-case "$MODELS_EXIT" in
-  0) ok "Model weights step done" ;;
-  2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
-  *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
 
 # ─── 9. Optional: semantic + hybrid search ─────────────────────────
@@ -814,8 +819,8 @@ echo ""
 echo "=============================================="
 if [ "$SYNC_WARNING" -eq 1 ]; then
   echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
-  echo "  The runtime synchronization named the checks that needed attention (the doctor line above);"
-  echo "  some are settled by the later steps. For the state now: uv run --locked --no-sync python scripts/doctor.py"
+  echo "  The runtime synchronization ran after every other step and named the checks that need"
+  echo "  attention (the doctor line above). For the state now: uv run --locked --no-sync python scripts/doctor.py"
 else
   echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
 fi
