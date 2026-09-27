@@ -397,12 +397,17 @@ def _profile_output(
     separator: str,
 ) -> bytes:
     if current is not None:
-        if updated is None:
-            return _remove_profile_block(content, separator)
-        return _replace_profile_block(content, updated)
+        return _rewritten_profile_block(content, updated, separator)
     if updated is None:
         return content
     return content + _profile_separator(content) + updated + b"\n"
+
+
+def _rewritten_profile_block(content: bytes, updated: bytes | None, separator: str) -> bytes:
+    """The profile with its existing managed block replaced, or removed when `updated` is None."""
+    if updated is None:
+        return _remove_profile_block(content, separator)
+    return _replace_profile_block(content, updated)
 
 
 def _restore_absent_profile(profile: Path, output: bytes, existed: bool) -> bool:
@@ -500,12 +505,16 @@ def _linux_scheduler_backend(platform: str, systemd_available: bool) -> str:
 
 def select_scheduler_backend(platform: str, requested: str, systemd_available: bool) -> str:
     if requested == "cron":
-        if platform == "win32":
-            raise ValueError("cron fallback is unavailable on Windows")
-        return "cron"
+        return _cron_scheduler_backend(platform)
     if requested != "native":
         raise ValueError("scheduler selection must be native or cron")
     return _native_scheduler_backend(platform, systemd_available)
+
+
+def _cron_scheduler_backend(platform: str) -> str:
+    if platform == "win32":
+        raise ValueError("cron fallback is unavailable on Windows")
+    return "cron"
 
 
 def _stable_uv_path(uv_path: Path) -> Path:
@@ -1528,12 +1537,17 @@ def _cron_output(
 ) -> bytes:
     content = table or b""
     if current is not None:
-        if updated is None:
-            return _remove_cron_block(content, separator)
-        return _replace_cron_block(content, updated)
+        return _rewritten_cron_block(content, updated, separator)
     if updated is None:
         return content
     return _append_cron_block(content, updated)
+
+
+def _rewritten_cron_block(content: bytes, updated: bytes | None, separator: str) -> bytes:
+    """The table with its existing managed block replaced, or removed when `updated` is None."""
+    if updated is None:
+        return _remove_cron_block(content, separator)
+    return _replace_cron_block(content, updated)
 
 
 def _write_crontab(
@@ -2509,6 +2523,26 @@ def _resume_install(
     )
 
 
+def _accept_recorded_manifest(
+    *,
+    transaction_path: Path,
+    transaction: dict[str, object] | None,
+    manifest: dict[str, object],
+    request_sha256: str,
+    resources: Sequence[ManagedResource],
+) -> dict[str, object]:
+    """An installed manifest is accepted only together with the transaction that wrote it."""
+    if transaction is None:
+        raise InstallControlError("install_manifest_without_transaction")
+    return _accept_active_manifest(
+        transaction_path=transaction_path,
+        transaction=transaction,
+        manifest=manifest,
+        request_sha256=request_sha256,
+        resources=resources,
+    )
+
+
 def _install_under_lock(
     *,
     install_root: Path,
@@ -2524,9 +2558,7 @@ def _install_under_lock(
     transaction = _optional_record(transaction_path, _TRANSACTION_SCHEMA)
     request_sha256 = _request_digest(vault_root, release, scheduler_backend, resources)
     if manifest is not None:
-        if transaction is None:
-            raise InstallControlError("install_manifest_without_transaction")
-        return _accept_active_manifest(
+        return _accept_recorded_manifest(
             transaction_path=transaction_path,
             transaction=transaction,
             manifest=manifest,
@@ -3802,6 +3834,11 @@ def _uninstall_v1_under_lock(
             manifest=manifest,
             resources=resources,
         )
+    return _committed_uninstall_record(transaction)
+
+
+def _committed_uninstall_record(transaction: dict[str, object] | None) -> dict[str, object]:
+    """A finished uninstall answers with its own record; anything else has no manifest."""
     if transaction is not None and transaction.get("operation") == "uninstall":
         if transaction.get("state") == "committed":
             return transaction

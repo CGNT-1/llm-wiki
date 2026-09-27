@@ -209,6 +209,11 @@ def _first_error(
     return None
 
 
+def _flush_owner_directory_windows(handle: int) -> None:
+    if not _windows_workspace.flush_directory(handle):
+        raise OSError("LSP owner directory durability flush failed")
+
+
 def _lease_payload(record: Mapping[str, object]) -> bytes:
     """The lease as compact JSON bytes, within its evidence bound."""
     payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
@@ -793,18 +798,27 @@ class _OwnerDirectory:
             expires_monotonic = _validated_deadline(expires_monotonic)
         payload = _lease_payload(record)
         with self._child_handle_lock:
-            self._retry_pending_temp_names()
-            temporary = f".lease-{secrets.token_hex(8)}.tmp"
-            if os.name == "posix":
-                self._write_lease_posix(temporary, payload, expires_monotonic)
-                return
-            self._write_lease_windows(
-                temporary,
-                payload,
-                expires_monotonic,
-                retry_deadline,
-                retry_stop,
-            )
+            self._write_lease_locked(payload, expires_monotonic, retry_deadline, retry_stop)
+
+    def _write_lease_locked(
+        self,
+        payload: bytes,
+        expires_monotonic: float | None,
+        retry_deadline: float,
+        retry_stop: threading.Event | None,
+    ) -> None:
+        self._retry_pending_temp_names()
+        temporary = f".lease-{secrets.token_hex(8)}.tmp"
+        if os.name == "posix":
+            self._write_lease_posix(temporary, payload, expires_monotonic)
+            return
+        self._write_lease_windows(
+            temporary,
+            payload,
+            expires_monotonic,
+            retry_deadline,
+            retry_stop,
+        )
 
     def sync_directory(self) -> None:
         handle = self.owner_handle
@@ -818,8 +832,7 @@ class _OwnerDirectory:
             os.fsync(handle)
             return
         if os.name == "nt":
-            if not _windows_workspace.flush_directory(handle):
-                raise OSError("LSP owner directory durability flush failed")
+            _flush_owner_directory_windows(handle)
             return
         raise RuntimeError("LSP owner directories are unsupported on this platform")
 
@@ -841,8 +854,7 @@ class _OwnerDirectory:
 
     def remove_lease(self) -> None:
         if self.owner_handle is None:
-            if self._pending_temp_names:
-                raise RuntimeError("LSP pending temporary owner is closed")
+            self._require_no_pending_temp_names()
             return
         self._retry_pending_temp_names()
         if os.name == "posix":
@@ -850,6 +862,10 @@ class _OwnerDirectory:
         else:
             self._remove_lease_windows()
         self._lease_expires_monotonic = None
+
+    def _require_no_pending_temp_names(self) -> None:
+        if self._pending_temp_names:
+            raise RuntimeError("LSP pending temporary owner is closed")
 
     def _read_record_posix(self, name: str) -> bytes:
         descriptor = os.open(
@@ -1630,10 +1646,13 @@ class LspProcess:
             return coordinator.active
         if coordinator.candidate is not None:
             return coordinator.candidate
-        for generation in coordinator.retired:
-            if generation.nonce == self.generation_nonce:
-                return generation
-        return None
+        return self._retired_generation(coordinator)
+
+    def _retired_generation(self, coordinator: _LifecycleCoordinator) -> _Generation | None:
+        return next(
+            (generation for generation in coordinator.retired if generation.nonce == self.generation_nonce),
+            None,
+        )
 
     @property
     def _tree(self) -> ProcessTree | None:
@@ -3505,6 +3524,19 @@ def _intent_exhausted(
     )
 
 
+def _terminal_intent_decision_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    intent: _FailureIntent,
+) -> _IntentDecision:
+    """An exhausted intent: select the terminal failure, and stop when it is ours."""
+    code = "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED
+    terminal = _select_terminal_failure_locked(instance, coordinator, code)
+    if terminal:
+        coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+    return _IntentDecision(terminal, False)
+
+
 def _decide_failure_intent_locked(
     instance: LspProcess,
     coordinator: _LifecycleCoordinator,
@@ -3512,11 +3544,7 @@ def _decide_failure_intent_locked(
 ) -> _IntentDecision:
     """Whether this failure ends the lifecycle or asks for one restart."""
     if _intent_exhausted(instance, coordinator, intent):
-        code = "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED
-        terminal = _select_terminal_failure_locked(instance, coordinator, code)
-        if terminal:
-            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-        return _IntentDecision(terminal, False)
+        return _terminal_intent_decision_locked(instance, coordinator, intent)
     coordinator.recovery_attempted = True
     coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
     instance.state = ProcessState.DEGRADED
@@ -3618,6 +3646,16 @@ def _process_failure_intent_owned(
     decision = _settle_failure_intent(instance, coordinator, intent, key)
     if decision is None:
         return None, False
+    return _failure_intent_outcome(instance, coordinator, decision, deadline)
+
+
+def _failure_intent_outcome(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    decision: _IntentDecision,
+    deadline: float,
+) -> tuple[str | None, bool]:
+    """A terminal decision's cleanup code, or whether the settled intent restarts."""
     if decision.terminal:
         code = _terminal_cleanup_code(instance, coordinator, deadline)
         if code is not None:
@@ -3817,12 +3855,7 @@ def _promote_lsp_process_workspace_ready(
     deadline: float,
 ) -> bool:
     deadline = _validated_deadline(deadline)
-    if not isinstance(generation_nonce, str):
-        raise TypeError("generation_nonce must be a string")
-    if re.fullmatch(r"[0-9a-f]{32}", generation_nonce) is None:
-        raise ValueError(
-            "generation_nonce must be 32 lowercase hexadecimal characters"
-        )
+    _require_generation_nonce(generation_nonce)
 
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
@@ -5037,20 +5070,30 @@ def _failure_evidence_owner_locked(
     return owner
 
 
+def _settled_failure_identity_locked(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    terminal_code: str,
+) -> _FailureEvidenceIdentity:
+    identity = coordinator.failure_evidence_identity
+    if identity is not None:
+        return identity
+    identity = _failure_identity(instance, coordinator, terminal_code)
+    if identity is None:
+        raise RuntimeError(
+            "LSP failure evidence generation identity is unavailable"
+        )
+    coordinator.failure_evidence_identity = identity
+    return identity
+
+
 def _failure_evidence_identity_locked(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
     terminal_code: str,
 ) -> _FailureEvidenceIdentity:
     """The identity this evidence is written under, settled once and kept."""
-    identity = coordinator.failure_evidence_identity
-    if identity is None:
-        identity = _failure_identity(instance, coordinator, terminal_code)
-        if identity is None:
-            raise RuntimeError(
-                "LSP failure evidence generation identity is unavailable"
-            )
-        coordinator.failure_evidence_identity = identity
+    identity = _settled_failure_identity_locked(instance, coordinator, terminal_code)
     if identity.code != terminal_code:
         raise RuntimeError(
             "LSP failure evidence identity is not terminal-code exact"
@@ -5954,12 +5997,16 @@ def _stop_stderr_drain(generation: _Generation, deadline: float) -> bool:
     thread = generation.stderr_thread
     wake = generation.stderr_wake
     if thread is None or _thread_never_started(thread):
-        if wake is not None:
-            wake.abandon()
+        _abandon_stderr_wake(wake)
         return True
     if wake is not None:
         wake.request()
     return _join_owned_thread(thread, deadline)
+
+
+def _abandon_stderr_wake(wake: _StderrWake | None) -> None:
+    if wake is not None:
+        wake.abandon()
 
 
 def _close_generation_pipes(

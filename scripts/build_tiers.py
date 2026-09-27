@@ -99,19 +99,21 @@ def get_l1(
     contract.
     """
     if source_sha256:
-        hashed_path = tier_legacy_cache_path(
-            slug,
-            source_sha256=source_sha256,
-            extractor_version=extractor_version,
-            logical_path=logical_path,
+        return _read_tier_file(
+            tier_legacy_cache_path(
+                slug,
+                source_sha256=source_sha256,
+                extractor_version=extractor_version,
+                logical_path=logical_path,
+            )
         )
-        if hashed_path.exists():
-            return hashed_path.read_text(encoding="utf-8", errors="ignore")
+    return _read_tier_file(tier_legacy_cache_path(slug))
+
+
+def _read_tier_file(path: Path) -> str | None:
+    if not path.exists():
         return None
-    legacy_path = tier_legacy_cache_path(slug)
-    if not legacy_path.exists():
-        return None
-    return legacy_path.read_text(encoding="utf-8", errors="ignore")
+    return path.read_text(encoding="utf-8", errors="ignore")
 
 
 def _bounded_text(value: object) -> bool:
@@ -160,6 +162,17 @@ def _bounded_provenance(model_descriptor: object, model_revision: str) -> dict[s
     return provenance
 
 
+def _require_generation_mode(generation_mode: str) -> None:
+    if generation_mode not in {"deterministic", "llm"}:
+        raise ValueError("generation_mode must be 'deterministic' or 'llm'")
+
+
+def _unhashed_tier_path(safe_slug: str, generation_mode: str) -> Path:
+    if generation_mode == "llm":
+        raise ValueError("LLM cache identity requires source_sha256")
+    return TIERS_DIR / f"{safe_slug}.l1.md"
+
+
 def tier_legacy_cache_path(
     slug: str,
     *,
@@ -177,15 +190,12 @@ def tier_legacy_cache_path(
     content or extractor changes.
     """
     safe_slug = _safe_cache_slug(slug)
-    if generation_mode not in {"deterministic", "llm"}:
-        raise ValueError("generation_mode must be 'deterministic' or 'llm'")
+    _require_generation_mode(generation_mode)
     model = _model_provenance(
         generation_mode == "llm", model_descriptor, model_revision
     )
     if not source_sha256:
-        if generation_mode == "llm":
-            raise ValueError("LLM cache identity requires source_sha256")
-        return TIERS_DIR / f"{safe_slug}.l1.md"
+        return _unhashed_tier_path(safe_slug, generation_mode)
     logical = _safe_logical_path(logical_path or f"{slug}.md")
     identity = json.dumps(
         [logical, source_sha256, extractor_version, generation_mode, model],

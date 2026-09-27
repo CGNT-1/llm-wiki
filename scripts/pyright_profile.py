@@ -976,18 +976,22 @@ def _lockfile_entry(value: dict) -> dict | str:
 
 
 def _entry_field_codes(entry: dict) -> set[str]:
-    codes: set[str] = set()
-    version = entry.get("version")
-    integrity = entry.get("integrity")
-    if not isinstance(version, str):
-        codes.add("pyright_lockfile_malformed")
-    elif version != PYRIGHT_VERSION:
-        codes.add("pyright_version_mismatch")
-    if not isinstance(integrity, str):
-        codes.add("pyright_lockfile_malformed")
-    elif integrity != PYRIGHT_PACKAGE_INTEGRITY:
-        codes.add("pyright_integrity_mismatch")
-    return codes
+    codes = {
+        _entry_field_code(entry.get("version"), PYRIGHT_VERSION, "pyright_version_mismatch"),
+        _entry_field_code(
+            entry.get("integrity"), PYRIGHT_PACKAGE_INTEGRITY, "pyright_integrity_mismatch"
+        ),
+    }
+    return {code for code in codes if code is not None}
+
+
+def _entry_field_code(value: object, expected: str, mismatch_code: str) -> str | None:
+    """One lockfile field: malformed when not text, `mismatch_code` when not the pin."""
+    if not isinstance(value, str):
+        return "pyright_lockfile_malformed"
+    if value != expected:
+        return mismatch_code
+    return None
 
 
 def _lockfile_codes(
@@ -1247,17 +1251,22 @@ def _release_node_probe_tree(tree: object) -> bool:
     return True
 
 
+def _close_spawn_error_job(owned: _lsp_process_tree._ProcessTreeSpawnError) -> bool:
+    """A spawn that failed leaves at most its Windows job handle to close."""
+    job = owned.windows_job
+    if job is None:
+        return True
+    try:
+        _lsp_process_tree._close_windows_handle(job)
+    except _NODE_PROBE_ERRORS:
+        return False
+    owned.windows_job = None
+    return True
+
+
 def _cleanup_node_probe_owner(owned: object, cleanup_deadline: float) -> bool:
     if isinstance(owned, _lsp_process_tree._ProcessTreeSpawnError):
-        job = owned.windows_job
-        if job is None:
-            return True
-        try:
-            _lsp_process_tree._close_windows_handle(job)
-        except _NODE_PROBE_ERRORS:
-            return False
-        owned.windows_job = None
-        return True
+        return _close_spawn_error_job(owned)
     if not _terminate_node_probe_tree(owned, cleanup_deadline):
         return False
     return _release_node_probe_tree(owned)
@@ -1286,11 +1295,15 @@ def _retry_node_probe_cleanups(cleanup_deadline: float | None = None) -> None:
     if not _NODE_PROBE_DRAIN_LOCK.acquire(blocking=False):
         return
     try:
-        if cleanup_deadline is None:
-            cleanup_deadline = time.monotonic() + NODE_PROBE_CLEANUP_SECONDS
-        _drain_pending_cleanups(cleanup_deadline)
+        _drain_pending_cleanups(_node_probe_cleanup_deadline(cleanup_deadline))
     finally:
         _NODE_PROBE_DRAIN_LOCK.release()
+
+
+def _node_probe_cleanup_deadline(cleanup_deadline: float | None) -> float:
+    if cleanup_deadline is None:
+        return time.monotonic() + NODE_PROBE_CLEANUP_SECONDS
+    return cleanup_deadline
 
 
 def _atexit_cleanup_node_probes() -> None:
@@ -1833,12 +1846,17 @@ def _cmd_shim_result(candidate: Path) -> tuple[Path | None, set[str], bool]:
     return server, set(), False
 
 
+def _dot_bin_expected_server(candidate: Path) -> Path | None:
+    """`node_modules/.bin/<name>` links to the package inside the same `node_modules`."""
+    node_modules = candidate.parent.parent
+    if node_modules.name != "node_modules":
+        return None
+    return node_modules / "pyright/langserver.index.js"
+
+
 def _symlink_expected_server(candidate: Path) -> Path | None:
     if candidate.parent.name == ".bin":
-        node_modules = candidate.parent.parent
-        if node_modules.name != "node_modules":
-            return None
-        return node_modules / "pyright/langserver.index.js"
+        return _dot_bin_expected_server(candidate)
     if candidate.parent.name == "bin":
         return candidate.parent.parent / "lib/node_modules/pyright/langserver.index.js"
     return None
@@ -2054,18 +2072,9 @@ def _inspect_candidate(
     executable_sha256: str | None = None
     package_sha256: str | None = None
     if server is not None:
-        version, package_codes = _package_identity(server, deadline)
-        codes.update(package_codes)
-        executable_sha256, digest_code = _server_digest(server, deadline)
-        if digest_code is not None:
-            codes.add(digest_code)
-        if source == "managed":
-            package_sha256, manifest_codes = _managed_manifest(
-                server, executable_sha256, deadline
-            )
-            codes.update(manifest_codes)
-        else:
-            codes.update(_lockfile_codes(source, server, repository, deadline))
+        version, executable_sha256, package_sha256 = _server_identity(
+            repository, source, server, deadline, codes
+        )
 
     node_executable, node_version, node_major, node_codes = _probe_node(deadline)
     codes.update(node_codes)
@@ -2086,6 +2095,28 @@ def _inspect_candidate(
         qualified=qualified,
         degradation_codes=degradation_codes,
     )
+
+
+def _server_identity(
+    repository: RepositoryScope,
+    source: str,
+    server: Path,
+    deadline: float | None,
+    codes: set[str],
+) -> tuple[str | None, str | None, str | None]:
+    """Version, executable digest and package digest of a found server; findings go to `codes`."""
+    version, package_codes = _package_identity(server, deadline)
+    codes.update(package_codes)
+    executable_sha256, digest_code = _server_digest(server, deadline)
+    if digest_code is not None:
+        codes.add(digest_code)
+    package_sha256: str | None = None
+    if source == "managed":
+        package_sha256, manifest_codes = _managed_manifest(server, executable_sha256, deadline)
+        codes.update(manifest_codes)
+    else:
+        codes.update(_lockfile_codes(source, server, repository, deadline))
+    return version, executable_sha256, package_sha256
 
 
 _SOURCE_ATTRIBUTES = (

@@ -4733,13 +4733,73 @@ def _failure_is_terminal(
     return int(row["attempts"]) >= attempt_limit
 
 
+def _delete_ordinary_purge_authorizations(
+    database: sqlite3.Connection, task_ids: Sequence[str], placeholders: str
+) -> None:
+    deleted = database.execute(
+        f"""DELETE FROM task_purge_authorizations
+            WHERE task_id IN ({placeholders})""",  # noqa: S608
+        task_ids,
+    ).rowcount
+    if deleted != len(task_ids):
+        raise QueueOperationError("purge_authorization_failed")
+
+
+def _published_purge_operation(
+    database: sqlite3.Connection, task_id: str
+) -> sqlite3.Row | None:
+    """The purge operation of a task that is gone; None while the task is still here."""
+    task_exists = database.execute(
+        "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+    ).fetchone()
+    operation = database.execute(
+        "SELECT * FROM corrupt_purge_operations WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    if task_exists is not None or operation is None:
+        return None
+    if operation["state"] != "receipt-published":
+        raise QueueOperationError("corrupt_purge_completion_invalid")
+    return operation
+
+
+def _require_semantic_seal_matches(existing: sqlite3.Row, *expected: str) -> None:
+    """An existing seal is idempotent only for the same decision."""
+    if not _semantic_decision_matches(existing, *expected):
+        raise QueueOperationError("semantic_decision_conflict")
+
+
+def _require_exported_results(
+    results_export: Path, result_manifest: list[dict[str, str]]
+) -> None:
+    """Every exported result reads back with the digest its manifest names."""
+    for item in result_manifest:
+        exported = results_export / f"{item['id']}.result"
+        data = _read_stable_owner_file(exported, _MAX_RESULT_BYTES)
+        if sha256_bytes(data) != item["sha256"]:
+            raise QueueOperationError("export_verification_failed")
+
+
+def _require_error_code(failure: QueueFailure) -> None:
+    if not failure.error_code:
+        raise ValueError("error_code must be non-empty")
+
+
+def _require_positive_task_lease(lease_seconds: int) -> None:
+    if lease_seconds <= 0:
+        raise ValueError("lease must be positive")
+
+
+def _require_claim_owner_and_lease(owner: str, lease_seconds: int) -> None:
+    if not owner:
+        raise ValueError("owner must be non-empty")
+    _require_positive_task_lease(lease_seconds)
+
+
 def _check_claim_arguments(
     owner: str, lease_seconds: int, max_attempts: int
 ) -> None:
-    if not owner:
-        raise ValueError("owner must be non-empty")
-    if lease_seconds <= 0:
-        raise ValueError("lease must be positive")
+    _require_claim_owner_and_lease(owner, lease_seconds)
     _validate_retry_policy(
         max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
     )
@@ -5736,10 +5796,7 @@ class MemoryQueue:
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
         max_attempts: int | None = None,
     ) -> QueueLease | None:
-        if not owner:
-            raise ValueError("owner must be non-empty")
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
+        _require_claim_owner_and_lease(owner, lease_seconds)
         attempt_limit, _base, _cap = self._retry_policy(max_attempts, None, None)
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
@@ -5929,8 +5986,7 @@ class MemoryQueue:
         *,
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
     ) -> QueueLease:
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
+        _require_positive_task_lease(lease_seconds)
         now = _as_utc(self._clock())
         expires = now + timedelta(seconds=lease_seconds)
         with self._connect() as connection, begin_immediate(connection):
@@ -6086,8 +6142,7 @@ class MemoryQueue:
         retry_base_seconds: int | None = None,
         retry_cap_seconds: int | None = None,
     ) -> None:
-        if not failure.error_code:
-            raise ValueError("error_code must be non-empty")
+        _require_error_code(failure)
         attempt_limit, retry_base, retry_cap = self._retry_policy(
             max_attempts, retry_base_seconds, retry_cap_seconds
         )
@@ -6845,11 +6900,7 @@ class MemoryQueue:
         )
         if records != records_bytes:
             raise QueueOperationError("export_verification_failed")
-        for item in result_manifest:
-            exported = results_export / f"{item['id']}.result"
-            data = _read_stable_owner_file(exported, _MAX_RESULT_BYTES)
-            if sha256_bytes(data) != item["sha256"]:
-                raise QueueOperationError("export_verification_failed")
+        _require_exported_results(results_export, result_manifest)
         manifest = _read_stable_owner_file(
             staging / "manifest.json", _MAX_EXPORT_METADATA_BYTES
         )
@@ -8652,7 +8703,7 @@ class _QueueV3CandidateReader:
             (intent_id, stage, task_id),
         ).fetchone()
         if existing is not None:
-            if not _semantic_decision_matches(
+            _require_semantic_seal_matches(
                 existing,
                 intent_id,
                 stage,
@@ -8660,8 +8711,7 @@ class _QueueV3CandidateReader:
                 decision_path,
                 decision_sha256,
                 active_link_digest,
-            ):
-                raise QueueOperationError("semantic_decision_conflict")
+            )
             return
         inserted = database.execute(
             """INSERT INTO capture_task_link_seals(
@@ -11012,17 +11062,9 @@ class _QueueV3CandidateReader:
     ) -> tuple[sqlite3.Row, sqlite3.Row, int] | None:
         """The purge rows for a task that is gone, or None while it is still here."""
         with closing(self._connect()) as database:
-            task_exists = database.execute(
-                "SELECT 1 FROM tasks WHERE id=?", (task_id,)
-            ).fetchone()
-            operation = database.execute(
-                "SELECT * FROM corrupt_purge_operations WHERE task_id=?",
-                (task_id,),
-            ).fetchone()
-            if task_exists is not None or operation is None:
+            operation = _published_purge_operation(database, task_id)
+            if operation is None:
                 return None
-            if operation["state"] != "receipt-published":
-                raise QueueOperationError("corrupt_purge_completion_invalid")
             disposition = database.execute(
                 """SELECT disposition.*,export.disposition_key
                    FROM corrupt_dispositions AS disposition
@@ -11393,34 +11435,37 @@ class _QueueV3CandidateReader:
         *,
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
     ) -> QueueLease:
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
-        now = _utc_now()
-        expires_at = now + timedelta(seconds=lease_seconds)
-        mismatch = False
-        with closing(self._connect()) as database, begin_immediate(database):
-            row = self._require_lease_row(database, lease, now)
-            validation = self._require_valid_task_payload(
-                database, row, now=now, parse=True
-            )
-            mismatch = validation is None
-            if not mismatch:
-                changed = database.execute(
-                    """UPDATE tasks SET lease_expires_at=?, lease_heartbeat_at=?,
-                           updated_at=? WHERE id=? AND lease_token=? AND state='leased'""",
-                    (
-                        _timestamp(expires_at),
-                        _timestamp(now),
-                        _timestamp(now),
-                        lease.id,
-                        lease.token,
-                    ),
-                ).rowcount
-                if changed != 1:
-                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-        if mismatch:
-            self._raise_payload_mismatch()
+        _require_positive_task_lease(lease_seconds)
+        expires_at = self._with_verified_lease(
+            lease, partial(self._extend_leased_task, lease=lease, lease_seconds=lease_seconds)
+        )
         return replace(lease, expires_at=expires_at)
+
+    @staticmethod
+    def _extend_leased_task(
+        database: sqlite3.Connection,
+        _row: sqlite3.Row,
+        now: datetime,
+        *,
+        lease: QueueLease,
+        lease_seconds: int,
+    ) -> datetime:
+        """Move the lease's expiry on; a lease that is no longer ours raises."""
+        expires_at = now + timedelta(seconds=lease_seconds)
+        changed = database.execute(
+            """UPDATE tasks SET lease_expires_at=?, lease_heartbeat_at=?,
+                   updated_at=? WHERE id=? AND lease_token=? AND state='leased'""",
+            (
+                _timestamp(expires_at),
+                _timestamp(now),
+                _timestamp(now),
+                lease.id,
+                lease.token,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+        return expires_at
 
     def _validated_result_digest(self, relative: str) -> str | None:
         try:
@@ -11641,23 +11686,28 @@ class _QueueV3CandidateReader:
         )
         if not isinstance(failure, QueueFailure) or not failure.error_code:
             raise ValueError("failure must have a non-empty error code")
-        now = _utc_now()
-        mismatch = False
-        with closing(self._connect()) as database, begin_immediate(database):
-            row = self._require_lease_row(database, lease, now)
-            mismatch = (
-                self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                is None
-            )
-            if not mismatch:
-                _record_failed_attempt(database, lease, row, failure, now)
-                _apply_failure_state(
-                    database, lease, row, failure, now, max_attempts
-                )
-        if mismatch:
-            self._raise_payload_mismatch()
+        self._with_verified_lease(
+            lease,
+            partial(
+                self._fail_leased_task,
+                lease=lease,
+                failure=failure,
+                max_attempts=max_attempts,
+            ),
+        )
+
+    @staticmethod
+    def _fail_leased_task(
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        now: datetime,
+        *,
+        lease: QueueLease,
+        failure: QueueFailure,
+        max_attempts: int,
+    ) -> None:
+        _record_failed_attempt(database, lease, row, failure, now)
+        _apply_failure_state(database, lease, row, failure, now, max_attempts)
 
     def recover_expired_leases(self) -> int:
         now = _utc_now()
@@ -11718,23 +11768,22 @@ class _QueueV3CandidateReader:
     ) -> bool:
         _require_active(deadline, cancelled)
         now = _utc_now()
-        mismatch = False
-        changed = False
         with closing(self._connect()) as database, begin_immediate(database):
             row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None or row["state"] in _TERMINAL_STATES:
                 return False
-            mismatch = (
-                self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                is None
-            )
-            if not mismatch:
-                changed = self._cancel_row(database, row, now)
-        if mismatch:
+            changed = self._cancel_valid_row(database, row, now)
+        if changed is None:
             self._raise_payload_mismatch()
-        return changed
+        return bool(changed)
+
+    def _cancel_valid_row(
+        self, database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+    ) -> bool | None:
+        """Cancel a row whose payload holds; None when the payload was demoted instead."""
+        if self._require_valid_task_payload(database, row, now=now, parse=True) is None:
+            return None
+        return self._cancel_row(database, row, now)
 
     @staticmethod
     def _cancel_row(
@@ -12985,13 +13034,7 @@ class _QueueV3CandidateReader:
             self._require_ordinary_purge_authorizations(
                 rows, plan.task_ids, operation_id, manifest_sha256
             )
-            deleted = database.execute(
-                f"""DELETE FROM task_purge_authorizations
-                    WHERE task_id IN ({placeholders})""",  # noqa: S608
-                plan.task_ids,
-            ).rowcount
-            if deleted != len(plan.task_ids):
-                raise QueueOperationError("purge_authorization_failed")
+            _delete_ordinary_purge_authorizations(database, plan.task_ids, placeholders)
 
     def _export_task_in_transaction(
         self, database: sqlite3.Connection, row: sqlite3.Row
@@ -14080,6 +14123,16 @@ def _await_cleanup(
     if descendants is None:
         return False
     deadline = time.monotonic() + max(0.0, cleanup_timeout)
+    return _poll_cleanup(process, descendants, platform_name, deadline)
+
+
+def _poll_cleanup(
+    process: multiprocessing.Process,
+    descendants: set[int],
+    platform_name: str,
+    deadline: float,
+) -> bool:
+    """Whether cleanup is confirmed before the monotonic `deadline`."""
     while True:
         if _cleanup_confirmed(process, descendants, platform_name=platform_name):
             return True

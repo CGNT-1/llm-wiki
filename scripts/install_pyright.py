@@ -410,13 +410,16 @@ class _Stage:
     def _remove_staging_directory(self) -> None:
         """Remove the staging name only while it still names this directory."""
         if os.name != "nt":
-            if self._owns_staging_name():
-                os.rmdir(self.name, dir_fd=self.parent.value)
+            self._remove_posix_staging_directory()
             return
         if self._owns_staging_name():
             _windows_workspace.delete_handle(self.root.value)
             return
         self.published = True
+
+    def _remove_posix_staging_directory(self) -> None:
+        if self._owns_staging_name():
+            os.rmdir(self.name, dir_fd=self.parent.value)
 
     def _owns_staging_name(self) -> bool:
         try:
@@ -903,19 +906,23 @@ def _open_child_directory(
     if _entry_kind(parent, name) != "directory":
         raise PermissionError("expected a regular directory")
     if os.name == "nt":
-        if writable:
-            return _Handle(
-                _windows_workspace._relative_handle(
-                    parent.value,
-                    name,
-                    directory=True,
-                    create=False,
-                    writable=True,
-                ),
-                True,
-            )
-        return _Handle(_windows_workspace.open_directory(parent.value, name), True)
+        return _open_windows_child_directory(parent, name, writable)
     return _Handle(os.open(name, _posix_directory_flags(), dir_fd=parent.value), True)
+
+
+def _open_windows_child_directory(parent: _Handle, name: str, writable: bool) -> _Handle:
+    if writable:
+        return _Handle(
+            _windows_workspace._relative_handle(
+                parent.value,
+                name,
+                directory=True,
+                create=False,
+                writable=True,
+            ),
+            True,
+        )
+    return _Handle(_windows_workspace.open_directory(parent.value, name), True)
 
 
 def _create_child_directory(parent: _Handle, name: str) -> _Handle:
@@ -2336,11 +2343,8 @@ def _existing_result(
     deadline: float,
 ) -> InstalledPyright | None:
     _check_deadline(deadline)
-    kind = _existing_entry_kind(parent)
-    if kind is None:
+    if not _existing_install_directory(parent):
         return None
-    if kind != "directory":
-        raise PyrightInstallError("pyright_existing_install_invalid")
     try:
         return _existing_install_or_invalid(parent, root, deadline)
     except PyrightInstallError as exc:
@@ -2348,6 +2352,16 @@ def _existing_result(
             raise
     _retire_pre_era_install(parent, root)
     return None
+
+
+def _existing_install_directory(parent: _Handle) -> bool:
+    """Whether an install directory is present; any other entry there is invalid."""
+    kind = _existing_entry_kind(parent)
+    if kind is None:
+        return False
+    if kind != "directory":
+        raise PyrightInstallError("pyright_existing_install_invalid")
+    return True
 
 
 def _predates_tree_digest(error: BaseException) -> bool:

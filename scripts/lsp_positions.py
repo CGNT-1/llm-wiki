@@ -434,10 +434,14 @@ def _decoded_uri_parts(parsed) -> tuple[str, str]:
     return authority, decoded_path
 
 
+def _require_bracketed_host(authority: str) -> None:
+    if re.fullmatch(r"\[[^]]+\]", authority) is None:
+        raise ValueError("file uri authority must not contain a port")
+
+
 def _require_no_port(authority: str) -> None:
     if authority.startswith("["):
-        if re.fullmatch(r"\[[^]]+\]", authority) is None:
-            raise ValueError("file uri authority must not contain a port")
+        _require_bracketed_host(authority)
         return
     if ":" in authority:
         raise ValueError("file uri authority must not contain a port")
@@ -478,10 +482,15 @@ def _windows_drive_path(decoded_path: str) -> PureWindowsPath:
     raise ValueError("Windows file uri must include a drive or UNC authority")
 
 
+def _require_absolute_uri_path(decoded_path: str, target_platform: str) -> None:
+    if decoded_path.startswith("/"):
+        return
+    if target_platform != "nt" or re.match(r"^[A-Za-z]:/", decoded_path) is None:
+        raise ValueError("file uri path must be absolute")
+
+
 def _local_path(decoded_path: str, target_platform: str) -> PurePath:
-    if not decoded_path.startswith("/"):
-        if target_platform != "nt" or re.match(r"^[A-Za-z]:/", decoded_path) is None:
-            raise ValueError("file uri path must be absolute")
+    _require_absolute_uri_path(decoded_path, target_platform)
     if target_platform == "nt":
         return _windows_drive_path(decoded_path)
     return PurePosixPath(decoded_path)

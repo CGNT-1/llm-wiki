@@ -175,16 +175,23 @@ def _cursor_projection_handlers(raw: bytes) -> dict[str, object]:
 def _cursor_projection_any(
     config: Mapping[str, object], candidates: Sequence[bytes]
 ) -> bytes | None:
-    matches: list[bytes] = []
-    for candidate in candidates:
-        handlers = _cursor_projection_handlers(candidate)
-        if _cursor_projection(config, handlers) is not None:
-            matches.append(candidate)
+    matches = _cursor_projection_matches(config, candidates)
     if not matches:
         return None
     if len(matches) != 1:
         raise InstallControlError("integration_cursor_ownership_conflict")
     return matches[0]
+
+
+def _cursor_projection_matches(
+    config: Mapping[str, object], candidates: Sequence[bytes]
+) -> list[bytes]:
+    """The candidates whose handlers the config holds, in candidate order."""
+    return [
+        candidate
+        for candidate in candidates
+        if _cursor_projection(config, _cursor_projection_handlers(candidate)) is not None
+    ]
 
 
 def _without_handlers(current: Sequence[object], owned: Sequence[object]) -> list[object]:
@@ -244,11 +251,15 @@ def _require_cursor_expected(
     config: Mapping[str, object], expected: bytes | None, replacement: bytes | None
 ) -> None:
     if expected is not None:
-        if _cursor_projection_any(config, (expected,)) != expected:
-            raise InstallControlError("integration_hook_config_changed")
+        _require_cursor_projection_is(config, expected)
         return
     candidates = () if replacement is None else (replacement,)
     if _cursor_projection_any(config, candidates) is not None:
+        raise InstallControlError("integration_hook_config_changed")
+
+
+def _require_cursor_projection_is(config: Mapping[str, object], expected: bytes) -> None:
+    if _cursor_projection_any(config, (expected,)) != expected:
         raise InstallControlError("integration_hook_config_changed")
 
 
@@ -595,10 +606,14 @@ def _require_family_expected(
 ) -> None:
     current = _family_projection(config, family)
     if expected is not None:
-        if current != expected:
-            raise InstallControlError("integration_hook_config_changed")
+        _require_family_projection_is(current, expected)
         return
     if current is not None and current != replacement:
+        raise InstallControlError("integration_hook_config_changed")
+
+
+def _require_family_projection_is(current: bytes | None, expected: bytes) -> None:
+    if current != expected:
         raise InstallControlError("integration_hook_config_changed")
 
 

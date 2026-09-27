@@ -510,6 +510,10 @@ class _BoundedReader:
         stream = getattr(self._process, name)
         if stream is None:
             return
+        self._drain(name, stream)
+
+    def _drain(self, name: str, stream) -> None:
+        """Read until end of stream or until the ceiling is reached."""
         while True:
             data = stream.read(READ_CHUNK_BYTES)
             if not data:

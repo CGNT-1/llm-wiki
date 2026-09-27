@@ -871,6 +871,12 @@ def _same_descriptor_identity(left: os.stat_result, right: os.stat_result) -> bo
     )
 
 
+def _require_unchanged_child(listed: os.stat_result, child: int) -> None:
+    """The directory opened is the one the listing named."""
+    if not _same_descriptor_identity(listed, os.fstat(child)):
+        raise CorpusChanged("corpus child directory changed before open")
+
+
 def _descriptor_flags(*, directory: bool) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     if directory:
@@ -1256,8 +1262,7 @@ class _Discovery:
             raise ValueError("corpus depth limit exceeded")
         child = _opened_listed_entry(name, descriptor, directory=True)
         try:
-            if not _same_descriptor_identity(info, os.fstat(child)):
-                raise CorpusChanged("corpus child directory changed before open")
+            _require_unchanged_child(info, child)
             self._walk_posix_directory(root, path, depth + 1, child, kind)
         finally:
             os.close(child)

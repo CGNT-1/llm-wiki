@@ -324,6 +324,9 @@ class LoopbackGuard:
         if kind != "http":
             await _refuse_other_scope(scope, receive, send)
             return
+        await self._serve_http(scope, receive, send)
+
+    async def _serve_http(self, scope, receive, send) -> None:
         refusal = self.refusal(scope)
         if refusal is None:
             await self.app(scope, receive, send)

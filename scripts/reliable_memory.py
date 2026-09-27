@@ -306,19 +306,20 @@ def _path_is_under(path: str, mount_point: str) -> bool:
     return mount_point == "/" or path == mount_point or path.startswith(f"{mount_point}/")
 
 
+def _has_reparse_attribute(candidate: Path) -> bool:
+    if not candidate.exists():
+        return False
+    attributes = getattr(candidate.stat(follow_symlinks=False), "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
+
+
 def _windows_reparse_point(path: Path) -> bool:
     if os.name != "nt":
         return False
     current = path.absolute()
     candidates = [current, *current.parents]
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-        attributes = getattr(candidate.stat(follow_symlinks=False), "st_file_attributes", 0)
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        if attributes & reparse_flag:
-            return True
-    return False
+    return any(_has_reparse_attribute(candidate) for candidate in candidates)
 
 
 def _second_writer_is_blocked(second: sqlite3.Connection) -> bool:
@@ -421,9 +422,8 @@ def _owner_permissions_supported(path: Path) -> bool:
     return _platform_system() != "Windows" and os.name == "posix"
 
 
-def _set_owner_only(path: Path, mode: int) -> bool:
-    if not _owner_permissions_supported(path):
-        return False
+def _chmod_or_warn(path: Path, mode: int) -> bool:
+    """Apply `mode`; False (with the warning) when the filesystem has no permission bits."""
     try:
         path.chmod(mode)
     except OSError as exc:
@@ -433,12 +433,24 @@ def _set_owner_only(path: Path, mode: int) -> bool:
         warnings.warn(
             f"owner-only permission bits are unsupported for {path}",
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
         return False
+    return True
+
+
+def _require_applied_mode(path: Path, mode: int) -> None:
     actual = stat.S_IMODE(path.stat().st_mode)
     if actual != mode:
         raise PermissionError(f"owner-only mode {mode:o} was not applied to {path}: got {actual:o}")
+
+
+def _set_owner_only(path: Path, mode: int) -> bool:
+    if not _owner_permissions_supported(path):
+        return False
+    if not _chmod_or_warn(path, mode):
+        return False
+    _require_applied_mode(path, mode)
     return True
 
 
@@ -577,28 +589,36 @@ def _validate_or_initialize_operational_contract(
     *,
     initialize: bool,
 ) -> None:
-    application_id = _pragma_integer(connection, "application_id")
-    user_version = _pragma_integer(connection, "user_version")
+    identity = (
+        _pragma_integer(connection, "application_id"),
+        _pragma_integer(connection, "user_version"),
+    )
     if initialize:
-        if (application_id, user_version) == (0, 0):
-            connection.execute(f"PRAGMA application_id={contract.application_id:d}")
-            connection.execute(f"PRAGMA user_version={contract.user_version:d}")
-            application_id = _pragma_integer(connection, "application_id")
-            user_version = _pragma_integer(connection, "user_version")
-        elif (application_id, user_version) != (
-            contract.application_id,
-            contract.user_version,
-        ):
-            raise OperationalDatabaseContractError(
-                "cannot initialize a conflicting operational database contract"
-            )
-    if (application_id, user_version) != (
-        contract.application_id,
-        contract.user_version,
-    ):
+        identity = _initialized_contract_identity(connection, contract, identity)
+    if identity != (contract.application_id, contract.user_version):
         raise OperationalDatabaseContractError(
             "operational database application_id or user_version mismatch"
         )
+
+
+def _initialized_contract_identity(
+    connection: sqlite3.Connection,
+    contract: OperationalDatabaseContract,
+    identity: tuple[int, int],
+) -> tuple[int, int]:
+    """Stamp an empty database with the contract; refuse one stamped otherwise."""
+    if identity == (0, 0):
+        connection.execute(f"PRAGMA application_id={contract.application_id:d}")
+        connection.execute(f"PRAGMA user_version={contract.user_version:d}")
+        return (
+            _pragma_integer(connection, "application_id"),
+            _pragma_integer(connection, "user_version"),
+        )
+    if identity != (contract.application_id, contract.user_version):
+        raise OperationalDatabaseContractError(
+            "cannot initialize a conflicting operational database contract"
+        )
+    return identity
 
 
 def _migration_incomplete(message: str) -> OperationalDatabaseContractError:
@@ -674,12 +694,16 @@ def _require_bounded_regular_file(
         raise PermissionError("runtime file must be a bounded regular file")
 
 
+def _require_windows_owner_only(path: Path) -> None:
+    from memory_queue import _is_owner_only
+
+    if not _is_owner_only(path):
+        raise PermissionError("runtime file must be owner-only")
+
+
 def _require_owner_only_file(path: Path, metadata: os.stat_result) -> None:
     if os.name == "nt":
-        from memory_queue import _is_owner_only
-
-        if not _is_owner_only(path):
-            raise PermissionError("runtime file must be owner-only")
+        _require_windows_owner_only(path)
         return
     mode = stat.S_IMODE(metadata.st_mode)
     if mode & 0o077 or mode & 0o600 != 0o600:

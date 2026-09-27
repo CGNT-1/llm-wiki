@@ -852,16 +852,20 @@ def write_all(handle: int, content: bytes, *, chunk_bytes: int) -> None:
         raise TypeError("Windows workspace content must be bytes")
     offset = 0
     while offset < len(content):
-        chunk = content[offset : offset + chunk_bytes]
-        buffer = ctypes.create_string_buffer(chunk)
-        written = wintypes.DWORD()
-        if not _API.write_file(
-            handle, buffer, len(chunk), ctypes.byref(written), None
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
-        if written.value <= 0:
-            raise OSError("sealed workspace write made no progress")
-        offset += int(written.value)
+        offset += _written_chunk_bytes(handle, content[offset : offset + chunk_bytes])
+
+
+def _written_chunk_bytes(handle: int, chunk: bytes) -> int:
+    """One WriteFile call; how many bytes it took, never zero."""
+    buffer = ctypes.create_string_buffer(chunk)
+    written = wintypes.DWORD()
+    if not _API.write_file(
+        handle, buffer, len(chunk), ctypes.byref(written), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if written.value <= 0:
+        raise OSError("sealed workspace write made no progress")
+    return int(written.value)
 
 
 def read_chunks(handle: int, *, chunk_bytes: int, max_bytes: int):

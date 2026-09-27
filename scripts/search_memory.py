@@ -2861,6 +2861,19 @@ def _stored_chunks_match(
     """
     if not check_rows:
         return True
+    return _rows_hold_invariants(
+        connection, expected_chunks, count=count, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _rows_hold_invariants(
+    connection: sqlite3.Connection,
+    expected_chunks: list[tuple[object, ...]] | None,
+    *,
+    count: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
     seen: set[str] = set()
     for order, row in enumerate(connection.execute(_FTS_CHUNK_SELECT)):
         _check_generation_stop(deadline, cancelled)

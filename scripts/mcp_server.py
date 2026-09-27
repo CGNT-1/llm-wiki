@@ -2683,21 +2683,29 @@ def _navigation_relative_path(
     _check_navigation_stop(deadline)
     relative = span.get("relative_path")
     if not isinstance(relative, str):
-        file_value = span.get("file")
-        if not isinstance(file_value, str):
-            raise ValueError("graph span has no source path")
-        file_path = Path(file_value)
-        if file_path.is_absolute():
-            root = Path(scope.checkout_root).resolve(strict=True)
-            _check_navigation_stop(deadline)
-            source = file_path.resolve(strict=True)
-            _check_navigation_stop(deadline)
-            relative = source.relative_to(root).as_posix()
-        else:
-            relative = file_value
+        relative = _file_relative_path(scope, span, deadline=deadline)
     normalized = validate_repository_relative_path(relative)
     _check_navigation_stop(deadline)
     return normalized
+
+
+def _file_relative_path(scope, span: dict, *, deadline: float | None) -> str:
+    """A span that names only its `file`: relative as given, absolute under the checkout."""
+    file_value = span.get("file")
+    if not isinstance(file_value, str):
+        raise ValueError("graph span has no source path")
+    file_path = Path(file_value)
+    if not file_path.is_absolute():
+        return file_value
+    return _checkout_relative(scope, file_path, deadline=deadline)
+
+
+def _checkout_relative(scope, file_path: Path, *, deadline: float | None) -> str:
+    root = Path(scope.checkout_root).resolve(strict=True)
+    _check_navigation_stop(deadline)
+    source = file_path.resolve(strict=True)
+    _check_navigation_stop(deadline)
+    return source.relative_to(root).as_posix()
 
 
 def _navigation_source_bytes(
@@ -5423,6 +5431,10 @@ def _answer_freshness(generation: object, paths: list[str]) -> str:
     built = _generation_built_ns(generation)
     if built is None:
         return "fresh"
+    return _freshness_from_digests(generation, paths, built)
+
+
+def _freshness_from_digests(generation: object, paths: list[str], built: int) -> str:
     recorded = _recorded_memory_digests(generation)
     if recorded is None:
         return "unknown"

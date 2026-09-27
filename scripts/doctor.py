@@ -3074,12 +3074,16 @@ def _string_state(character: str, escaped: bool) -> tuple[bool, bool]:
 
 def _depth_after(character: str, depth: int) -> int:
     if character in "[{":
-        if depth + 1 > _LSP_JSON_MAX_DEPTH:
-            raise ValueError("LSP runtime record is too deeply nested")
-        return depth + 1
+        return _one_level_deeper(depth)
     if character in "]}":
         return depth - 1
     return depth
+
+
+def _one_level_deeper(depth: int) -> int:
+    if depth + 1 > _LSP_JSON_MAX_DEPTH:
+        raise ValueError("LSP runtime record is too deeply nested")
+    return depth + 1
 
 
 def _require_lsp_json_depth(text: str) -> None:
@@ -8582,13 +8586,20 @@ def degraded_summary(report: dict) -> str:
     """Return a compact bounded summary containing only actionable checks."""
     if report.get("overall_status") == "ok":
         return ""
-    entries = []
-    for check in report.get("checks", []):
-        if check.get("status") in {"degraded", "error"}:
-            entries.append(
-                f"{check.get('id', 'unknown')} ({check['status']}): {check.get('message', '')}"
-            )
-    text = "; ".join(entries)
+    return _bounded_summary("; ".join(_actionable_entries(report)))
+
+
+def _actionable_entries(report: dict) -> list[str]:
+    actionable = [
+        check for check in report.get("checks", []) if check.get("status") in {"degraded", "error"}
+    ]
+    return [
+        f"{check.get('id', 'unknown')} ({check['status']}): {check.get('message', '')}"
+        for check in actionable
+    ]
+
+
+def _bounded_summary(text: str) -> str:
     if len(text) <= SUMMARY_LIMIT:
         return text
     return text[: SUMMARY_LIMIT - 3].rstrip() + "..."

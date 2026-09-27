@@ -490,11 +490,23 @@ def _access_posix(
         step_tuple = tuple(walk.steps)
         _revalidate_posix(filesystem_root_identity, root_steps, step_tuple)
         _require_posix_still_missing(walk)
-        content = None
-        if reader is not None:
-            content = _read_posix_content(walk, reader)
-            _revalidate_posix(filesystem_root_identity, root_steps, step_tuple)
+        content = _posix_content_after_read(walk, reader, filesystem_root_identity, root_steps, step_tuple)
         return _repository_source(repository, relative_path, root.joinpath(*parts)), content
+
+
+def _posix_content_after_read(
+    walk: _PosixWalk,
+    reader: Callable[[int], bytes] | None,
+    filesystem_root_identity: tuple[object, ...],
+    root_steps: tuple[_TraversalStep, ...],
+    step_tuple: tuple[_TraversalStep, ...],
+) -> bytes | None:
+    """The content read through the walk, revalidated after the read; None without a reader."""
+    if reader is None:
+        return None
+    content = _read_posix_content(walk, reader)
+    _revalidate_posix(filesystem_root_identity, root_steps, step_tuple)
+    return content
 
 
 def _require_valid_windows_entry(entry: object) -> None:

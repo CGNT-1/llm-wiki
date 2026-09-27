@@ -537,12 +537,16 @@ def _bounded_hover_string(value: object) -> str | None:
     return value
 
 
+def _hover_kind_labelled(value: Mapping[str, object], text: str) -> str | None:
+    if value.get("kind") in {"plaintext", "markdown"}:
+        return text
+    return None
+
+
 def _hover_fragment_labelled(value: Mapping[str, object], text: str) -> str | None:
     """A fragment is usable when its kind or its language names something real."""
     if "kind" in value:
-        if value.get("kind") in {"plaintext", "markdown"}:
-            return text
-        return None
+        return _hover_kind_labelled(value, text)
     language = value.get("language")
     if not isinstance(language, str) or not language:
         return None
@@ -1870,23 +1874,32 @@ class _LaunchServerGuard:
         """
         return (self._descriptor_path(descriptor), *self._command[1:])
 
-    def _copy_snapshot(self, snapshot: BinaryIO) -> str:
+    def _rewound_descriptor(self) -> int:
         descriptor = self._descriptor
         if descriptor is None:
             raise RuntimeError("Pyright launch server guard is closed")
         os.lseek(descriptor, 0, os.SEEK_SET)
-        snapshot.seek(0)
-        digest = hashlib.sha256()
+        return descriptor
+
+    def _server_chunks(self, descriptor: int) -> Iterator[bytes]:
+        """The server file in bounded chunks, each read inside the startup deadline."""
         total = 0
         while True:
             _require_startup_deadline(self._deadline)
             chunk = os.read(descriptor, 64 * 1024)
             _require_startup_deadline(self._deadline)
             if not chunk:
-                break
+                return
             total += len(chunk)
             if total > MAX_SERVER_BYTES:
                 raise self._digest_mismatch()
+            yield chunk
+
+    def _copy_snapshot(self, snapshot: BinaryIO) -> str:
+        descriptor = self._rewound_descriptor()
+        snapshot.seek(0)
+        digest = hashlib.sha256()
+        for chunk in self._server_chunks(descriptor):
             snapshot.write(chunk)
             digest.update(chunk)
         snapshot.flush()
@@ -1894,21 +1907,9 @@ class _LaunchServerGuard:
         return digest.hexdigest()
 
     def _digest(self) -> str:
-        descriptor = self._descriptor
-        if descriptor is None:
-            raise RuntimeError("Pyright launch server guard is closed")
-        os.lseek(descriptor, 0, os.SEEK_SET)
+        descriptor = self._rewound_descriptor()
         digest = hashlib.sha256()
-        total = 0
-        while True:
-            _require_startup_deadline(self._deadline)
-            chunk = os.read(descriptor, 64 * 1024)
-            _require_startup_deadline(self._deadline)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_SERVER_BYTES:
-                raise self._digest_mismatch()
+        for chunk in self._server_chunks(descriptor):
             digest.update(chunk)
         return digest.hexdigest()
 
@@ -2616,15 +2617,16 @@ class LanguageServerSession:
             return [], False
         if not isinstance(value, list):
             return [], True
-        partial = len(value) > MAX_LOCATIONS
-        related: list[tuple[LspLocation, str | None]] = []
-        for relation in value[:MAX_LOCATIONS]:
-            entry = self._related_entry(relation)
-            if entry is None:
-                partial = True
-                continue
-            related.append(entry)
-        return related, partial
+        related, dropped = self._related_entries(value[:MAX_LOCATIONS])
+        return related, len(value) > MAX_LOCATIONS or dropped
+
+    def _related_entries(
+        self, relations: list[object]
+    ) -> tuple[list[tuple[LspLocation, str | None]], bool]:
+        """The entries that parse, and whether any did not."""
+        entries = [self._related_entry(relation) for relation in relations]
+        related = [entry for entry in entries if entry is not None]
+        return related, len(related) != len(entries)
 
     def _parse_diagnostic(
         self,
@@ -2755,6 +2757,11 @@ class LanguageServerSession:
         with self._lock:
             if not self._diagnostic_update_admissible_locked(uri, version):
                 return
+        self._store_diagnostic_snapshot(uri, values, version)
+
+    def _store_diagnostic_snapshot(
+        self, uri: str, values: list[object], version: int | None
+    ) -> None:
         snapshot = self._diagnostic_snapshot(values, uri, version)
         if snapshot is None:
             return
@@ -3143,18 +3150,32 @@ class LanguageServerSession:
         startup_deadline: float,
     ) -> bool:
         """Clear what a previous attempt left; False when one refused again."""
-        if retained_cleanup is not None:
-            if not self._startup_retry_ok(
-                lambda: retained_cleanup.retry_cleanup(startup_deadline)
-            ):
-                return False
-            self._clear_retained_cleanup(retained_cleanup)
-        if retained_process is not None:
-            if not self._startup_retry_ok(
-                lambda: retained_process.close(startup_deadline)
-            ):
-                return False
-            self._clear_retained_process(retained_process)
+        if not self._retained_cleanup_cleared(retained_cleanup, startup_deadline):
+            return False
+        return self._retained_process_cleared(retained_process, startup_deadline)
+
+    def _retained_cleanup_cleared(
+        self, retained_cleanup: StartupCleanupError | None, startup_deadline: float
+    ) -> bool:
+        if retained_cleanup is None:
+            return True
+        if not self._startup_retry_ok(
+            lambda: retained_cleanup.retry_cleanup(startup_deadline)
+        ):
+            return False
+        self._clear_retained_cleanup(retained_cleanup)
+        return True
+
+    def _retained_process_cleared(
+        self, retained_process: LspProcess | None, startup_deadline: float
+    ) -> bool:
+        if retained_process is None:
+            return True
+        if not self._startup_retry_ok(
+            lambda: retained_process.close(startup_deadline)
+        ):
+            return False
+        self._clear_retained_process(retained_process)
         return True
 
     def _clear_bootstrap_nonce_locked(self, attempt: _StartupAttempt) -> None:
@@ -3846,9 +3867,13 @@ class LanguageServerSession:
         """
         if incoming_bytes > _MAX_OPEN_DOCUMENT_BYTES:
             return []
+        return self._evictions_to_fit_locked(
+            len(self._documents) + 1, self._document_bytes + incoming_bytes
+        )
+
+    def _evictions_to_fit_locked(self, count: int, used: int) -> list[OpenDocument]:
+        """Least recently used evictable documents, until `count` and `used` fit."""
         crowded: list[OpenDocument] = []
-        count = len(self._documents) + 1
-        used = self._document_bytes + incoming_bytes
         for document in self._documents_by_use_locked():
             if _documents_fit(count, used):
                 break

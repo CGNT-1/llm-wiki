@@ -1111,13 +1111,17 @@ def _map_side(graph, symbols: dict, change: dict, changed_range: dict, side: str
     if path is None:
         return
     old_range, classification = _indexed_old_range(graph, path, change, changed_range["old"], deadline)
-    for node in graph.find_nodes(path=path, max_rows=bounds.max_graph_rows, deadline=deadline):
-        if node["kind"] not in _SYMBOL_KINDS:
-            continue
+    for node in _symbol_nodes(graph, path, bounds, deadline):
         occurrence = _changed_occurrence(graph, node, path, old_range, deadline)
         if occurrence is not None:
             _note_symbol(symbols, node, occurrence, side, old_range, classification)
             _require_symbol_ceiling(symbols, bounds)
+
+
+def _symbol_nodes(graph, path: str, bounds, deadline):
+    """The file's nodes that are symbols, in the generation's order."""
+    nodes = graph.find_nodes(path=path, max_rows=bounds.max_graph_rows, deadline=deadline)
+    return (node for node in nodes if node["kind"] in _SYMBOL_KINDS)
 
 
 def _indexed_old_range(graph, path: str, change: dict, old_range: dict, deadline: float) -> tuple[dict, str]:

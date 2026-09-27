@@ -3784,13 +3784,17 @@ def _captured_targets(
         }
 
 
+def _prepared_delete(relative: str, before: bytes | None) -> MarkdownChange:
+    if before is None:
+        raise FileNotFoundError(relative)
+    return MarkdownChange.delete(relative)
+
+
 def _prepared_change(
     relative: str, content: bytes | None, before: bytes | None
 ) -> MarkdownChange:
     if content is None:
-        if before is None:
-            raise FileNotFoundError(relative)
-        return MarkdownChange.delete(relative)
+        return _prepared_delete(relative, before)
     if before is None:
         return MarkdownChange.create(relative, _require_bytes(content))
     return MarkdownChange.replace(relative, _require_bytes(content))
@@ -5305,6 +5309,19 @@ class MarkdownCoordinator:
         )
         return occurrence or deduplicated
 
+    def _require_same_occurrence(
+        self,
+        occurrence: sqlite3.Row,
+        base: Mapping[str, object],
+        idempotency_key: str,
+        allocated: set[str],
+    ) -> None:
+        if occurrence["idempotency_key"] != idempotency_key:
+            raise ValueError(
+                "occurrence_id is already bound to another idempotency key"
+            )
+        self._require_same_checkpoint_event(occurrence, base, allocated)
+
     def _require_consistent_checkpoint(
         self,
         occurrence: sqlite3.Row | None,
@@ -5314,11 +5331,7 @@ class MarkdownCoordinator:
     ) -> None:
         allocated = {"project", "sequence", "last_applied_sequence"}
         if occurrence is not None:
-            if occurrence["idempotency_key"] != idempotency_key:
-                raise ValueError(
-                    "occurrence_id is already bound to another idempotency key"
-                )
-            self._require_same_checkpoint_event(occurrence, base, allocated)
+            self._require_same_occurrence(occurrence, base, idempotency_key, allocated)
         if deduplicated is not None:
             self._require_same_checkpoint_event(
                 deduplicated, base, allocated | {"occurrence_id"}
@@ -8656,18 +8669,23 @@ class MarkdownCoordinator:
         except OSError as exc:
             raise _as_parent_boundary_failure(parent, exc) from exc
 
+    def _capture_target_on_windows(
+        self, target: Path, max_before_bytes: int | None
+    ) -> tuple[bytes | None, tuple[int, int]]:
+        with self._hold_windows_parent(target.parent):
+            before = self._parent_identity(target.parent)
+            content = self._read_bounded_target(target, max_before_bytes)
+            if self._parent_identity(target.parent) != before:
+                raise TargetBoundaryFailure(
+                    f"parent identity changed while reading {target}"
+                )
+            return content, before
+
     def _capture_target(
         self, target: Path, *, max_before_bytes: int | None = None
     ) -> tuple[bytes | None, tuple[int, int]]:
         if not _use_posix_dir_fd():
-            with self._hold_windows_parent(target.parent):
-                before = self._parent_identity(target.parent)
-                content = self._read_bounded_target(target, max_before_bytes)
-                if self._parent_identity(target.parent) != before:
-                    raise TargetBoundaryFailure(
-                        f"parent identity changed while reading {target}"
-                    )
-                return content, before
+            return self._capture_target_on_windows(target, max_before_bytes)
         descriptor = _open_parent_directory(target.parent)
         try:
             metadata = os.fstat(descriptor)
@@ -8844,11 +8862,24 @@ class MarkdownCoordinator:
         if not self._within_capture_bound(before, target):
             return _OVERSIZED_TARGET
         descriptor = os.open(target, _CAPTURE_OPEN_FLAGS)
+        return self._hash_opened_target(
+            descriptor, before, target, lambda: _lstat_or_none(target), target
+        )
+
+    def _hash_opened_target(
+        self,
+        descriptor: int,
+        before: os.stat_result,
+        target: Path,
+        current: Callable[[], os.stat_result | None],
+        label: object,
+    ) -> str:
+        """Hash an opened bounded target and close it; `current` re-reads its metadata."""
         try:
             hashed = self._hashed_or_none(descriptor, before, target)
             if hashed is None:
                 return _OVERSIZED_TARGET
-            self._require_unchanged_hash(hashed[1], _lstat_or_none(target), target)
+            self._require_unchanged_hash(hashed[1], current(), label)
             return hashed[0]
         finally:
             os.close(descriptor)
@@ -8860,16 +8891,9 @@ class MarkdownCoordinator:
         if not self._within_capture_bound(before, Path(name)):
             return _OVERSIZED_TARGET
         descriptor = os.open(name, _CAPTURE_OPEN_FLAGS, dir_fd=parent_descriptor)
-        try:
-            hashed = self._hashed_or_none(descriptor, before, Path(name))
-            if hashed is None:
-                return _OVERSIZED_TARGET
-            self._require_unchanged_hash(
-                hashed[1], _stat_at_or_none(parent_descriptor, name), name
-            )
-            return hashed[0]
-        finally:
-            os.close(descriptor)
+        return self._hash_opened_target(
+            descriptor, before, Path(name), lambda: _stat_at_or_none(parent_descriptor, name), name
+        )
 
     def _within_capture_bound(self, metadata: os.stat_result, target: Path) -> bool:
         """False means the target is too large to be captured at all."""
@@ -9351,6 +9375,49 @@ class MarkdownCoordinator:
         finally:
             self._local.content_guard = previous
 
+    def _refresh_v3_writer_lease(
+        self,
+        database: sqlite3.Connection,
+        owner: object,
+        owner_token: object,
+        fencing_epoch: object,
+    ) -> None:
+        """Copy the canonical owner's lease onto the gate row; lost ownership raises."""
+        registry = self._ownership_registry()
+        registry.require(database, owner)
+        cursor = database.execute(
+            """UPDATE writer_owners
+               SET heartbeat_at=(
+                       SELECT heartbeat_at FROM maintenance_owners
+                       WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
+                         AND fencing_epoch=?
+                   ),
+                   expires_at=(
+                       SELECT expires_at FROM maintenance_owners
+                       WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
+                         AND fencing_epoch=?
+                   )
+               WHERE gate_name='global' AND owner_token=? AND fencing_epoch=?""",
+            (
+                owner.role,
+                owner.scope,
+                owner.actor_id,
+                owner.token,
+                owner.epoch,
+                owner.role,
+                owner.scope,
+                owner.actor_id,
+                owner.token,
+                owner.epoch,
+                owner_token,
+                fencing_epoch,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "Markdown writer gate ownership was lost before mutation"
+            )
+
     def _assert_writer_ownership(self, database: sqlite3.Connection) -> None:
         owner_token = getattr(self._local, "gate_token", None)
         fencing_epoch = getattr(self._local, "gate_fence", None)
@@ -9359,40 +9426,7 @@ class MarkdownCoordinator:
             getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT
             and owner is not None
         ):
-            registry = self._ownership_registry()
-            registry.require(database, owner)
-            cursor = database.execute(
-                """UPDATE writer_owners
-                   SET heartbeat_at=(
-                           SELECT heartbeat_at FROM maintenance_owners
-                           WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
-                             AND fencing_epoch=?
-                       ),
-                       expires_at=(
-                           SELECT expires_at FROM maintenance_owners
-                           WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
-                             AND fencing_epoch=?
-                       )
-                   WHERE gate_name='global' AND owner_token=? AND fencing_epoch=?""",
-                (
-                    owner.role,
-                    owner.scope,
-                    owner.actor_id,
-                    owner.token,
-                    owner.epoch,
-                    owner.role,
-                    owner.scope,
-                    owner.actor_id,
-                    owner.token,
-                    owner.epoch,
-                    owner_token,
-                    fencing_epoch,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError(
-                    "Markdown writer gate ownership was lost before mutation"
-                )
+            self._refresh_v3_writer_lease(database, owner, owner_token, fencing_epoch)
             return
         heartbeat = _now()
         cursor = database.execute(

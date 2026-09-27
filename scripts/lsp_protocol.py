@@ -811,9 +811,20 @@ def _startup_interruption_source(startup_error, cleanup_interruption, cleanup_er
         return startup_error
     if cleanup_interruption is not None:
         return cleanup_interruption
-    for error in cleanup_errors:
-        if _interruption_in_chain(error) is not None:
-            return error
+    return _first_interrupted(cleanup_errors)
+
+
+def _first_interrupted(errors):
+    """The first error whose chain carries an interruption, or None."""
+    return next((error for error in errors if _interruption_in_chain(error) is not None), None)
+
+
+def _server_request_result(handler, method: str, message: dict[str, Any]):
+    """A registered handler's answer; an unhandled configuration request gets `[]`, any other None."""
+    if handler is not None:
+        return handler(message.get("params"))
+    if method == "workspace/configuration":
+        return []
     return None
 
 
@@ -1580,12 +1591,16 @@ class LspProtocol:
         if generation_nonce != self.generation_nonce:
             return
         if "method" in message:
-            if "id" in message:
-                self._handle_server_request(message)
-            else:
-                self._handle_server_notification(message)
+            self._handle_server_message(message)
             return
         self._handle_response(message, generation_nonce)
+
+    def _handle_server_message(self, message: dict[str, Any]) -> None:
+        """A message the server started: a request carries an id, a notification does not."""
+        if "id" in message:
+            self._handle_server_request(message)
+            return
+        self._handle_server_notification(message)
 
     def _store_response_locked(
         self, pending: PendingRequest, message: dict[str, Any]
@@ -1655,12 +1670,16 @@ class LspProtocol:
             self._become_fatal(str(violation), cause=violation)
 
     def _validate_result(self, method: str, result: object) -> None:
-        if method in _FLAT_SEMANTIC_RESULT_METHODS:
-            _require_location_count(result)
-        elif method == "textDocument/documentSymbol":
-            self._validate_document_symbol_count(result)
+        self._validate_result_count(method, result)
         if method == "textDocument/hover":
             _require_hover_size(result)
+
+    def _validate_result_count(self, method: str, result: object) -> None:
+        if method in _FLAT_SEMANTIC_RESULT_METHODS:
+            _require_location_count(result)
+            return
+        if method == "textDocument/documentSymbol":
+            self._validate_document_symbol_count(result)
 
     @staticmethod
     def _validate_document_symbol_count(result: object) -> None:
@@ -1684,12 +1703,7 @@ class LspProtocol:
             return
         handler = self._server_request_handlers.get(method)
         try:
-            if handler is not None:
-                result = handler(message.get("params"))
-            elif method == "workspace/configuration":
-                result = []
-            else:
-                result = None
+            result = _server_request_result(handler, method, message)
             self._write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
         except BaseException:
             self._write_message(
@@ -1796,12 +1810,16 @@ class LspProtocol:
             self._pending.pop(key, None)
             self._remember_key(key, self._cancelled_keys, self._cancelled_order)
         else:
-            pending.drain_deadline = terminal_at + CANCEL_DRAIN_GRACE_SECONDS
-            if self._drain_wake is not None:
-                self._drain_wake.set()
-            if pending.write_phase == "sent":
-                self._enqueue_cancel_locked(pending)
+            self._schedule_drain_locked(pending, terminal_at)
         pending.completed.set()
+
+    def _schedule_drain_locked(self, pending: PendingRequest, terminal_at: float) -> None:
+        """A request already written drains until its grace ends; a sent one is cancelled."""
+        pending.drain_deadline = terminal_at + CANCEL_DRAIN_GRACE_SECONDS
+        if self._drain_wake is not None:
+            self._drain_wake.set()
+        if pending.write_phase == "sent":
+            self._enqueue_cancel_locked(pending)
 
     def _enqueue_cancel_locked(self, pending: PendingRequest) -> None:
         if pending.cancel_enqueued:
@@ -2155,14 +2173,17 @@ class LspProtocol:
         if os.name != "nt":
             return
         with self._owner_handle_lock:
-            handle = self._os_handle_locked(name)
-            if handle is None:
-                return
-            if not _KERNEL32.CloseHandle(handle):
-                self._owner_release_errors[name] = ctypes.WinError(ctypes.get_last_error())
-                return
-            self._owner_release_errors.pop(name, None)
-            self._clear_os_handle_locked(name)
+            self._release_owner_locked(name)
+
+    def _release_owner_locked(self, name: str) -> None:
+        handle = self._os_handle_locked(name)
+        if handle is None:
+            return
+        if not _KERNEL32.CloseHandle(handle):
+            self._owner_release_errors[name] = ctypes.WinError(ctypes.get_last_error())
+            return
+        self._owner_release_errors.pop(name, None)
+        self._clear_os_handle_locked(name)
 
     def _record_cancel_outcome_locked(self, name: str, cancelled: object) -> None:
         if cancelled:

@@ -641,7 +641,11 @@ def call_llm_result(
     """Return the successful provider outcome with its resolved identity."""
     if _llm_prompt_is_empty(prompt):
         return None
+    return _first_terminal_result(prompt, system_prompt, max_tokens)
 
+
+def _first_terminal_result(prompt: str, system_prompt: str, max_tokens: int) -> LLMResult | None:
+    """Walk the provider chain until one answers, or one stops the chain."""
     forced = forced_provider()
     lineage: tuple[str, ...] = ()
     for candidate in provider_candidates(forced, max_tokens=max_tokens):

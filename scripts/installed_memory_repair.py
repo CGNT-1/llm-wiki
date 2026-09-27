@@ -1613,6 +1613,11 @@ def _validate_partial_legacy(path: Path, state_root: Path, source_state: str) ->
         return
     if kind != "file":
         raise ValueError("legacy database path has the wrong kind")
+    _validate_legacy_record(path, state_root, source_state)
+
+
+def _validate_legacy_record(path: Path, state_root: Path, source_state: str) -> None:
+    """A tombstone, or on an upgrade the legacy database itself."""
     try:
         _read_record(
             path,
