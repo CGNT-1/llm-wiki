@@ -37,8 +37,18 @@ from memory_state import (  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 FAILURE_LOG = REPORTS_DIR / "capture-failures.jsonl"
+# The capture-failure log is trimmed to its newest three quarters past this, so it never grows
+# without bound; the counters in hook state keep the totals. Basis unknown: value predates
+# measurement; review when a burst of failures pushes a day's records out before doctor reads
+# them.
 MAX_FAILURE_LOG_BYTES = 256 * 1024
+# Failure kinds counted in hook state; past it the least recently seen kind is dropped so the
+# state file stays bounded. The live state counts 5 kinds (2026-09-27).
 MAX_FAILURE_KINDS = 32
+# A failure reason is redacted, then cut to one bounded line of the capture-failure log (itself
+# capped by MAX_FAILURE_LOG_BYTES). Live reasons reach this cap (logs/capture-failures.jsonl,
+# 2026-09-27), so long ones are cut; Basis unknown: value predates measurement; review when a cut
+# reason hides its cause.
 MAX_REASON_CHARS = 200
 STATE_KEY = "capture_failures"
 

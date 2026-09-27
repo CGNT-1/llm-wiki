@@ -60,9 +60,19 @@ from reliable_memory import begin_immediate  # noqa: E402
 from secret_redact import redact_structure  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
+# Resources one blackboard claim may name (caller input); a claim over more is refused. Basis
+# unknown: value predates measurement; review when a real claim needs more.
 _MAX_RESOURCES = 64
+# One claimed resource is a path or a name; 512 bytes bounds caller input and a longer one is
+# refused. Basis unknown: value predates measurement; review when a real resource name is refused.
 _MAX_RESOURCE_BYTES = 512
+# A task, message or resolution is caller input written to a shared journal; a longer one is
+# refused, not cut. Security bound on untrusted input. Basis unknown: value predates measurement;
+# review when a real task description is refused.
 _MAX_TASK_BYTES = 4096
+# An agent name is an identifier, not prose; 128 bytes bounds caller input and a longer name is
+# refused. Basis unknown: value predates measurement; review when a host's real agent names come
+# near it.
 _MAX_AGENT_BYTES = 128
 # A claim's TTL is caller input: at least one second so the claim is observable at all.
 _MIN_TTL_SECONDS = 1

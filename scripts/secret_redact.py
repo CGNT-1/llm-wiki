@@ -150,8 +150,16 @@ _HIGH_ENTROPY_RE = re.compile(
     r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"
 )
 _PURE_HEX_RE = re.compile(r"^[0-9a-f]+$")
+# Shannon bits per character above which an unlabelled run is taken for a secret: random base64 is
+# near 6, hex at most 4, prose lower. Basis unknown: value predates measurement; review when a
+# real secret or a path is misjudged (see _MIN_BASE64_RUN).
 _ENTROPY_THRESHOLD = 4.0
+# A slash-separated run whose shortest segment is shorter than this reads as a path, not a key
+# (ba81f395: macOS temporary paths were redacted). Basis unknown: value predates measurement;
+# review when a key or a path is misjudged.
 _MIN_BASE64_SEGMENT = 3
+# The longest segment a high-entropy run needs before it is a secret (ba81f395). Basis unknown:
+# value predates measurement; review when a key or a path is misjudged.
 _MIN_BASE64_RUN = 16
 
 # Syntax a credential literal never contains: calls, subscripts, generics,

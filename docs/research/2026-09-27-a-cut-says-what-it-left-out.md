@@ -91,3 +91,31 @@ three fail on the code before this change).
   already carries as `flow_count` / `flows_truncated`.
 - Guard: `tests/test_a_definition_and_a_service_walk_say_what_they_left_out.py`,
   over real generations; all four fail on the code before this change.
+
+## Four more sites (2026-09-27, found by the law-9 basis pass)
+
+Same rule: lost information is kept within a real bound; a justified bound reports
+what it left out. Regression: `tests/test_the_last_cuts_say_what_they_left_out.py`
+(four behaviour cases fail on the code before this change).
+
+- `pyright_session` diagnostics budget (256 files, 16 MiB). A publication past it
+  was dropped without a trace, so the query for that document version waited out
+  its whole deadline (about 30 s in the test on the old code) and then answered an
+  unexplained partial. It now keeps the snapshot already held for that version, or
+  an empty one, marked `partial`, and the query answers at once. The bound stays: it
+  is the session's memory. A marker costs one fixed item, so the markers of all
+  open documents stay within 32 KiB above the budget. The file count never binds on
+  its own: a publication is only admitted for an open document, and open documents
+  are already capped at the same 256.
+- `install_pyright.MAX_CAUSE_DEPTH` (5). The bound stays — it also ends a cyclic
+  `__context__` chain — and a deeper chain now ends with
+  `... further causes not shown (more than 5)`.
+- `fresh_positions.MAX_FILES` (20 files re-read per answer, a latency bound). Rows
+  of a file past it keep their indexed line and now carry `line_not_refreshed: true`.
+- `mcp_server._NavigationSourceCache` (64 MiB, and at most
+  `MAX_NAVIGATION_GRAPH_FACTS` entries). Past it the next source was refused and its
+  spans left the navigation answer without a count. It now evicts the least recently
+  read source (an LRU, as `code_navigation`'s own document cache does) and re-reads
+  it if asked again, under the answer's deadline; no span is lost. Memory can exceed
+  the cap by at most one file (`MAX_NAVIGATION_SOURCE_BYTES`, 16 MiB), which the
+  answer needs in hand anyway.

@@ -19,7 +19,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,7 +58,9 @@ except ModuleNotFoundError:  # Python 3.11+ does not install the backport
     TOMLI = None
 
 SCHEMA_VERSION = "1.0"
-INDEX_FRESH_SECONDS = 24 * 60 * 60
+# The degraded-health summary injected into a session's context: past it the text is
+# cut and ends in "..." so the reader sees the cut. Basis unknown: value predates
+# measurement; review when a summary a session needs is seen cut.
 SUMMARY_LIMIT = 600
 VALID_STATUSES = ("ok", "degraded", "error", "skipped")
 VALID_REPAIR_ACTIONS = frozenset(
@@ -70,7 +72,12 @@ RUNTIME_DIRECTORIES = ("run", "logs", "cache")
 # contract. The rule lives in `installed_memory_repair.retire_stray_candidates`.
 # See `docs/research/2026-09-24-a-stray-candidate-is-retired-where-it-refuses.md`.
 COORDINATOR_QUARANTINE = "run/coordinator-quarantine"
+# Entries read from a pre-v4.0.0 `run/queue/` directory, which doctor only names and
+# refuses; past it the scan is reported truncated (`artifact_truncated`). Basis
+# unknown: value predates measurement; review never — the directory is retired.
 MAX_QUEUE_FILES = 200
+# `_read_bounded_json`'s default bound. Every doctor caller names its own bound, so
+# this applies only to a caller that does not; 64 KiB is refused, never cut.
 MAX_QUEUE_FILE_BYTES = 64 * 1024
 # The hook configuration is read under the bound the installer writes it with.
 MAX_CONFIG_BYTES = _hook_config.MAX_CONFIG_BYTES
@@ -79,18 +86,33 @@ MAX_CONFIG_BYTES = _hook_config.MAX_CONFIG_BYTES
 # 2026-09-23 — over the old 256 KiB, which silenced the scheduler and capture
 # checks exactly when they had something to say.
 MAX_STATE_BYTES = 4 * 1024 * 1024
+# An archive bag's manifest or index, read to check it (refused past the bound, not
+# cut). Basis unknown: value predates measurement, and the installed vault held no
+# archive bag on 2026-09-27 to measure; review when the first bags are written.
 MAX_MANIFEST_BYTES = 256 * 1024
-MAX_INDEX_PATHS = 10_000
-MAX_INDEX_DB_BYTES = 1024 * 1024 * 1024
 # A runtime lock file doctor reads (state and index locks); installer locks are bounded at 1 KiB.
 MAX_LOCK_BYTES = 4096
+# One queue result doctor reads back to check it. The largest result on the installed
+# vault on 2026-09-27 was 12 143 bytes, so 8 MiB is a guard on an untrusted file,
+# about 690 times a real one; refused past it, never cut.
 MAX_QUEUE_RESULT_BYTES = 8 * 1024 * 1024
+# An operational SQLite database doctor opens read-only; past it the check reports it
+# rather than reading. The same bound is repeated in installed_memory_repair. Basis:
+# a guard against reading an unbounded file into a health check; the live transaction
+# database was 62 MiB on 2026-09-26 (audit 2026-09-27 B-2), so review past ~200 MiB.
 MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
-# Rows one health read takes from an operational table. A table past it is reported
-# (`*_truncated` codes) and refuses `run/` deletion; nothing is judged from rows unseen.
+# Rows one health read takes from a small operational table (owners, leases, queue
+# ownership, queue and archive-index rows). A table past it is reported with its
+# `*_unknown`/`*_truncated` code and refuses `run/` deletion; nothing is judged from
+# rows unseen. The transaction and operation tables no longer read under it: they are
+# streamed whole (docs/research/2026-09-27-doctor-reads-every-transaction.md), because
+# at 29 275 rows the installed vault outgrew it. Basis unknown for the rest: value
+# predates measurement; review when any of those tables nears it.
 MAX_OPERATIONAL_ROWS = 10_000
 # Entries one runtime directory listing takes; past it the scan is reported truncated
-# and deletion stays refused (`archive_scan_truncated`, `artifact_truncated`).
+# and deletion stays refused (`archive_scan_truncated`, `artifact_truncated`). Basis
+# unknown: value predates measurement; `run/transactions/` held 5 547 entries on
+# 2026-09-27 — review when a listing nears it.
 MAX_RUNTIME_ENTRIES = 10_000
 # doctor's whole-run budget; one run widens it with --time-budget. basis unknown — value predates measurement; review when checks report budget exhaustion on an idle machine.
 DEFAULT_TIME_BUDGET_SECONDS = 5.0
@@ -98,13 +120,24 @@ DEFAULT_TIME_BUDGET_SECONDS = 5.0
 # Wait that out rather than reporting a healthy database as unreadable, but
 # stay far below the default time budget above.
 READ_BUSY_MS = 250
+# A generation build asked for without a budget (`doctor --rebuild-generation`,
+# `search_memory` rebuild); the nightly and the compile pass their own. A build out of
+# time stops and says so. Basis unknown: value predates measurement; review when a
+# manual rebuild on the installed vault is seen running out of time.
 DEFAULT_GENERATION_TIME_BUDGET_SECONDS = 60.0
+# A generation is stale once sources changed and a day passed without a refresh: the
+# nightly refreshes it daily, so one missed nightly is what this reports
+# (docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md).
 GENERATION_FRESH_SECONDS = 24 * 60 * 60
 # An unregistered, invalid generation directory touched this recently may be a build
 # in flight under another fence; the longest builder bound is 15 minutes. See
 # `docs/research/2026-09-14-a-build-in-flight-is-not-an-orphan.md`; the rule itself is
 # `generation_catalog.untouched_for`, shared with the prune.
 GENERATION_ORPHAN_GRACE_SECONDS = 24 * 60 * 60
+# The Codex hook probe starts `codex app-server` and asks for its hook list: the
+# whole probe gets 2 s of doctor's 5 s budget, and it is not started with less than
+# 0.25 s left. Basis unknown: values predate measurement (2026-07-17); review when
+# the probe is seen timing out on a healthy install.
 CODEX_HOOK_PROBE_SECONDS = 2.0
 CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
 # How long a probe that gave up waits for the peer it killed to be reaped.
@@ -112,6 +145,9 @@ CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
 # bounded by that deadline, Windows returned while the peer was still exiting
 # (PR #16, three jobs). The Pyright probe keeps the same 0.5 s budget.
 CODEX_HOOK_PROBE_CLEANUP_SECONDS = 0.5
+# Output kept from the probed Codex process (untrusted); past it the probe sets its
+# overflow flag and counts as failed rather than parsing a cut answer.
+# Basis unknown: value predates measurement; review if a real hook list is refused.
 MAX_CODEX_HOOK_PROBE_BYTES = 256 * 1024
 _CODEX_PROBE_NOT_COMPLETED = object()
 INDEX_COLUMNS = {"path", "title", "summary", "body", "project", "timestamp", "slug"}
@@ -135,8 +171,14 @@ QUEUE_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 # `docs/research/2026-09-02-where-undo-belongs-and-for-how-long.md`.
 from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
 
+# doctor's maintenance fence is a "repair" lease in the ownership registry, whose
+# timing is fixed there (operational_ownership._timing: 120 s TTL, 40 s heartbeat);
+# these must equal it, or the registry refuses the lease. A contract, not a tunable.
 MAINTENANCE_LEASE_SECONDS = 120
 MAINTENANCE_HEARTBEAT_SECONDS = 40.0
+# The runtime-root locking probe's share of the run: a local filesystem answers an
+# fcntl lock in microseconds, so 1 s only fails a network or hung mount, which the
+# check then reports. Basis unknown beyond that: value predates measurement.
 FILESYSTEM_PROBE_SECONDS = 1.0
 TRANSACTION_REQUIRED_COLUMNS = {
     "id",
@@ -723,22 +765,27 @@ def _artifact_kind(entry: Path, state_root: Path) -> str:
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _TRANSACTION_ID_RE = re.compile(r"[0-9a-z_-]{1,128}")
-# Open states first, then newest: an unordered bounded scan judged the oldest
-# 10 000 rows and never the ones that matter now (audit 2026-09-26 A-3,
-# docs/research/2026-09-26-doctor-reads-the-open-rows-first.md).
-_TRANSACTION_ORDER = " ORDER BY state IN ('committed', 'discarded'), rowid DESC"
+# Every row is read, streamed in batches, so no order is needed: a row cap judged a
+# third of the installed vault (29 275 transactions, 37 509 operations on 2026-09-27)
+# and the whole scan costs 0.63 s there. The operation read has no join, so an
+# operation whose transaction is gone reaches the identity check instead of vanishing.
+# docs/research/2026-09-27-doctor-reads-every-transaction.md.
+_TRANSACTION_IDS_QUERY = 'SELECT id FROM "transaction"'
 _TRANSACTION_QUERY = (
     "SELECT id, operation_id, request_hash, state, preconditions_json, "
     "plan_hash, created_at, updated_at, artifacts_pruned_at "
-    'FROM "transaction"' + _TRANSACTION_ORDER
+    'FROM "transaction"'
 )
 _OPERATION_QUERY = (
-    "SELECT operation.transaction_id, operation.position, operation.kind, "
-    "operation.path, operation.before_hash, operation.after_hash, "
-    "operation.parent_device, operation.parent_inode, operation.applied "
-    'FROM "operation" JOIN "transaction" ON "transaction".id = operation.transaction_id'
-    " ORDER BY \"transaction\".state IN ('committed', 'discarded'), \"transaction\".rowid DESC"
+    "SELECT transaction_id, position, kind, path, before_hash, after_hash, "
+    'parent_device, parent_inode, applied FROM "operation"'
 )
+# Rows fetched per step of the streamed scan, so memory holds one batch rather than a
+# table: a full materialised scan peaked at 67 MB of Python objects on the 29 275-row
+# vault. 1 000 rows keep a batch well under 1 MB at the measured 291-byte mean
+# preconditions and bound the time between deadline checks; review if a batch's rows
+# grow past that mean by orders of magnitude.
+SCAN_BATCH_ROWS = 1_000
 _OWNER_TABLE_QUERIES = {
     "writer_owners": "SELECT * FROM writer_owners LIMIT ?",
     "maintenance_owners": "SELECT * FROM maintenance_owners LIMIT ?",
@@ -809,7 +856,7 @@ def _valid_operation_row(operation: sqlite3.Row, known_ids: set[str]) -> bool:
 
 
 def _operation_positions(
-    operation_rows: list[sqlite3.Row], known_ids: set[str]
+    operation_rows: Iterator[sqlite3.Row], known_ids: set[str]
 ) -> tuple[dict[str, list[int]], bool]:
     """Positions recorded per transaction, and whether any row was malformed."""
     positions: dict[str, list[int]] = {
@@ -824,15 +871,21 @@ def _operation_positions(
     return positions, corrupt
 
 
-def _valid_plan_hash(row: sqlite3.Row, state: str) -> bool:
-    """A plan hash is absent exactly while no plan was ever computed.
+# States a row can reach straight out of `preparing`, before any plan or operation was
+# written: `_promoted_for_recovery` discards, and `_commit_promotion` quarantines when
+# binding the project reservation refuses, rolling back the plan and operations it was
+# writing in the same database transaction (9 such rows on the installed vault,
+# 2026-09-27; docs/research/2026-09-27-doctor-reads-every-transaction.md).
+_UNPLANNED_STATES = frozenset({"preparing", "discarded", "quarantined"})
 
-    `_promoted_for_recovery` discards straight out of `preparing`, so a
-    discarded row may still carry the empty string the insert wrote.
-    """
-    if row["plan_hash"] == "" and state in {"preparing", "discarded"}:
-        return True
-    return _is_digest(row["plan_hash"])
+
+def _never_planned(row: sqlite3.Row, state: str) -> bool:
+    return row["plan_hash"] == "" and state in _UNPLANNED_STATES
+
+
+def _valid_plan_hash(row: sqlite3.Row, state: str) -> bool:
+    """A plan hash is absent exactly while no plan was ever computed."""
+    return _never_planned(row, state) or _is_digest(row["plan_hash"])
 
 
 def _loaded_preconditions(row: sqlite3.Row) -> object:
@@ -884,23 +937,16 @@ def _operation_shape_corrupt(
     positions = operation_positions.get(row["id"], [])
     if positions != list(range(len(positions))):
         return True
-    return state not in {"preparing", "discarded"} and not positions
+    may_own_none = state in {"preparing", "discarded"} or _never_planned(row, state)
+    return not positions and not may_own_none
 
 
 def _transaction_row_corrupt(
-    row: sqlite3.Row, state: str, operation_positions: dict[str, list[int]] | None
+    row: sqlite3.Row, state: str, operation_positions: dict[str, list[int]]
 ) -> bool:
-    """Corrupt on evidence only.
-
-    `operation_positions` is None when the operation scan hit the read
-    ceiling. The rows past the ceiling were never read, so a transaction that
-    appears to own no operations may simply own operations nobody looked at.
-    An incomplete read abstains instead of accusing.
-    """
+    """Corrupt on evidence only: every operation row was read, so an absent one is absent."""
     if not _valid_transaction_row(row, state):
         return True
-    if operation_positions is None:
-        return False
     return _operation_shape_corrupt(row, state, operation_positions)
 
 
@@ -950,7 +996,7 @@ def _scan_one_transaction_row(
     states: dict[str, int],
     details: dict,
     codes: set[str],
-    operation_positions: dict[str, list[int]] | None,
+    operation_positions: dict[str, list[int]],
     transaction_columns: set[str],
     cutoff: datetime,
     state_root: Path,
@@ -968,24 +1014,31 @@ def _scan_one_transaction_row(
     return _transaction_row_corrupt(row, state, operation_positions)
 
 
+class _RowVerdict(NamedTuple):
+    """What the streamed transaction scan found across every row."""
+
+    codes: set[str]
+    corrupt: bool
+    artifacts_mismatched: bool
+
+
 def _scan_transaction_rows(
     database: sqlite3.Connection,
-    transaction_rows: list[sqlite3.Row],
-    operation_positions: dict[str, list[int]] | None,
+    transaction_rows: Iterator[sqlite3.Row],
+    operation_positions: dict[str, list[int]],
     transaction_columns: set[str],
     *,
+    artifacts: set[str] | None,
+    known_ids: set[str],
     state_root: Path,
     now: datetime,
-    deadline: float,
     details: dict,
     states: dict[str, int],
-) -> tuple[set[str], bool]:
+) -> _RowVerdict:
     codes: set[str] = set()
-    corrupt = False
+    corrupt = mismatched = False
     cutoff = now - timedelta(days=UNDO_RETENTION_DAYS)
     for row in transaction_rows:
-        if _deadline_reached(deadline):
-            raise TimeoutError("transaction check deadline")
         corrupt = _scan_one_transaction_row(
             database,
             row,
@@ -997,26 +1050,19 @@ def _scan_transaction_rows(
             cutoff=cutoff,
             state_root=state_root,
         ) or corrupt
-    return codes, corrupt
+        mismatched = _artifact_mismatch(row, artifacts, known_ids) or mismatched
+    return _RowVerdict(codes, corrupt, mismatched)
 
 
-def _bounded_operational_rows(
-    database: sqlite3.Connection, query: str, details: dict, truncation_code: str
-) -> list[sqlite3.Row]:
-    """Rows up to the read ceiling, recording a truncation as a read limit.
-
-    A truncated read refuses `run/` deletion — it cannot prove the table is
-    safe to lose — but it alleges nothing about the rows it never saw.
-    """
-    rows = database.execute(
-        query + " LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
-    ).fetchall()
-    if len(rows) <= MAX_OPERATIONAL_ROWS:
-        return rows
-    details["codes"].append(truncation_code)
-    details["truncated_scans"].append(truncation_code)
-    details["deletion_codes"].append("transaction_scan_incomplete")
-    return rows[:MAX_OPERATIONAL_ROWS]
+def _streamed_rows(
+    database: sqlite3.Connection, query: str, deadline: float
+) -> Iterator[sqlite3.Row]:
+    """Every row of the query, one batch in memory at a time, within the deadline."""
+    cursor = database.execute(query)
+    while batch := cursor.fetchmany(SCAN_BATCH_ROWS):
+        if _deadline_reached(deadline):
+            raise TimeoutError("transaction check deadline")
+        yield from batch
 
 
 def _lease_live(value: object, now: datetime) -> bool:
@@ -1137,32 +1183,60 @@ def _count_owner_tables(
 
 
 def _artifact_mismatch(
-    row: sqlite3.Row, artifacts: set[str], known_ids: set[str]
+    row: sqlite3.Row, artifacts: set[str] | None, known_ids: set[str]
 ) -> bool:
+    """Whether the row and the undo directory disagree; None abstains on the directory."""
     transaction_id = row["id"]
     if not isinstance(transaction_id, str) or transaction_id not in known_ids:
         return True
+    if artifacts is None:
+        return False
     expected = row["state"] != "discarded" and row["artifacts_pruned_at"] is None
     return (transaction_id in artifacts) != expected
 
 
-def _artifacts_inconsistent(
-    state_root: Path,
-    transaction_rows: list[sqlite3.Row],
-    known_ids: set[str],
-    details: dict,
-    deadline: float,
-) -> bool:
-    artifacts, unsafe_artifacts = _transaction_artifacts(state_root, deadline)
-    if unsafe_artifacts or artifacts - known_ids:
+def _checked_artifacts(
+    state_root: Path, known_ids: set[str], details: dict, deadline: float
+) -> set[str] | None:
+    """The undo artifacts on disk, or None when the listing is incomplete.
+
+    `run/transactions/` is listed under MAX_RUNTIME_ENTRIES; past it (or with an
+    unsafe entry) the names read are not all there are, and a row whose directory
+    was not listed looked like a row whose directory is missing - corruption
+    alleged from an entry never read. The deletion refusal stays; the accusation goes.
+    """
+    artifacts, incomplete = _transaction_artifacts(state_root, deadline)
+    if incomplete or artifacts - known_ids:
         details["deletion_codes"].append("transaction_artifact_state_unknown")
-    return any(
-        _artifact_mismatch(row, artifacts, known_ids) for row in transaction_rows
-    )
+    return None if incomplete else artifacts
 
 
-def _known_transaction_ids(rows: list[sqlite3.Row]) -> set[str]:
-    return {row["id"] for row in rows if isinstance(row["id"], str)}
+def _transaction_ids(database: sqlite3.Connection, deadline: float) -> set[str]:
+    rows = _streamed_rows(database, _TRANSACTION_IDS_QUERY, deadline)
+    return {row[0] for row in rows if isinstance(row[0], str)}
+
+
+def _mark_corrupt(details: dict) -> None:
+    details["codes"].append("transaction_metadata_corrupt")
+    details["deletion_codes"].append("transaction_state_corrupt")
+    details["state_invalid"] = True
+
+
+@contextlib.contextmanager
+def _one_snapshot(database: sqlite3.Connection) -> Iterator[None]:
+    """The id, operation and transaction reads see one state of the database.
+
+    The read connection autocommits, so each statement saw its own state: a
+    transaction committed between the reads showed up as a row with no operations,
+    or an operation of an unknown transaction, and was called corrupt. One read
+    transaction holds SQLite's shared lock for the scan (0.63 s on the installed
+    vault); writers wait within their busy timeout rather than being misread.
+    """
+    database.execute("BEGIN")
+    try:
+        yield
+    finally:
+        database.execute("COMMIT")
 
 
 def _scan_transaction_tables(
@@ -1176,37 +1250,28 @@ def _scan_transaction_tables(
     details: dict,
     states: dict[str, int],
 ) -> None:
-    transaction_rows = _bounded_operational_rows(
-        database, _TRANSACTION_QUERY, details, "transaction_scan_truncated"
-    )
-    operation_rows = _bounded_operational_rows(
-        database, _OPERATION_QUERY, details, "transaction_operation_scan_truncated"
-    )
-    known_ids = _known_transaction_ids(transaction_rows)
-    operation_positions, corrupt = _operation_positions(operation_rows, known_ids)
-    complete = (
-        "transaction_operation_scan_truncated" not in details["truncated_scans"]
-    )
-    codes, rows_corrupt = _scan_transaction_rows(
-        database,
-        transaction_rows,
-        operation_positions if complete else None,
-        transaction_columns,
-        state_root=state_root,
-        now=now,
-        deadline=deadline,
-        details=details,
-        states=states,
-    )
-    details["codes"] = sorted(set(details["codes"]) | codes)
+    """Every transaction and operation row, streamed; nothing is judged from a sample."""
+    with _one_snapshot(database):
+        known_ids = _transaction_ids(database, deadline)
+        operation_positions, operations_corrupt = _operation_positions(
+            _streamed_rows(database, _OPERATION_QUERY, deadline), known_ids
+        )
+        verdict = _scan_transaction_rows(
+            database,
+            _streamed_rows(database, _TRANSACTION_QUERY, deadline),
+            operation_positions,
+            transaction_columns,
+            artifacts=_checked_artifacts(state_root, known_ids, details, deadline),
+            known_ids=known_ids,
+            state_root=state_root,
+            now=now,
+            details=details,
+            states=states,
+        )
+    details["codes"] = sorted(set(details["codes"]) | verdict.codes)
     _count_owner_tables(database, tables, details, now)
-    inconsistent = _artifacts_inconsistent(
-        state_root, transaction_rows, known_ids, details, deadline
-    )
-    if corrupt or rows_corrupt or inconsistent:
-        details["codes"].append("transaction_metadata_corrupt")
-        details["deletion_codes"].append("transaction_state_corrupt")
-        details["state_invalid"] = True
+    if operations_corrupt or verdict.corrupt or verdict.artifacts_mismatched:
+        _mark_corrupt(details)
 
 
 def _operation_columns(
@@ -1295,6 +1360,12 @@ _COMPILE_RECEIPT_PREFIX = "knowledge/daily/receipts/v3-"
 _STAGED_ARTIFACT_RE = re.compile(r"after/[0-9]{6}\.bin")
 _DAILY_LOGICAL_PATH_RE = re.compile(r"knowledge/daily/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md")
 _RECEIPT_RECORD_RE = re.compile(rb"(?s)```json\n(.*?)\n```")
+# Reading a quarantined compile's staged files to see whether a later compile
+# superseded it; a file past its bound makes the check answer "not superseded", never
+# a guess. The receipt and day bounds are compile_memory.MAX_RECEIPT_BYTES and
+# MAX_SOURCE_BYTES (the writer's own bounds; doctor does not import the compile). The
+# largest of 5 537 staged plans on the installed vault on 2026-09-27 was 2 758 bytes,
+# so 4 MiB for a plan is a guard, not a fit.
 _MAX_STAGED_PLAN_BYTES = 4 * 1024 * 1024
 _MAX_STAGED_RECEIPT_BYTES = 1024 * 1024
 _MAX_DAY_BYTES = 4 * 1024 * 1024
@@ -1566,33 +1637,7 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     status = _transaction_status(
         states, problem, invalid_state, details["quarantined_unresolved"]
     )
-    return _result("transactions", *_truncated_scan_verdict(details, status, message), details)
-
-
-def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[str, str]:
-    """A scan that stopped at its row bound says so in the line a person reads.
-
-    On 2026-09-23 the check said "healthy" with `quarantined: 27` while the
-    database held 117 quarantined rows and both scans were truncated. Ordinary
-    growth past the read ceiling is not a health problem
-    (`tests/test_doctor_bounded_scan_truth.py`), so the status stays; the
-    message stops presenting a bounded count as the whole truth.
-    """
-    if status != "ok" or not details.get("truncated_scans"):
-        return status, message
-    return (
-        "ok",
-        "Transaction state is healthy within the scanned rows; the scan stopped at "
-        "its row bound, so its counts are a lower bound. Rows by state, counted "
-        f"whole: {_state_totals_text(details.get('state_totals'))}.",
-    )
-
-
-def _state_totals_text(totals: object) -> str:
-    """`committed 3, quarantined 1`, or `unknown` when the whole-table count failed."""
-    if not isinstance(totals, dict) or not totals:
-        return "unknown"
-    return ", ".join(f"{state} {count}" for state, count in sorted(totals.items()))
+    return _result("transactions", status, message, details)
 
 
 def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
@@ -1608,7 +1653,6 @@ def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
         "quarantined_unresolved": 0,
         "read_error": False,
         "state_invalid": False,
-        "truncated_scans": [],
         "deletion_codes": [],
     }
     return details, states
@@ -1648,21 +1692,7 @@ def _transaction_check(
         return _unreadable_transactions(details, "Transaction state is unreadable.")
     if incomplete is not None:
         return incomplete
-    details["state_totals"] = _transaction_state_totals(path)
     return _transaction_result(details, states)
-
-
-def _transaction_state_totals(path: Path) -> dict[str, int]:
-    """Exact rows per state from one aggregate, whatever the scan bound read.
-
-    See `docs/research/2026-09-24-every-store-has-a-bound.md`.
-    """
-    try:
-        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
-            rows = database.execute('SELECT state, COUNT(*) FROM "transaction" GROUP BY state')
-            return {str(state): int(count) for state, count in rows}
-    except sqlite3.Error:
-        return {}
 
 
 _QUEUE_COUNT_QUERIES = {
@@ -2731,6 +2761,9 @@ _LSP_OWNER_FIELDS = {
 # Written since 2026-09-25 when the platform can name a process start (audit C-39).
 _LSP_OWNER_OPTIONAL_FIELDS = {"owner_start_identity"}
 _LSP_LEASE_OPTIONAL_FIELDS = {"manager_start_identity", "server_start_identity"}
+# The writer's bound (lsp_process._MAX_START_IDENTITY_CHARS). The longest identity
+# process_liveness builds is Linux's `linux:<36-char boot id>:<start ticks>`, under
+# 70 characters, so a longer value is not one this runtime wrote.
 _LSP_START_IDENTITY_CHARS = 128
 _LSP_LEASE_FIELDS = {
     "expires_at",
@@ -3054,6 +3087,11 @@ def _record_pyright_degradation(identity, details: dict, codes: list[str]) -> No
         _extend_unique(codes, ("pyright_version_mismatch",))
 
 
+# Reading an LSP owner, lease or failure record from `run/lsp/` (untrusted JSON). The
+# largest such record on the installed vault on 2026-09-27 was 219 bytes; a failure
+# record carries at most a 1 KiB stderr tail, so 64 KiB is a guard, refused past it.
+# Records are flat objects; a nesting deeper than 32 is not one this runtime wrote.
+# The read step is 4 KiB because the whole record is small. Review never.
 _LSP_RECORD_BYTES = 64 * 1024
 _LSP_READ_CHUNK_BYTES = 4096
 _LSP_JSON_MAX_DEPTH = 32
@@ -8385,6 +8423,8 @@ def _run_repairs(context: _RepairContext) -> None:
 # (`snapshot_knowledge.py`); a nightly period plus a day of grace. See
 # `docs/research/2026-09-24-the-documents-say-what-the-code-does.md`.
 BACKUP_FRESH_SECONDS = 2 * 24 * 3600
+# `git log -1` in the snapshot repository, a local read that answers in milliseconds;
+# past 5 s the check has no snapshot time to judge. Basis unknown beyond that.
 BACKUP_GIT_TIMEOUT_SECONDS = 5
 
 

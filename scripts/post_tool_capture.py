@@ -71,6 +71,8 @@ SIGNIFICANT_TOOLS = frozenset(
 )
 
 # Per-(slug, tool, target) dedupe window.
+# The same (slug, tool, target) captured again within this window is skipped as a duplicate. A
+# noise trade-off, not measured; review when distinct edits are lost.
 RATE_LIMIT_SECONDS = 60
 
 # Bash commands shorter than this are noise (cd, pwd, ls, etc.).

@@ -25,7 +25,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 SESSION_EVIDENCE_DIR = "knowledge/raw/sessions"
+# One session record; a longer one is cut with a visible note. The largest live record is 358 KB
+# (2026-09-27); see docs/research/2026-08-26-a-record-too-large-to-keep-whole.md.
 MAX_EVIDENCE_BYTES = 512 * 1024
+# One tool call's target in a session record, redacted before it is cut
+# (docs/research/2026-09-26-a-tool-line-is-redacted-before-it-is-cut.md). A record-size trade-off,
+# not measured.
 MAX_TOOL_LINE_CHARS = 200
 # The host's subagent tool: `Agent`, named `Task` by older hosts.
 SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
@@ -43,7 +48,12 @@ _TOOL_INPUT_FIELDS = ("command", "file_path", "path", "pattern", "query", "url")
 _LINE_BREAKING = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]+")
 
 
+# The longest session-record file stem, far under the 255-byte NAME_MAX of common
+# filesystems so a digest suffix still fits. Basis unknown beyond that: value predates
+# measurement; review if record names collide or are cut.
 _NAME_LIMIT = 64
+# 12 hex characters (48 bits) keep two unsafe session ids from sharing a record name; a collision
+# needs about 16 million records.
 _NAME_DIGEST_CHARS = 12
 
 
@@ -79,6 +89,8 @@ def evidence_relative_path(day: str, session_id: str, document: bytes = b"") -> 
     )
 
 
+# 8 hex characters (32 bits) tell apart the captures of one session on one day; a collision needs
+# about 65 000 captures of that session.
 PART_DIGEST_CHARS = 8
 
 

@@ -36,6 +36,8 @@ DEFAULT_MAX_ROWS = 100_000
 DEFAULT_MAX_DELETE = 1_000
 MAX_READ_EVENTS = 1_000
 MAX_CANDIDATE_IDS = 1_000
+# Event rows one candidate page scans; the cursor resumes after the last candidate returned, so
+# the bound sizes one read and loses nothing.
 MAX_CANDIDATE_SCAN_EVENTS = 100_000
 # The telemetry database on disk; the evidence graph's own bound is 16 GiB.
 MAX_DATABASE_BYTES = 512 * 1024 * 1024

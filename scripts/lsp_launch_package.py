@@ -40,6 +40,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from bounded_io import IO_CHUNK_BYTES
 from lsp_server_profile import PackageLaunch
 
 # The sealed modes. `0o500` on a directory is what stops an entry being created,
@@ -51,8 +52,10 @@ PRIVATE_DIRECTORY_MODE = 0o700
 
 MANIFEST_NAME = "package.json"
 LAUNCH_PREFIX = "launch-"
+# The largest file a launched server package holds: typescript.js is 9.1 MB, Pyright's largest
+# 3.1 MB (measured in cache/code-tools 2026-09-27). 64 MiB, about 7 times that, refuses a sealed
+# copy that would fill run/lsp/. Review when a pinned server grows past it.
 MAX_LAUNCH_ENTRY_BYTES = 64 * 1024 * 1024
-_READ_CHUNK_BYTES = 64 * 1024
 
 
 class LaunchTreeError(RuntimeError):
@@ -164,7 +167,7 @@ def _digest_descriptor(descriptor: int, checkpoint: Callable[[], None]) -> str:
     total = 0
     while True:
         checkpoint()
-        chunk = os.read(descriptor, _READ_CHUNK_BYTES)
+        chunk = os.read(descriptor, IO_CHUNK_BYTES)
         if not chunk:
             return digest.hexdigest()
         total += len(chunk)

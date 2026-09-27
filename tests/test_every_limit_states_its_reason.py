@@ -209,9 +209,30 @@ def _is_limit(node: ast.stmt) -> bool:
     return pair is not None and bool(LIMIT_NAME.search(pair[0].lstrip("_"))) and _numeric(pair[1])
 
 
+_PRAGMA = re.compile(r"#\s*(noqa|type:\s*ignore|pragma|pyright:|fmt:)", re.IGNORECASE)
+
+
+def _words_in_comment(line: str) -> bool:
+    """A comment that says something: not a lint pragma, not a rule of dashes."""
+    comment = line[line.index("#") :] if "#" in line else ""
+    return bool(comment) and not _PRAGMA.search(comment) and bool(re.search(r"[A-Za-z]{3}", comment))
+
+
+def _own_block(lines: list[str], lineno: int) -> list[str]:
+    """The definition's line and the unbroken run of lines directly above it."""
+    start = lineno - 1
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    return lines[start:lineno]
+
+
 def _commented(lines: list[str], lineno: int) -> bool:
-    """A `#` on the definition's line or the four above it."""
-    return any("#" in line for line in lines[max(0, lineno - 5) : lineno])
+    """A worded comment in the definition's own block, not one borrowed across a blank line.
+
+    Counting any `#` within four lines let an import's `# noqa: E402`, a section
+    rule, or the comment of the constant above stand in for a basis.
+    """
+    return any(_words_in_comment(line) for line in _own_block(lines, lineno))
 
 
 def _bare_limits(path: Path) -> set[str]:
@@ -237,6 +258,27 @@ def test_the_limit_scanner_sees_a_bare_constant() -> None:
     tree = ast.parse("\n".join(lines))
     found = [node for node in tree.body if _is_limit(node) and not _commented(lines, node.lineno)]
     assert [_assigned(node)[0] for node in found] == ["MAX_WIDGETS"]
+
+
+def test_a_pragma_a_rule_or_a_neighbour_is_not_a_basis() -> None:
+    """The four-line window used to accept any `#`: an import's noqa, a dashed rule, the comment above a blank line."""
+    lines = [
+        "import os  # noqa: E402",
+        "MAX_AFTER_IMPORT = 1",
+        "",
+        "# ------------------------------------------------",
+        "MAX_UNDER_RULE = 2",
+        "",
+        "# Basis: the widget protocol allows three.",
+        "",
+        "MAX_ACROSS_BLANK = 3",
+        "# Basis: both follow the same widget protocol.",
+        "MAX_GROUPED = 4",
+        "MAX_GROUPED_TOO = 5",
+    ]
+    tree = ast.parse("\n".join(lines))
+    found = [node for node in tree.body if _is_limit(node) and not _commented(lines, node.lineno)]
+    assert [_assigned(node)[0] for node in found] == ["MAX_AFTER_IMPORT", "MAX_UNDER_RULE", "MAX_ACROSS_BLANK"]
 
 
 

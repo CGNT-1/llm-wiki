@@ -5428,13 +5428,14 @@ def test_structural_callback_reuses_anchor_source_for_graph_spans(
     assert reads == 1
 
 
-def _assert_cache_rejection_is_remembered(cache, reads: int) -> None:
-    assert reads == 1
-    assert cache._bytes == 0
-    assert len(cache._values) == 1
+def _assert_the_cache_holds_the_newest_source(cache, reads: int) -> None:
+    """The source past the cap evicted the older one instead of being refused."""
+    assert reads == 2
+    assert cache._bytes == 5
+    assert list(key[2] for key in cache._values) == ["large.py"]
 
 
-def test_navigation_source_cache_remembers_byte_cap_rejections(
+def test_navigation_source_cache_evicts_instead_of_refusing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5453,9 +5454,11 @@ def test_navigation_source_cache_remembers_byte_cap_rejections(
     monkeypatch.setattr(mcp_server, "_navigation_source_bytes", read_source)
     cache = mcp_server._NavigationSourceCache()
 
-    assert cache.read(scope, "large.py", deadline=time.monotonic() + SHORT_TIMEOUT) is None
-    assert cache.read(scope, "large.py", deadline=time.monotonic() + SHORT_TIMEOUT) is None
-    _assert_cache_rejection_is_remembered(cache, reads)
+    deadline = time.monotonic() + SHORT_TIMEOUT
+    assert cache.read(scope, "small.py", deadline=deadline)[0] == b"12345"
+    assert cache.read(scope, "large.py", deadline=deadline)[0] == b"12345"
+    assert cache.read(scope, "large.py", deadline=deadline)[0] == b"12345"
+    _assert_the_cache_holds_the_newest_source(cache, reads)
 
 
 def test_navigation_calls_use_lightweight_evidence_spans(

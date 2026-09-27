@@ -35,6 +35,8 @@ MAX_HINT_SYMBOLS = 200_000
 PAGE_ROWS = 10_000
 EXPORT_BUDGET_SECONDS = 300.0
 MAX_LOOKUP_ROWS = 3
+# One field (a name, path or route) of a graph hint injected into agents' searches; cut so a hint
+# stays one short line. A token-cost trade-off, not measured; review when a real path is cut.
 MAX_FIELD_CHARS = 160
 _CHECKOUT_ID = re.compile(r"checkout:([0-9a-f]{64})")
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")

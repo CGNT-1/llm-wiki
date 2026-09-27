@@ -13842,6 +13842,8 @@ def _process_snapshot_posix() -> list[tuple[int, int, int, str]] | None:
 
 
 _TH32CS_SNAPPROCESS = 0x2
+# PROCESSENTRY32.szExeFile is CHAR[MAX_PATH] and MAX_PATH is 260 (Win32 tlhelp32.h); the ctypes
+# layout must match it. External contract.
 _MAX_PROCESS_PATH = 260
 
 
@@ -14375,6 +14377,9 @@ def _run_processor_child(
             run.stop()
 
 
+# The pause between claim attempts while the queue database is busy, within the
+# caller's deadline. Basis unknown: value predates measurement; review if claims
+# show contention in doctor or the nightly log.
 _CLAIM_BUSY_RETRY_SECONDS = 0.05
 
 

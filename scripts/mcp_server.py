@@ -47,6 +47,7 @@ import re
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
@@ -68,15 +69,33 @@ from bounded_io import read_stable_bytes  # noqa: E402
 # A queue commit locks readers out for milliseconds; wait it out instead of
 # reporting a live queue as unreadable.
 QUEUE_READ_BUSY_MS = 1_000
+# Bounds on what one tool call reads or accepts. The input bounds are published in
+# the tools' JSON schemas (`maxLength`, `maxItems`, `maximum`), so a client sees them
+# before calling, and a value past one is refused with an error, never cut.
+# A page read whole: the largest note on the installed vault on 2026-09-27 was about
+# 19 KB, so 4 MiB refuses only a file that is not a note (slugs cannot reach journals).
 MAX_MCP_PAGE_BYTES = 4 * 1024 * 1024
+# One cited evidence slice and all of an answer's slices together; past either the
+# answer fails by name rather than quoting a cut span. Basis unknown: values predate
+# measurement; review if grounded answers are refused for their evidence size.
 MAX_MCP_EVIDENCE_BYTES = 64 * 1024
 MAX_MCP_TOTAL_EVIDENCE_BYTES = 256 * 1024
+# A search question (characters). Basis unknown: value predates measurement; a
+# question is a sentence, so 8 192 only refuses a pasted document.
 MAX_MCP_QUERY_LENGTH = 8_192
+# A page slug is one file name: NAME_MAX, 255 bytes on ext4/APFS/NTFS.
 MAX_MCP_SLUG_LENGTH = 255
+# get_context's lists: pages per call, and the `include` list the tool still accepts
+# for compatibility and ignores (bounded so an ignored argument costs nothing). Basis
+# unknown: values predate measurement.
 MAX_MCP_CONTEXT_SLUGS = 20
 MAX_MCP_CONTEXT_INCLUDE = 10
 MAX_MCP_INCLUDE_LENGTH = 64
+# The largest token_budget a caller may ask get_context for. Basis unknown: value
+# predates measurement; review if a client's context window makes it too small.
 MAX_MCP_CONTEXT_TOKENS = 32_768
+# An error message returned to a client, after secret redaction: a display bound so a
+# failing tool never answers with a whole traceback.
 MAX_MCP_ERROR_CHARS = 256
 # Every MCP tool call's default deadline unless a longer one is declared
 # (docs/research/2026-09-25-a-grounded-recall-has-the-time-it-needs-and-no-more.md).
@@ -84,6 +103,9 @@ MCP_OPERATION_SECONDS = 10.0
 # What a lexical-only pass needs, kept back from the hybrid run: 0.13-0.19 s
 # measured on the live vault on 2026-09-25, five times over.
 LEXICAL_FALLBACK_RESERVE_SECONDS = 1.0
+# A precise architecture call's deadline, which may include starting a language
+# server cold. Basis unknown: value predates measurement (2026-07-31); review when a
+# cold start is timed on the installed profiles. A settings candidate.
 MCP_LSP_STARTUP_SECONDS = 60.0
 # CODE-03: indexing a repository builds a whole generation, so its budget is a
 # measurement, not a choice. The real second repository on this machine --
@@ -93,12 +115,20 @@ MCP_LSP_STARTUP_SECONDS = 60.0
 # rather than half-built, because the build registers only after every artifact
 # is written, fsynced and validated.
 MCP_REPOSITORY_INDEX_SECONDS = 600.0
+# One repository source file read to answer a navigation question (untrusted input);
+# a larger file is refused by lsp_security, never cut. Basis unknown: value predates
+# measurement; review if a real source file is refused.
 MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
 # Graph facts one navigation answer may gather (nodes of a symbol, locations, cached
 # sources). Answers render at most `code_navigation_renderer.MAX_LIMIT` rows and say
 # how many they left out; this bound is a hundred times that. CALLS edges are read
 # anchored on the symbol's nodes (`_anchored_call_edges`), so the bound is per symbol.
 MAX_NAVIGATION_GRAPH_FACTS = 10_000
+# One answer's cache of sources it read: four of the largest files it may read. Past it
+# the least recently read source is evicted and read again if asked for, so no span
+# drops out of the answer (it used to refuse the next source silently, 2026-09-27).
+# The value bounds memory, not correctness; basis unknown beyond that, review if one
+# answer re-reads the same file repeatedly.
 MAX_NAVIGATION_SOURCE_CACHE_BYTES = 64 * 1024 * 1024
 PRECISE_ARCHITECTURE_MODES = frozenset(
     {"definition", "references", "implementations", "type", "diagnostics"}
@@ -2740,30 +2770,44 @@ def _navigation_source_bytes(
 
 
 class _NavigationSourceCache:
+    """The sources one answer read, least recently read evicted first.
+
+    It used to refuse a source once the cache was full, and that source's spans
+    left the answer without a count. Evicting instead keeps every span: a source
+    read again costs one bounded read under the answer's deadline.
+    """
+
     __slots__ = ("_bytes", "_values")
 
     def __init__(self) -> None:
-        self._values: dict[tuple[str, str, str], tuple[bytes, str] | None] = {}
+        self._values: OrderedDict[tuple[str, str, str], tuple[bytes, str]] = OrderedDict()
         self._bytes = 0
 
     def read(self, scope, relative_path: str, *, deadline: float | None):
         key = (scope.repository_id, scope.checkout_id, relative_path)
-        if key in self._values:
-            return self._values[key]
-        if len(self._values) >= MAX_NAVIGATION_GRAPH_FACTS:
-            return None
+        cached = self._values.get(key)
+        if cached is not None:
+            self._values.move_to_end(key)
+            return cached
         content = _navigation_source_bytes(scope, relative_path, deadline=deadline)
         return self._remember(key, content)
 
     def _remember(self, key, content: bytes):
-        """Cache the bytes unless they would push the cache past its ceiling."""
-        if self._bytes + len(content) > MAX_NAVIGATION_SOURCE_CACHE_BYTES:
-            self._values[key] = None
-            return None
         cached = (content, hashlib.sha256(content).hexdigest())
+        self._make_room(len(content))
         self._values[key] = cached
         self._bytes += len(content)
         return cached
+
+    def _make_room(self, incoming: int) -> None:
+        """Evict the least recently read sources until `incoming` bytes and one entry fit."""
+        while self._values and self._over_budget(incoming):
+            _key, (evicted, _digest) = self._values.popitem(last=False)
+            self._bytes -= len(evicted)
+
+    def _over_budget(self, incoming: int) -> bool:
+        too_many = len(self._values) >= MAX_NAVIGATION_GRAPH_FACTS
+        return too_many or self._bytes + incoming > MAX_NAVIGATION_SOURCE_CACHE_BYTES
 
 
 def _navigation_digest(value: object) -> str | None:
@@ -6701,7 +6745,9 @@ def run_server() -> int:
     return exit_code
 
 
-# How long a closing server waits for model inference to reach a safe point.
+# How long a closing server waits for model inference to reach a safe point. Basis
+# unknown: value predates measurement; a warm question costs about 1.3 s and a cold
+# one about 12 s (WARMUP_LIMIT_SECONDS above), so 30 s outlasts one of each.
 SHUTDOWN_INFERENCE_SECONDS = 30.0
 
 

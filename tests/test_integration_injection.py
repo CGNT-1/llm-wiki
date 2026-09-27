@@ -40,6 +40,19 @@ ROOT = Path(__file__).resolve().parent.parent
 SESSION_START_BUDGET_SECONDS = 5.0
 WRITER_HOLD_SECONDS = 30.0
 
+# A process the installer killed stays a zombie until init or a subreaper reaps it,
+# and `kill -0` answers for a zombie as for a live process; under load the check ran
+# before the reaping and reported a dead child as a survivor. `alive` asks `ps` for the
+# state as well: `Z` is a zombie on Linux and on BSD/macOS alike. See
+# docs/research/2026-09-27-a-zombie-is-not-a-survivor.md.
+_ALIVE_SHELL = """alive() {
+  local state
+  kill -0 "$1" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$1" 2>/dev/null)" || return 1
+  case "$state" in *Z*) return 1 ;; esac
+}
+"""
+
 
 def _existing_transcript(tmp_path) -> str:
     """A transcript the adapter can actually find.
@@ -2797,7 +2810,8 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
     installer.chmod(0o700)
     orchestrator = tmp_path / "orchestrate-signal.sh"
     orchestrator.write_text(
-        textwrap.dedent(
+        _ALIVE_SHELL
+        + textwrap.dedent(
             f"""
             set -euo pipefail
             # A shell without job control starts an asynchronous job with
@@ -2812,7 +2826,7 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
             started=0
             for ((attempt = 0; attempt < 500; attempt++)); do
               if [ -f child.started ]; then started=1; break; fi
-              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              if ! alive "$installerPid"; then break; fi
               sleep 0.01
             done
             if [ "$started" -ne 1 ]; then exit 90; fi
@@ -2824,7 +2838,7 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
             fi
             printf '%s' "$installerExit" > installer.status
             childPid="$(cat child.pid)"
-            if kill -0 "$childPid" 2>/dev/null; then
+            if alive "$childPid"; then
               : > child.alive
               kill -TERM "$childPid"
             fi
@@ -2886,7 +2900,8 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
     installer.chmod(0o700)
     orchestrator = tmp_path / "orchestrate-tree-signal.sh"
     orchestrator.write_text(
-        textwrap.dedent(
+        _ALIVE_SHELL
+        + textwrap.dedent(
             """
             set -euo pipefail
             ./installer-under-test.sh &
@@ -2894,7 +2909,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
             started=0
             for ((attempt = 0; attempt < 500; attempt++)); do
               if [ -f grandchild.started ]; then started=1; break; fi
-              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              if ! alive "$installerPid"; then break; fi
               sleep 0.01
             done
             if [ "$started" -ne 1 ]; then exit 90; fi
@@ -2908,7 +2923,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
             : > survivors
             for pidFile in uv.pid child.pid grandchild.pid; do
               pid="$(cat "$pidFile")"
-              if kill -0 "$pid" 2>/dev/null; then
+              if alive "$pid"; then
                 printf '%s:%s\n' "$pidFile" "$pid" >> survivors
                 kill -s KILL "$pid" 2>/dev/null || :
               fi
@@ -2968,7 +2983,8 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
     installer.chmod(0o700)
     orchestrator = tmp_path / "orchestrate-stopped-tree.sh"
     orchestrator.write_text(
-        textwrap.dedent(
+        _ALIVE_SHELL
+        + textwrap.dedent(
             """
             set -euo pipefail
             ./installer-under-test.sh &
@@ -2976,7 +2992,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             started=0
             for ((attempt = 0; attempt < 500; attempt++)); do
               if [ -f grandchild.started ]; then started=1; break; fi
-              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              if ! alive "$installerPid"; then break; fi
               sleep 0.01
             done
             if [ "$started" -ne 1 ]; then exit 90; fi
@@ -2990,7 +3006,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             : > survivors
             for pidFile in uv.pid child.pid grandchild.pid; do
               pid="$(cat "$pidFile")"
-              if kill -0 "$pid" 2>/dev/null; then
+              if alive "$pid"; then
                 printf '%s:%s\n' "$pidFile" "$pid" >> survivors
                 kill -s KILL "$pid" 2>/dev/null || :
               fi
@@ -3069,7 +3085,8 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
     installer.chmod(0o700)
     orchestrator = tmp_path / "orchestrate-stopped-tree.sh"
     orchestrator.write_text(
-        textwrap.dedent(
+        _ALIVE_SHELL
+        + textwrap.dedent(
             f"""
             set -euo pipefail
             ./installer-under-test.sh &
@@ -3077,7 +3094,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             started=0
             for ((attempt = 0; attempt < 500; attempt++)); do
               if [ -f grandchild.started ]; then started=1; break; fi
-              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              if ! alive "$installerPid"; then break; fi
               sleep 0.01
             done
             if [ "$started" -ne 1 ]; then exit 90; fi
@@ -3087,7 +3104,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             # it; elsewhere the installer's own smoke timer ends the wait, so
             # the poll has to outlast that timer.
             for ((attempt = 0; attempt < 1000; attempt++)); do
-              if ! kill -0 "$installerPid" 2>/dev/null; then finished=1; break; fi
+              if ! alive "$installerPid"; then finished=1; break; fi
               sleep 0.01
             done
             if [ "$finished" -ne 1 ]; then
@@ -3103,7 +3120,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             : > survivors
             for pidFile in uv.pid child.pid grandchild.pid; do
               pid="$(cat "$pidFile")"
-              if kill -0 "$pid" 2>/dev/null; then
+              if alive "$pid"; then
                 printf '%s:%s\n' "$pidFile" "$pid" >> survivors
                 kill -s KILL "$pid" 2>/dev/null || :
               fi

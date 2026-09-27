@@ -14,6 +14,8 @@ from install_control import InstallControlError, ManagedResource, file_resource
 from integration_config_backup import publish_configuration
 from reliable_memory import canonical_json_bytes, fsync_directory
 
+# A host settings file read and rewritten whole; 2 MiB is the writer's bound, shared with
+# installer_config and doctor (docs/research/2026-09-23-one-limit-one-place.md).
 MAX_CONFIG_BYTES = 2 * 1024 * 1024
 _MISSING = object()
 

@@ -143,9 +143,16 @@ MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OPERATIONS = 100
 MAX_EVIDENCE_PER_OPERATION = 32
+# Related wikilinks one compile operation may carry; enforced in the model's output schema and on
+# validation, so a runaway plan is refused. Basis unknown: value predates measurement; review when
+# a real page needs more than 64 links.
 MAX_RELATED = 64
 MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
+# One compile receipt; the largest on the live vault is 16.6 KB (2026-09-27). 1 MiB refuses a
+# corrupted receipt before it is parsed.
 MAX_RECEIPT_BYTES = 1024 * 1024
+# The private vault log's after-image in one transaction; it rotates at half of this
+# (docs/research/2026-09-25-the-vault-log-rotates-before-its-cap.md). Live: 0.43 MB.
 MAX_LOG_BYTES = 4 * 1024 * 1024
 # The log is archived and restarted past half its cap, inside the compile that
 # would pass it (docs/research/2026-09-25-the-vault-log-rotates-before-its-cap.md).
@@ -602,6 +609,8 @@ def _deduplicated_sources(
     return [SourceSnapshot(item.logical_path, item.content, item.sha256) for item in selected]
 
 
+# One failure detail on stderr and in the dropped-claims record; the stage and the failure code
+# before it are never cut. A readability trade-off, not measured.
 MAX_FAILURE_DETAIL_CHARS = 300
 
 

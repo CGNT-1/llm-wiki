@@ -45,6 +45,9 @@ FUNCTIONAL_RELATIONS = frozenset(
 )
 SEMANTIC_LABELS = frozenset({"contradiction", "compatible", "refinement"})
 _CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
+# A contradiction verdict is a label, a confidence and a support flag; 64 KiB refuses an unbounded
+# provider reply as `output_too_large` before it is parsed. Basis unknown: value predates
+# measurement; review when a valid verdict is refused.
 MAX_SEMANTIC_OUTPUT_BYTES = 64 * 1024
 EVALUATION_SCHEMA = {
     "type": "object",

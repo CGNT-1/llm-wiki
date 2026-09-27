@@ -82,6 +82,10 @@ BACKLOG_STATE_LOCK_SECONDS = 10.0
 # A bound on the recovery itself, so an unattended pass can never hang on it.
 BACKLOG_DRAIN_SECONDS = 120.0
 
+# The transcript evidence one capture carries. It must fit inside the capture intent
+# (memory_state.MAX_CAPTURE_INTENT_BYTES, 1 MiB) with room for the intent's own
+# fields; 900 KiB leaves 124 KiB for them. The split is inferred from the two values,
+# not measured; review if an intent near the cap is refused.
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
 CAPTURE_HANDLER_VERSION = 1
 SOURCES = frozenset({"claude", "opencode", "codex"})
@@ -1524,6 +1528,9 @@ def _claims_match(queue: Sequence[Mapping[str, object]], owner: str) -> bool:
     return all(item.get("claim_owner") == owner for item in queue)
 
 
+# Reducer entries kept in hook state, oldest dropped first (9af9bb4c), so the state file stays
+# bounded. Basis unknown: value predates measurement; review when a vault runs more than 128
+# active projects.
 MAX_CHECKPOINT_REDUCERS = 128
 
 
@@ -3632,6 +3639,8 @@ def _skip_reason(error: BaseException) -> str:
     return name
 
 
+# A permission refusal printed to stderr when a capture is skipped (issue #23): one line an
+# operator reads. A readability trade-off, not measured.
 MAX_SKIP_REASON_CHARS = 240
 
 

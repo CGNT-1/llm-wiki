@@ -29,9 +29,17 @@ from settings import setting_value
 from sync_memory import _run_process_tree as _run_tree
 
 ARTIFACT_DIR = REPORTS_DIR / "maintenance"
+# Stdout lines of one maintenance step copied into the nightly log; the step's full output stays
+# in its artifact. A readability trade-off, not measured.
 STEP_SUMMARY_LINES = 6
+# The head of a failed step's stderr copied into the nightly log; the full stderr stays in the
+# step's artifact file. A readability trade-off, not measured.
 STEP_ERROR_CHARS = 300
+# Bytes read from the end of a step's stdout artifact for its summary; the artifact itself is kept
+# whole. Bounds the read, not the record.
 MAX_STEP_TAIL_BYTES = 8 * 1024
+# Bytes read from the start of a step's stderr artifact for its summary; the artifact itself is
+# kept whole. Bounds the read, not the record.
 MAX_STEP_HEAD_BYTES = 8 * 1024
 # Report retention is operator-set: settings `retention.report_days`,
 # `retention.report_files` and `retention.report_bytes` (law 9,

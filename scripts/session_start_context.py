@@ -83,7 +83,11 @@ SECTION_PRIORITIES: dict[str, int] = {
     "daily": 7,
 }
 INDEX_KNOWLEDGE_SECTIONS = 3
+# Characters of knowledge/index.md injected at session start; whole sections are dropped, never
+# cut. A token-cost trade-off; the live index is 626 bytes (2026-09-27).
 INDEX_MAX_CHARS = 1200
+# Lines of today's log injected at session start; the rest is named as "+N more lines". A token-
+# cost trade-off, not measured.
 DAILY_EXCERPT_LINES = 6
 # Session start's recovery read: a tenth of a second, inside SESSION_START_RECOVERY_SECONDS (0.25).
 RECOVERY_LIMIT_SECONDS = 0.1

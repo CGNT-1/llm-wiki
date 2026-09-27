@@ -43,6 +43,8 @@ SUMMARY_RE = re.compile(
 )
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 TIER_EXTRACTOR_VERSION = "tier-extractor/v1"
+# The provenance JSON of a tier's model (provider, model, revision, inference settings) is a few
+# hundred bytes; 16 KiB refuses a malformed descriptor before it is stored in every tier.
 MAX_MODEL_DESCRIPTOR_BYTES = 16 * 1024
 _LINE_BREAKING = frozenset("\x00\r\n")
 

@@ -21,9 +21,15 @@ from pathlib import Path
 if os.name == "posix":
     import fcntl
 
+# /proc entries walked to prove a process group empty. This host allows 127 124 threads
+# (`/proc/sys/kernel/threads-max`, 2026-09-27); 131 072 is past that, and a scan that reaches it
+# answers "unknown", never "dead".
 _LINUX_PROC_SCAN_LIMIT = 131_072
+# One /proc/<pid>/stat line: the longest here was 372 bytes (2026-09-27); 4 KiB refuses garbage.
 _LINUX_PROC_STAT_LIMIT = 4096
 _LINUX_DEAD_STATES = frozenset({b"Z", b"X", b"x"})
+# Descriptors a launched child inherits: the only caller passes one (workspace_revision's
+# snapshot). 8 refuses a leak of the parent's descriptors into a server.
 _MAX_PASS_FDS = 8
 
 if os.name == "nt":

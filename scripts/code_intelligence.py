@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+# SQLite stores INTEGER as a signed 64-bit value (https://www.sqlite.org/datatype3.html); a larger
+# one cannot be stored exactly. External contract.
 _SQLITE_INT64_MAX = 2**63 - 1
 
 

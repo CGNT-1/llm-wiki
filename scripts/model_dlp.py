@@ -15,9 +15,18 @@ from pathlib import Path
 from reliable_memory import canonical_json_bytes
 from secret_redact import redact_secrets
 
+# The external DLP policy file is operator-written JSON of literals and fingerprints; 256 KiB
+# refuses a file that cannot be one before it is parsed. Basis unknown: value predates
+# measurement; review when a real policy nears it.
 _MAX_POLICY_BYTES = 256 * 1024
+# Literals in a DLP policy, each tested against every model call's text; bounds that cost. Basis
+# unknown: value predates measurement; review when an operator's policy needs more.
 _MAX_LITERALS = 128
+# One DLP literal is a secret or name, not a document; 2 KiB bounds each test. Basis unknown:
+# value predates measurement; review when a real literal is refused.
 _MAX_LITERAL_BYTES = 2048
+# Allowed finding fingerprints in a DLP policy (sha256 each). Basis unknown: value predates
+# measurement; review when an operator's allowlist needs more.
 _MAX_ALLOW_FINGERPRINTS = 256
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 

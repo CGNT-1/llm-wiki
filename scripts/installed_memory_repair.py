@@ -39,12 +39,28 @@ _SCHEMA_DIR = Path(__file__).with_name("schemas")
 _TOMBSTONE_SCHEMA = _SCHEMA_DIR / "operational-db-tombstone-v1.json"
 _MIGRATION_SCHEMA = _SCHEMA_DIR / "reliability-v3-migration-v1.json"
 _ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v1.json"
+# Bounded reads of the adoption's own JSON records; each is refused past its bound,
+# never cut. Measured 2026-09-27 on the installed vault: a tombstone is 487-541
+# bytes, the migration record 1 333 and the adoption record 2 507, so 4 KiB and
+# 64 KiB leave about 8 and 25 times room. Review if a schema version adds fields.
 _MAX_TOMBSTONE_BYTES = 4 * 1024
 _MAX_RECORD_BYTES = 64 * 1024
+# In-flight adoption artifacts named in a report; one adoption leaves at most one
+# candidate and one retired file per database (four), so 32 means a broken run
+# directory. Past it the listing sets its overflow flag and the check refuses.
 _MAX_OPERATION_ARTIFACTS = 32
+# The same bounds as doctor.MAX_OPERATIONAL_DB_BYTES, MAX_OPERATIONAL_ROWS and
+# MAX_RUNTIME_ENTRIES, whose comments give their basis: both read the same tables and
+# directories. Repeated because doctor imports this module lazily to stay importable
+# without the queue and transaction modules; keep the pairs equal. A scan past a
+# bound raises, never judges from rows unseen.
 _MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
 _MAX_OPERATIONAL_ROWS = 10_000
 _MAX_RUNTIME_ENTRIES = 10_000
+# The same bound as memory_state.MAX_CAPTURE_INTENT_BYTES (the hook writes intents
+# under it); not imported because memory_state resolves the live state root at
+# import time. The largest intent on the installed vault on 2026-09-27 was 977 392
+# bytes — 93% of this bound; review the pair if intents approach it.
 _MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 from markdown_transaction import UNDO_RETENTION_DAYS as _UNDO_RETENTION_DAYS  # noqa: E402
 
@@ -64,6 +80,9 @@ _LEGACY_EVIDENCE = (
     "compile.pid",
     "maintenance.lock",
 )
+# Bounded read of scripts/integration_adapter.py for its digest: the file is
+# 133 040 bytes on 2026-09-27, so 16 MiB only refuses something that is not the
+# adapter. A guard, not a tunable.
 _MAX_INTEGRATION_BYTES = 16 * 1024 * 1024
 
 

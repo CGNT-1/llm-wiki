@@ -123,12 +123,16 @@ _RELEASE_RETRY_DELAYS = (1.0, 2.0, 5.0, 10.0, 30.0) + (60.0,) * 60
 MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
 MAX_KNOWLEDGE_PATH_BYTES = 512
 MAX_KNOWLEDGE_COMPONENT_BYTES = 128
+# Path depth of a knowledge write target; the deepest live path is 5 (2026-09-27), so 12 only
+# refuses a malformed target (path-safety bound).
 MAX_KNOWLEDGE_DEPTH = 12
 _FEEDBACK_JSON_RE = re.compile(r"knowledge/feedback/[0-9a-f]{6,64}\.json")
 _BLACKBOARD_JSONL_RE = re.compile(
     r"knowledge/projects/[A-Za-z0-9._-]+/\.blackboard/"
     r"(?:tasks|completed|signals|conflicts)\.jsonl"
 )
+# SQLite INTEGER is a signed 64-bit value (https://www.sqlite.org/datatype3.html); file identities
+# are stored inside that range, unsigned ones folded by _UINT64_MODULUS.
 _SQLITE_INT64_MIN = -(1 << 63)
 _SQLITE_INT64_MAX = (1 << 63) - 1
 _UINT64_MODULUS = 1 << 64
@@ -751,6 +755,9 @@ _PRUNABLE_TRANSACTION_IDS = 'SELECT id FROM "transaction" WHERE ' + _PRUNABLE_TR
 # candidates were read is kept.
 _PRUNE_ONE_TRANSACTION = 'DELETE FROM "transaction" WHERE id = ? AND ' + _PRUNABLE_TRANSACTION
 
+# How many `#<n>` retry ordinals one refused operation may take before the search for
+# a free one stops. Basis unknown: value predates measurement; review when an
+# operation is refused for exhausting it.
 MAX_ATTEMPT_ORDINAL = 100
 
 

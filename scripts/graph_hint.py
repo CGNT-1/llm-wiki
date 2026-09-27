@@ -28,6 +28,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# A hook payload (tool name and search input) from the host on stdin; a larger one is ignored and
+# the hook answers nothing. Resource bound on host input inside a 5 s hook.
 MAX_INPUT_BYTES = 64 * 1024
 # Resolving the repository scope runs inside the host's 5-second hook, so it gets under half of it.
 SCOPE_DEADLINE_SECONDS = 2.0

@@ -22,6 +22,10 @@ try:
 except ImportError:
     from python_parse import PARSE_FAILURES, parse_python
 
+# Files re-parsed for fresh positions in one answer; beyond it a file's positions are not
+# refreshed, the answer keeps the indexed ones and each such row says so with
+# `line_not_refreshed: true`. A latency trade-off, not measured; review with the
+# navigation latency budget.
 MAX_FILES = 20
 # One source file re-read for fresh positions; a snippet reads at most 1 MiB.
 MAX_FILE_BYTES = 4 * 1024 * 1024
@@ -200,13 +204,21 @@ class _Files:
         self.root = Path(root)
         self.seen: dict[str, dict[str, int]] = {}
 
-    def lines(self, candidate: str) -> dict[str, int]:
+    def lines(self, candidate: str) -> dict[str, int] | None:
+        """The file's definition lines, or None when the answer's file budget is spent."""
         if candidate in self.seen:
             return self.seen[candidate]
         if len(self.seen) >= MAX_FILES:
-            return {}
+            return None
         self.seen[candidate] = definition_lines(_resolved(self.root, candidate))
         return self.seen[candidate]
+
+
+def _checked_row(row: dict, lines: dict[str, int] | None) -> dict:
+    """A row past the file budget keeps its indexed line and says it was not re-read."""
+    if lines is None:
+        return {**row, "line_not_refreshed": True}
+    return _corrected(row, lines)
 
 
 def _refreshed_row(row: object, files: _Files) -> object:
@@ -215,7 +227,7 @@ def _refreshed_row(row: object, files: _Files) -> object:
     candidate = _row_value(row, _PATH_KEYS)
     if candidate is None:
         return row
-    return _corrected(row, files.lines(candidate))
+    return _checked_row(row, files.lines(candidate))
 
 
 def refreshed_rows(rows: object, root: Path) -> object:

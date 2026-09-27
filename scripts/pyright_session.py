@@ -71,6 +71,8 @@ from workspace_revision import (
 
 # A Pyright session's startup budget, capped by the caller's deadline (docs/superpowers/plans/2026-07-22-python-pyright-navigation.md).
 STARTUP_SECONDS = 60.0
+# Live language servers one MCP process keeps: 4, from the 2026-07-22 Pyright plan; past it an
+# idle session is closed to make room or the request degrades. Not measured.
 MAX_LSP_PROCESSES = 4
 
 # Cleanup budget of an owner that failed to start. basis unknown — value predates measurement; review when failed startups leave owners registered.
@@ -83,25 +85,41 @@ _IDLE_SECONDS = 300.0
 # How much of a caller's time one idle reap may spend. There is no daemon, so
 # the reap rides on a request; it must not become the request's cost.
 _IDLE_REAP_SECONDS = 2.0
+# How often a caller waiting on a session lock looks again; always capped by its own deadline.
 _LOCK_POLL_SECONDS = 0.01
 _MAX_DOCUMENT_BYTES = MAX_FRAME_BYTES - 1
 _MAX_OPEN_DOCUMENTS = 256
+# Session memory for open documents, least recently used closed first: 256 documents or 64 MiB.
+# Value predates measurement; review if a large repository keeps evicting.
 _MAX_OPEN_DOCUMENT_BYTES = 64 * 1024 * 1024
+# workspace/configuration: 64 items of 256-byte section names refuse a malformed request. Values
+# predate measurement; review if a pinned server is refused its configuration.
 _MAX_CONFIGURATION_ITEMS = 64
 _MAX_CONFIGURATION_SECTION_BYTES = 256
 _MAX_PREPARED_CALL_ITEMS = MAX_LOCATIONS
+# Text fields of a server answer: a symbol name 4 KiB, a diagnostic message 64 KiB, a progress
+# message 4 KiB. A longer field makes that item unreadable. Values predate measurement.
 _MAX_CALL_ITEM_TEXT_BYTES = 4096
 _MAX_DIAGNOSTIC_TEXT_BYTES = 64 * 1024
+# Diagnostics retained per session: 256 files and 16 MiB in all, each item costed with a fixed
+# overhead (128 bytes, 96 per related entry). A publication past them keeps the snapshot
+# held for its version, or an empty one, marked `partial`, so the query answers at once
+# and says it is incomplete. Values predate measurement; review if diagnostics go missing
+# on a large repository.
 _MAX_DIAGNOSTIC_URIS = 256
 _MAX_DIAGNOSTIC_BYTES = 16 * 1024 * 1024
 _DIAGNOSTIC_BASE_BYTES = 128
 _DIAGNOSTIC_RELATED_BASE_BYTES = 96
+# Server progress kept as a ring: the last 256 events or 1 MiB, each costed 32 bytes plus text;
+# the oldest event leaves first. Values predate measurement.
 _MAX_PROGRESS_TEXT_BYTES = 4096
 _MAX_PROGRESS_EVENTS = 256
 _MAX_PROGRESS_BYTES = 1024 * 1024
+# The fixed cost charged per progress event, on top of its text (see the ring above).
 _PROGRESS_EVENT_BASE_BYTES = 32
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _WINDOWS_STAT_CREATION_TIME = os.name == "nt"
+# LSP 3.17 base type `uinteger`: "an unsigned integer number in the range of 0 to 2^31 - 1".
 _LSP_UINTEGER_MAX = 2**31 - 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CAPABILITY_FIELDS = {
@@ -1585,6 +1603,21 @@ def _matching_diagnostics(
     )
 
 
+def _over_budget_replacement(
+    existing: _DiagnosticSnapshot | None, version: int | None
+) -> _DiagnosticSnapshot:
+    """What a publication past the diagnostics budget leaves, marked `partial`.
+
+    The snapshot already held for the same version stays, now saying it may be
+    incomplete; otherwise an empty marker of that version. A marker costs one fixed
+    item, so all open documents' markers stay within
+    `_MAX_OPEN_DOCUMENTS * _DIAGNOSTIC_BASE_BYTES` (32 KiB) above the budget.
+    """
+    if existing is not None and existing.document_version == version:
+        return dataclasses.replace(existing, partial=True)
+    return _DiagnosticSnapshot((), version, True, _DIAGNOSTIC_BASE_BYTES)
+
+
 def _expired_diagnostics(
     snapshot: _DiagnosticSnapshot | None,
 ) -> ProviderDiagnostics:
@@ -2705,14 +2738,12 @@ class LanguageServerSession:
 
     def _diagnostic_snapshot(
         self, values: list[object], uri: str, version: int | None
-    ) -> _DiagnosticSnapshot | None:
-        """The snapshot to publish, or None when it would not fit the budget."""
+    ) -> _DiagnosticSnapshot:
+        """The snapshot as published; `_store_diagnostics` decides whether it fits."""
         diagnostics, partial = self._parsed_diagnostics(values, uri)
         retained_bytes = _DIAGNOSTIC_BASE_BYTES + sum(
             self._diagnostic_retained_bytes(diagnostic) for diagnostic in diagnostics
         )
-        if retained_bytes > _MAX_DIAGNOSTIC_BYTES:
-            return None
         return _DiagnosticSnapshot(
             tuple(diagnostics),
             version,
@@ -2720,23 +2751,34 @@ class LanguageServerSession:
             retained_bytes,
         )
 
+    def _aggregate_after_locked(self, uri: str, snapshot: _DiagnosticSnapshot) -> int:
+        existing = self._diagnostics.get(uri)
+        previous_bytes = existing.retained_bytes if existing is not None else 0
+        return self._diagnostic_bytes - previous_bytes + snapshot.retained_bytes
+
     def _store_diagnostics(
         self, uri: str, version: int | None, snapshot: _DiagnosticSnapshot
     ) -> None:
-        """Publish the snapshot, unless the session moved on or ran out of budget."""
+        """Publish the snapshot, or what the budget allows, unless the session moved on.
+
+        A publication past the budget used to be dropped without a trace, so the
+        query for that version waited out its whole deadline and then answered
+        an unexplained partial. Now it is answered at once, marked `partial`.
+        """
         with self._lock:
             if not self._diagnostic_update_admissible_locked(uri, version):
                 return
-            existing = self._diagnostics.get(uri)
-            previous_bytes = existing.retained_bytes if existing is not None else 0
-            aggregate_bytes = (
-                self._diagnostic_bytes - previous_bytes + snapshot.retained_bytes
-            )
-            if aggregate_bytes > _MAX_DIAGNOSTIC_BYTES:
-                return
+            snapshot = self._fitting_snapshot_locked(uri, snapshot)
+            self._diagnostic_bytes = self._aggregate_after_locked(uri, snapshot)
             self._diagnostics[uri] = snapshot
-            self._diagnostic_bytes = aggregate_bytes
             self._condition.notify_all()
+
+    def _fitting_snapshot_locked(
+        self, uri: str, snapshot: _DiagnosticSnapshot
+    ) -> _DiagnosticSnapshot:
+        if self._aggregate_after_locked(uri, snapshot) <= _MAX_DIAGNOSTIC_BYTES:
+            return snapshot
+        return _over_budget_replacement(self._diagnostics.get(uri), snapshot.document_version)
 
     def _diagnostic_target(
         self, params: object
@@ -2764,10 +2806,7 @@ class LanguageServerSession:
     def _store_diagnostic_snapshot(
         self, uri: str, values: list[object], version: int | None
     ) -> None:
-        snapshot = self._diagnostic_snapshot(values, uri, version)
-        if snapshot is None:
-            return
-        self._store_diagnostics(uri, version, snapshot)
+        self._store_diagnostics(uri, version, self._diagnostic_snapshot(values, uri, version))
 
     def _bootstrap_owned_generation(
         self,

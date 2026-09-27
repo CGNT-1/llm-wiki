@@ -69,6 +69,8 @@ MAX_TRACE_RECORDS = 300_000
 MAX_PATH_CHARS = 512
 MAX_NAME_CHARS = 256
 MAX_LINE_NUMBER = 10_000_000
+# The signed 32-bit maximum per trace record: any sum of fewer than 2**32 records stays inside
+# SQLite's signed 64-bit INTEGER.
 MAX_CALL_COUNT = 2**31 - 1
 # Bound on the sample of trace-derived callers one answer names. Mirrors
 # `code_graph.UNRESOLVED_CALLER_LIMIT`, and for the same reason: the count

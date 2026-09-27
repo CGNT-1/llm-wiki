@@ -14,6 +14,9 @@ import hashlib
 import math
 from collections.abc import Mapping
 
+# A longer identity key is stored as its sha256 digest instead, so nothing is refused; the bound
+# keeps index rows short. Basis unknown: value predates measurement; review when digested keys
+# become common.
 MAX_IDENTITY_KEY_CHARS = 4096
 _UNSTORABLE_CHARACTERS = frozenset("\x00\r\n")
 

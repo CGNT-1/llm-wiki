@@ -58,6 +58,8 @@ RERANKER_ALLOW_PATTERNS = (
     "sentencepiece*",
     "special_tokens*",
 )
+# One read while hashing model weights (hundreds of MB); 8 MiB trades a little memory for fewer
+# reads. Performance trade-off, not measured.
 HASH_CHUNK_BYTES = 8 * 1024 * 1024
 STATE_PRESENT = "present"
 STATE_FETCHED = "fetched"

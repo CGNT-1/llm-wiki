@@ -97,6 +97,9 @@ PROTECTED_FIELDS = frozenset(
     }
 )
 
+# How deep identity stripping walks an answer; below it values stay as they are, which costs
+# tokens, never correctness. Basis unknown: value predates measurement; review when an answer
+# nests deeper than six levels.
 _MAX_DEPTH = 6
 
 # The budget block has to fit inside the budget too, or the answer would

@@ -73,6 +73,8 @@ _LONG_LEASE_ROLES = frozenset(
 _MARKER_ROLES = frozenset({"compile", "nightly", "weekly"})
 _COORDINATOR_CONTRACT = OperationalDatabaseContract(application_id=0x4C575433)
 _COORDINATOR_CANDIDATE = "markdown-transactions-v3.candidate.sqlite3"
+# A marker identity is canonical JSON of a file identity and a pid, under 300 bytes; 4 KiB refuses
+# a marker that is not one.
 _MAX_MARKER_BYTES = 4096
 
 

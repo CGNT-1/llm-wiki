@@ -3747,7 +3747,8 @@ def test_diagnostic_aggregate_rejection_preserves_previous_snapshot(
             }
         )
 
-        assert session._diagnostics[uri] is previous
+        kept = session._diagnostics[uri]
+        assert (kept.diagnostics, kept.partial) == (previous.diagnostics, True)
         assert session._diagnostic_bytes == previous.retained_bytes
     finally:
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)

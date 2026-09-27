@@ -24,9 +24,14 @@ MAX_LIMIT = 100
 # 4-bytes estimate. Only the unit moved, not the answer. See
 # docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md.
 MAX_ESTIMATED_TOKENS = 2_400
+# Display cuts inside that answer: a hover past 2 KiB and a signature past its first
+# line or 1 KiB are cut at a UTF-8 boundary and flagged `truncated` with the full size,
+# so they cannot crowd out the rows. Basis unknown: values predate measurement.
 _HOVER_BYTE_CEILING = 2048
-_MAX_JSON_SAFE_INTEGER = 2**53 - 1
 _SIGNATURE_BYTE_CEILING = 1024
+# JSON numbers are IEEE-754 doubles for most readers (RFC 8259 §6): integers above
+# 2^53 - 1 lose precision, so a larger one is refused rather than rendered wrong.
+_MAX_JSON_SAFE_INTEGER = 2**53 - 1
 
 _RESOLUTION_ORDER = {
     "lsp_confirmed": 0,

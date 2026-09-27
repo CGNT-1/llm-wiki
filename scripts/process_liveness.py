@@ -32,6 +32,8 @@ from pathlib import Path
 _WINDOWS_STILL_ACTIVE = 259
 _WINDOWS_GONE_ERRORS = frozenset({87, 1168})
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+# /proc/<pid>/stat is one line of 52 numeric fields and a comm of at most 16 bytes (proc(5)),
+# about 1 KiB at most; 8 KiB bounds the read.
 _MAX_PROCESS_STAT_BYTES = 8192
 
 

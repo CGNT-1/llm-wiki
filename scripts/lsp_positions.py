@@ -19,6 +19,9 @@ _ENCODED_FORWARD_SLASH = re.compile(r"%2f", re.IGNORECASE)
 _ENCODED_BACKSLASH = re.compile(r"%5c", re.IGNORECASE)
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:$")
 _BOUNDARY_CHECKPOINT_STRIDE = 256
+# Lines whose UTF-8/16/32 checkpoints are kept (least recently used out). A navigation answer
+# converts positions on a handful of lines, so 128 keeps a session's working set while holding
+# memory to a few KB. Value predates measurement; review if conversions show up in profiles.
 _BOUNDARY_INDEX_CACHE_LINES = 128
 
 

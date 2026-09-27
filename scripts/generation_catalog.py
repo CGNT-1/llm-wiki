@@ -148,8 +148,16 @@ MAX_ARTIFACTS = 1024
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024
 MAX_GENERATION_BYTES = 64 * 1024 * 1024 * 1024
 MAX_GENERATION_CHILDREN = 4096
+# The catalog database file; it holds rows, not artifacts, so 256 MiB refuses only a runaway
+# catalog. Basis unknown: value predates measurement; review when doctor reports the catalog
+# nearing it.
 MAX_CATALOG_BYTES = 256 * 1024 * 1024
+# Generation rows the catalog holds; reaching it refuses a new registration rather than dropping
+# one. Basis unknown: value predates measurement; review when pruning falls behind and the row
+# count nears it.
 MAX_GENERATIONS = 1024
+# Activation history rows; reaching it refuses rather than overwriting history. Basis unknown:
+# value predates measurement; review when the history row count nears it.
 MAX_ACTIVATION_HISTORY = 16384
 HASH_CHUNK_BYTES = IO_CHUNK_BYTES
 # A caller with a deadline gets whatever is left of it, capped here. A caller

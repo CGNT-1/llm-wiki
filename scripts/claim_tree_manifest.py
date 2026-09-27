@@ -18,10 +18,20 @@ MAX_CLAIM_TREE_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_CLAIM_TREE_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_GUARDRAIL_SOURCE_FILES = 10_000
 MAX_GUARDRAIL_INSPECTED_ENTRIES = 50_000
+# Directories under knowledge/notes and knowledge/feedback one guard-rail snapshot walks; the live
+# vault has 1 (2026-09-27). Refuses a runaway tree. Basis unknown: value predates measurement;
+# review when a vault organises notes into subdirectories.
 MAX_GUARDRAIL_SOURCE_DIRECTORIES = 5_000
+# Nesting depth of guard-rail sources; notes are flat by convention (CLAUDE.md §5), so 12 only
+# refuses a symlink-free runaway tree.
 MAX_GUARDRAIL_SOURCE_DEPTH = 12
 MAX_GUARDRAIL_SOURCE_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
+# Bytes one guard-rail snapshot holds in memory at once; the live sources are 0.74 MB of it
+# (2026-09-27). A vault-size ceiling like `claims.max_total_bytes`; review when doctor's 80%
+# warning fires for that setting.
 MAX_GUARDRAIL_SOURCE_TOTAL_BYTES = 32 * 1024 * 1024
+# The snapshot manifest names at most MAX_GUARDRAIL_SOURCE_FILES entries; 2 MiB allows about 200
+# bytes per entry at that count, so a manifest the walk accepts is one it can store.
 MAX_GUARDRAIL_SOURCE_MANIFEST_BYTES = 2 * 1024 * 1024
 # The project files a claim can live in. `journal.md` is the append-only event
 # log the project state is projected from: JSON events after a header, no

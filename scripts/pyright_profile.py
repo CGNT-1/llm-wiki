@@ -111,28 +111,43 @@ PYRIGHT_INITIALIZATION_OPTIONS_SHA256 = sha256_bytes(
     canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS))
 )
 
+# Files read while qualifying a Pyright install (sizes measured 2026-09-27): package.json 1.4 KB,
+# the install manifest 749 bytes, the largest package-lock.json on this host 205 KB, the
+# largest pyrightconfig.json 256 KiB + 1 (a test fixture). Each bound refuses a file that is not
+# what its name says; a real one past it is refused with its label, never cut.
 MAX_PACKAGE_JSON_BYTES = 64 * 1024
 MAX_PACKAGE_LOCK_BYTES = 8 * 1024 * 1024
 MAX_INSTALL_MANIFEST_BYTES = 16 * 1024
 MAX_PYRIGHT_CONFIG_BYTES = 256 * 1024
+# The whole pyrightconfig chain together: two maximal files.
 MAX_PYRIGHT_CONFIG_TOTAL_BYTES = 512 * 1024
+# A pyrightconfig chain: one file plus at most 8 `extends` hops, 64 levels and 65 536 JSON
+# nodes per file, 4 096 nodes in a manifest. They bound a hostile or cyclic configuration;
+# values predate measurement, review when a real configuration is refused.
 MAX_PYRIGHT_CONFIG_FILES = 9
 MAX_PYRIGHT_CONFIG_EXTENDS_DEPTH = 8
 MAX_PYRIGHT_CONFIG_DOMAIN_DEPTH = 64
 MAX_PYRIGHT_CONFIG_DOMAIN_NODES = 65_536
+# The same depth bound for the install manifest; the real one has 11 JSON nodes (2026-09-27).
 MAX_PYRIGHT_MANIFEST_DOMAIN_DEPTH = 64
 MAX_PYRIGHT_MANIFEST_DOMAIN_NODES = 4096
+# The Pyright entry file hashed for qualification: langserver.index.js is 229 bytes and the
+# package's largest file 3.1 MB (2026-09-27); 64 MiB refuses anything that is not that file.
 MAX_SERVER_BYTES = 64 * 1024 * 1024
+# `node --version` prints 9 bytes here (v22.x.y); 128 refuses output that is not a version.
 MAX_NODE_VERSION_BYTES = 128
 # `node --version` probe while qualifying Pyright. basis unknown — value predates measurement; review when the probe times out on a working Node.
 NODE_PROBE_TIMEOUT_SECONDS = 2.0
 # Time to reap the probe after its deadline; small, since the probe has already answered or failed.
 NODE_PROBE_CLEANUP_SECONDS = 0.5
+# `node --version` probes still being reaped at once; one per qualification is usual, so 8
+# refuses a leak. Value predates measurement.
 _MAX_NODE_PROBE_OWNERS = 8
 # How long one `node --version` answer stands for the executable it was taken
 # from. A version-manager shim can change what it runs without changing itself,
 # so the answer is not kept for the life of the process.
 NODE_PROBE_CACHE_SECONDS = 300.0
+# Distinct Node executables whose probe is cached; a machine has one or two. Cleared whole at 8.
 _MAX_NODE_PROBE_CACHE = 8
 
 _NODE_ENV_ALLOWLIST = frozenset(

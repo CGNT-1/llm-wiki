@@ -73,6 +73,8 @@ GRAMMAR_LOADERS = {
 
 LANGUAGE_MAP = CODE_LANGUAGE_BY_SUFFIX
 
+# Community partitions cached per graph reader; one key is used today, so 4 only
+# keeps an old entry from lingering. A miss recomputes, it never answers less.
 MAX_DERIVED_COMMUNITY_CACHE = 4
 # The hotspot list is a ranking, not a dump. This repository has 10,607 nodes
 # with at least one incoming call; a caller reads the head of that ranking. The
@@ -1327,7 +1329,10 @@ def _stored_callers(
 # Issue #24, B4: `callers`/`callees` with a depth walk the generation's bounded
 # CALLS closure (`EvidenceGraph.neighbors`, a recursive CTE with depth, work
 # and row ceilings). Depth 1 is the unchanged one-hop path; the walk reports
-# `depth_applied` and `depth_frontier_open` exactly as `dependencies` does.
+# `depth_applied` and `depth_frontier_open` exactly as `dependencies` does. The
+# depth, row, work and seed bounds are the dependency walk's (DEPENDENCY_* below);
+# past rows or work the engine refuses rather than truncates. Basis unknown beyond
+# that: values predate measurement.
 CALL_WALK_MAX_DEPTH = 8
 CALL_WALK_MAX_ROWS = 10_000
 CALL_WALK_MAX_WORK = 100_000
@@ -2587,6 +2592,11 @@ def _store_detect_communities(
 #: what a module depends on; `CALLS` is what a symbol depends on.
 DEPENDENCY_EDGE_TYPES = ("CALLS", "IMPORTS")
 DEPENDENCY_SEED_KINDS = ("class", "function", "method", "module")
+# A dependency walk's bounds. Seeds past 20 are cut and the answer reports it
+# (`_seed_cut_report`); the walk stops at depth 8, the architecture tools' depth
+# (mcp_server.ARCHITECTURE_MAX_DEPTH); more than 1 000 reached nodes or 100 000 units of
+# work is refused by evidence_graph rather than truncated. Basis unknown beyond that:
+# values predate measurement; review if real symbols are refused.
 DEPENDENCY_SEED_LIMIT = 20
 DEPENDENCY_MAX_DEPTH = 8
 DEPENDENCY_MAX_ROWS = 1000

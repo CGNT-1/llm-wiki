@@ -49,9 +49,14 @@ class GraphSchema(str, Enum):
 # that has run away, so a caller never has to reason about 16 GiB.
 MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
+# The most rows one reader call may ask for (a larger `max_rows` is refused), and a
+# query that would return more than it asked is refused, not cut. Basis unknown: value predates
+# measurement; the answers built on it render at most a few hundred rows.
 MAX_ROWS = 10_000
 # Traversal depth the graph reader follows; impact answers stop at 8.
 MAX_DEPTH = 32
+# Edge types one call may filter on (untrusted input); the graph query surface names
+# fewer than twenty, so 64 only refuses a malformed request.
 MAX_EDGE_TYPES = 64
 # Node-id filter bound for `edges()`. Sized from measurement, not taste: on this
 # repository's live generation (19,153 function+method nodes) the worst
@@ -66,11 +71,23 @@ MAX_NODE_FILTER = 512
 # aggregate refuses by name through the same `limit + 1` fetch; it is never
 # silently truncated.
 MAX_AGGREGATE_ROWS = 200_000
-# Bounded caller-supplied name-prefix exclusions for `nodes_without_edges`.
+# Bounded caller-supplied name-prefix exclusions for `nodes_without_edges` (untrusted
+# input); more are refused. Basis unknown: value predates measurement.
 MAX_NAME_PREFIX_FILTER = 32
+# Units of traversal work one walk may spend before it is refused by name, never
+# truncated. Basis unknown: value predates measurement.
 MAX_WORK = 100_000
+# SQLite runs the progress handler every N virtual-machine instructions
+# (sqlite3_progress_handler); 1 000 checks the deadline often enough to stop a build
+# within milliseconds while costing nothing measurable.
 PROGRESS_OPCODES = 1000
+# Rows one generation build validates per table, refused past it (a runaway build).
+# This repository's generation held about 38 000 CALLS assertions (2026-08-29), so a
+# million is over 25 times a real repository.
 MAX_VALIDATION_ROWS = 1_000_000
+# A generation's source manifest read back (also by generation_catalog and
+# mcp_server): the installed vault's was 446 809 bytes on 2026-09-27, so 256 MiB is a
+# guard; a larger one is refused.
 MAX_SOURCE_MANIFEST_BYTES = 256 * 1024 * 1024
 
 _SHA256 = frozenset("0123456789abcdef")
@@ -1722,6 +1739,8 @@ _FORMAT_RECEIPT_NAME = "format-validated.json"
 # twenty seconds), never a wrong answer, and 32 exceeds the artifacts one
 # installation uses between nightly refreshes.
 _MAX_FORMAT_RECEIPTS = 32
+# The receipt file holding those verdicts: 32 entries of a digest and a verdict are
+# a few KiB, so a larger file is ignored (read as no receipt) and re-validation follows.
 _MAX_FORMAT_RECEIPT_BYTES = 64 * 1024
 
 
@@ -2183,6 +2202,8 @@ def _require_direction(direction: str) -> None:
 # caller's glob is translated and everything else is escaped: `_` is a wildcard
 # to LIKE and a plain character in every identifier this graph holds.
 MAX_SEARCH_PATTERN = 256
+# A pattern matching more names is refused with its count ("narrow it"), never
+# answered from the first 5 000. Basis unknown: value predates measurement.
 MAX_SEARCH_MATCHES = 5_000
 _LIKE_ESCAPE = "\\"
 _GLOB_TO_LIKE = {"*": "%", "?": "_"}

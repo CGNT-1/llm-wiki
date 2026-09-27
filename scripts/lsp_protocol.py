@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
+from bounded_io import IO_CHUNK_BYTES
 from interruption import (
     exception_reaches as _exception_reaches,
 )
@@ -49,11 +50,15 @@ if os.name == "nt":
     _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _KERNEL32.CloseHandle.restype = wintypes.BOOL
 
+# One JSON-RPC frame: a project constraint of the 2026-07-22 Pyright plan
+# (docs/superpowers/plans/2026-07-22-python-pyright-navigation.md, "8 MiB frames"). An oversized
+# reply fails its request, not the server. Not measured against real replies.
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 # A frame over MAX_FRAME_BYTES and up to this is consumed and refused, not fatal
 # (audit C-38, docs/research/2026-09-25-an-oversized-reply-fails-its-request-not-its-server.md).
 MAX_SKIPPED_FRAME_BYTES = 256 * 1024 * 1024
-_SKIP_CHUNK_BYTES = 64 * 1024
+# One read while draining an oversized frame; the shared I/O step size (bounded_io).
+_SKIP_CHUNK_BYTES = IO_CHUNK_BYTES
 # The bytes kept from each end of a refused oversized frame, enough for the
 # `"jsonrpc":"2.0","id":…` of either field order (`_oversized_response_id`); the frame
 # itself is refused whole, so nothing is cut from an answer.
@@ -63,9 +68,13 @@ _TAIL_RESPONSE_ID = re.compile(rb'[,{]\s*"id"\s*:\s*(\d{1,15})\s*\}\s*\Z')
 # LSP headers are two short lines (Content-Length, Content-Type); 8 KiB refuses a
 # peer that never ends its header block. Security bound on untrusted input.
 MAX_HEADER_BYTES = 8 * 1024
+# Requests in flight to one server: 32, from the 2026-07-22 Pyright plan ("32 outstanding
+# requests"); the write queue and tombstones are sized from it.
 MAX_PENDING_REQUESTS = 32
 # Locations one LSP reply may carry before it is refused as unbounded; the answer joiners keep 5.
 MAX_LOCATIONS = 10_000
+# Plan constraints of 2026-07-22: 10 000 diagnostics per publication, 256 KiB of hover text and
+# JSON nesting 64. A reply past them is refused, not cut. Not measured against real replies.
 MAX_DIAGNOSTICS = 10_000
 MAX_HOVER_BYTES = 256 * 1024
 MAX_JSON_DEPTH = 64
@@ -102,6 +111,7 @@ _FLAT_SEMANTIC_RESULT_METHODS = frozenset(
         "workspace/symbol",
     }
 )
+# LSP 3.17 base type `integer`: "a signed integer number in the range of -2^31 to 2^31 - 1".
 _JSON_RPC_INTEGER_MIN = -(2**31)
 _JSON_RPC_INTEGER_MAX = 2**31 - 1
 _TOMBSTONE_LIMIT = MAX_PENDING_REQUESTS * 4

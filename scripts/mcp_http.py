@@ -74,6 +74,8 @@ TOKEN_ENTROPY_BYTES = 32
 TOKEN_FILE_MODE = 0o600
 TOKEN_DIR_MODE = 0o700
 BEARER_PREFIX = "bearer "
+# The bearer token is TOKEN_ENTROPY_BYTES of url-safe base64, well under 100 bytes; a longer
+# header is refused before any comparison (security bound on network input).
 MAX_AUTHORIZATION_HEADER_BYTES = 4096
 
 

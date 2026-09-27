@@ -20,6 +20,9 @@ from pathlib import Path
 REACH_EDGE_TYPES = ("CALLS", "IMPORTS", "INHERITS")
 # Call-graph depth followed for affected symbols; the graph reader's traversal bound is 32.
 MAX_DEPTH = 8
+# Changed symbols walked from; past 50 the rest are skipped and the answer is marked
+# `partial`, as it is when one seed's walk hits the row or work ceiling below. Basis
+# unknown: values predate measurement; review if ordinary diffs report partial.
 MAX_SEEDS = 50
 # Affected symbols one impact answer names; the graph reader's row bound is 10 000.
 MAX_ROWS = 200

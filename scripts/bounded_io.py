@@ -7,8 +7,6 @@ import stat
 import time
 from pathlib import Path
 
-_READ_CHUNK_BYTES = 64 * 1024
-
 # The ceiling for one Markdown page under `knowledge/`, declared once: every
 # reader of a page (journal, claim tree, guardrails snapshot, corpus, search,
 # compile after-image, index rebuild, backlink repair, access telemetry)
@@ -138,7 +136,7 @@ def _read_bounded_chunks(
     total = 0
     while total <= max_bytes:
         _check_deadline(deadline, label)
-        chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, max_bytes + 1 - total))
+        chunk = os.read(descriptor, min(IO_CHUNK_BYTES, max_bytes + 1 - total))
         _check_deadline(deadline, label)
         if not chunk:
             break

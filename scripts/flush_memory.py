@@ -37,6 +37,9 @@ from memory_state import (  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
+# The classifier reads the last 60 000 characters, the window of session-promotion-policy-
+# decision; the stored record keeps everything and the prompt names what was omitted (see
+# _bounded_classifier_evidence).
 MAX_TRANSCRIPT_CHARS = 60_000
 # What a session record may read from a transcript file; the record itself is
 # bounded again after rendering.

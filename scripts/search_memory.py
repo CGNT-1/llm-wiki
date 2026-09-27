@@ -61,10 +61,18 @@ from reliable_memory import (  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 from settings import raise_hint, setting_value  # noqa: E402
 
-_INDEX_REPLACE_WAIT_SECONDS = 1.0
+# Directory entries the Markdown fallback walk inspects; the live knowledge tree has 1 185
+# (2026-09-27). A vault-size bound, refused past it; a settings candidate.
 MAX_SEARCH_ENTRIES = 20_000
+# Directories the Markdown fallback walk enters; the live knowledge tree has 76 (2026-09-27). A
+# vault-size bound, refused past it; a settings candidate.
 MAX_SEARCH_DIRECTORIES = 2_000
+# Directory depth of the Markdown fallback walk; the live knowledge tree is 5 deep (2026-09-27),
+# so 32 only refuses a runaway tree.
 MAX_SEARCH_DEPTH = 32
+# The largest result count a caller may ask for; a larger one is refused with its range. Bounds
+# one answer's work. Basis unknown: value predates measurement; review when a caller needs more
+# rows.
 MAX_SEARCH_LIMIT = 1_000
 MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 SEARCH_INDEX_COLUMNS = (
@@ -118,6 +126,9 @@ GENERATION_METADATA_KEYS = frozenset(
         "chunk_count",
     }
 )
+# Chunk rows one generation's FTS index holds, the same count the corpus may produce
+# (`corpus_snapshot.MAX_CORPUS_CHUNKS`). A vault-size bound. Basis unknown: value predates
+# measurement; review when doctor warns on corpus size.
 MAX_GENERATION_FTS_CHUNKS = 100_000
 GENERATION_FTS_PROGRESS_OPCODES = 1_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -4304,6 +4315,8 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
         print()
 
 
+# A printed search snippet, cut with an ellipsis so the cut shows. A readability trade-off, not
+# measured.
 SNIPPET_CHARS = 240
 
 

@@ -45,6 +45,10 @@ CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
 # `docs/research/2026-09-10-one-ceiling-for-every-reader-of-a-journal.md`.
 MAX_CLAIM_PAGE_BYTES = MAX_CLAIM_TREE_FILE_BYTES
 MAX_ACTIVE_RECORDS = 10_000
+# A claim's number value is model-written text: characters, digits and exponent are bounded so
+# normalising `1e999999` can never expand into a huge integer (a resource bound on untrusted
+# input). Basis unknown: value predates measurement; review when a real measured quantity is
+# refused.
 MAX_DECIMAL_CHARS = 128
 MAX_DECIMAL_DIGITS = 128
 MAX_DECIMAL_EXPONENT = 128

@@ -41,7 +41,12 @@ class _CapturedSource(Protocol):
     content: bytes
 
 EXTRACTOR_VERSION = "code-extractor/v17"  # v17: star, branch and rebinding re-exports (audit 2026-09-27 C-7)
+# Syntax nodes walked between two deadline checks: the check is cheap, 256 keeps it
+# off the hot path while a stop is still heard within a fraction of a millisecond.
 _SYNTAX_STOP_INTERVAL = 256
+# One stored observation target (the text an edge points at): past 4 096 characters or
+# bytes it keeps a prefix and ends in "... [sha256:<digest>]", so the cut is visible and
+# the whole text stays identifiable. Basis unknown: value predates measurement.
 _MAX_OBSERVATION_TARGET_CHARS = 4096
 _MAX_OBSERVATION_TARGET_BYTES = 4096
 _GRAMMARS = {
@@ -424,8 +429,14 @@ def _sqlite_aliases(tree: ast.Module) -> set[str]:
     }
 
 
+# The `argument->parameter` text stored on one call edge: at most 8 pairs and 256
+# bytes, and a cut list ends in "+N more", so the reader sees what was left out. A
+# display bound on a stored label; basis unknown — value predates measurement.
 MAX_BINDINGS = 8
 MAX_BINDING_BYTES = 256
+# A string literal longer than this is not read as an HTTP route path, so it makes no
+# route edge. Basis unknown: value predates measurement; review if real route
+# templates are longer.
 MAX_ROUTE_PATH_BYTES = 512
 _HTTP_CLIENT_MODULES = frozenset({"requests", "httpx"})
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
@@ -789,7 +800,9 @@ def _route_methods(decorator: ast.Call, function: ast.Attribute) -> tuple[str, .
 # deep parses fine and then aborted the whole extraction from inside
 # `_call_edges`. Depth is measured iteratively before anything recurses.
 MAX_EXPRESSION_DEPTH = 64
-# A re-export chain is followed this many modules deep, then left unresolved.
+# A re-export chain is followed this many modules deep, then left unresolved (the
+# name keeps no target rather than a wrong one); it also stops a re-export cycle.
+# Basis unknown: value predates measurement.
 MAX_REEXPORT_HOPS = 8
 _TOO_DEEP_TEXT = f"<expression nested deeper than {MAX_EXPRESSION_DEPTH}>"
 

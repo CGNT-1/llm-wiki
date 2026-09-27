@@ -75,7 +75,10 @@ from reliable_memory import canonical_json_bytes
 # about 160 MB across five archives and unpacks past a gigabyte; the Go profile
 # downloads 70 MB and then compiles gopls.
 DEFAULT_INSTALL_TIMEOUT_SECONDS = 1800.0
+# How often a second installer checks the install lock; capped by the install deadline.
 LOCK_POLL_SECONDS = 0.05
+# The installer's own lock file (a small JSON record: pid, nonce, time); 1 KiB refuses one that
+# is not ours.
 MAX_LOCK_BYTES = 1024
 # A managed server's install receipt; doctor's archive manifests allow 256 KiB, a generation's 1 MiB.
 MAX_MANIFEST_BYTES = 16 * 1024

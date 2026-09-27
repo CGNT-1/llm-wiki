@@ -21,18 +21,28 @@ from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import unquote_to_bytes, urlsplit
 
 import windows_workspace
+from bounded_io import IO_CHUNK_BYTES
 from lsp_positions import file_uri_to_path, path_to_file_uri
 from repository_scope import RepositoryScope
 
+# Repository-relative paths an LSP answer may name: PATH_MAX 4096, NAME_MAX 255 (bytes and
+# characters), and 256 components (that count predates measurement).
+# Past any of them the path is refused, never shortened.
 _MAX_RELATIVE_PATH = 4096
 _MAX_COMPONENTS = 256
 _MAX_COMPONENT_CHARACTERS = 255
 _MAX_COMPONENT_BYTES = 255
+# A file URI from a server: 4096 bytes of path percent-encoded is up to 12 KiB; 16 KiB leaves
+# room for the scheme and authority and refuses anything longer as not a repository path.
 _MAX_PROVIDER_URI = 16 * 1024
+# Entries one Windows repository directory may list: a directory past 100 000 is refused
+# (never cut). Value predates measurement; review if a real repository reaches it.
 _MAX_DIRECTORY_ENTRIES = 100_000
+# Text redact_lsp_text will scan: output is cut to 1 KiB after redaction, so 256 KiB of input
+# is ample; a larger input returns the oversized marker rather than risk an unredacted cut.
+# The path-token window is half of it. Values predate measurement.
 _MAX_REDACTION_RAW_BYTES = 256 * 1024
 _MAX_REDACTION_PATH_TOKEN = 128 * 1024
-_SOURCE_READ_CHUNK_BYTES = 64 * 1024
 _OVERSIZED_REDACTION_MARKER = "<redacted: oversized LSP log>"
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
@@ -892,7 +902,7 @@ def _read_bounded_chunks(descriptor: int, max_bytes: int, deadline: float | None
     total = 0
     while total <= max_bytes:
         _check_source_read_deadline(deadline)
-        chunk = os.read(descriptor, min(_SOURCE_READ_CHUNK_BYTES, max_bytes + 1 - total))
+        chunk = os.read(descriptor, min(IO_CHUNK_BYTES, max_bytes + 1 - total))
         _check_source_read_deadline(deadline)
         if not chunk:
             break
@@ -938,7 +948,7 @@ def _read_windows_chunks(handle: int, max_bytes: int, deadline: float | None) ->
     windows_workspace.seek_start(handle)
     chunks = []
     for chunk in windows_workspace.read_chunks(
-        handle, chunk_bytes=_SOURCE_READ_CHUNK_BYTES, max_bytes=max_bytes
+        handle, chunk_bytes=IO_CHUNK_BYTES, max_bytes=max_bytes
     ):
         _check_source_read_deadline(deadline)
         chunks.append(chunk)

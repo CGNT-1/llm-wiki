@@ -32,6 +32,8 @@ from memory_state import ROOT, update_state  # noqa: E402
 from session_evidence import SESSION_EVIDENCE_DIR  # noqa: E402
 from settings import setting_value  # noqa: E402
 
+# Session records per consolidation call: a day is split into batches of this many, and every
+# batch is read (record_batches). A prompt-size trade-off, not measured.
 MAX_RECORDS = 12
 # Twenty calls is a very busy night and still a bounded one. The bound belongs to
 # the run, not to the day: a day with more batches than this stays pending and the
@@ -46,7 +48,12 @@ MAX_PROMPT_CHARS = 200_000
 MIN_RECORD_CHARS = 8_000
 GAP_NOTE = "\n\n… (middle of the session omitted) …\n\n"
 MAX_QUOTE_CHARS = 240
+# One lesson's text as stored; the prompt asks for one sentence. A storage bound on model output,
+# not measured; review when a stored lesson reads as cut.
 MAX_TEXT_CHARS = 400
+# The consolidation answer's token cap, the only bound on how many lessons a day yields
+# (docs/research/2026-09-27-a-cut-says-what-it-left-out.md). Basis unknown: value predates
+# measurement; review when an answer is cut at this cap.
 CONSOLIDATION_MAX_TOKENS = 1200
 KINDS = ("decision", "lesson", "gotcha", "rule")
 # A rule is procedural memory: it is read before acting, not searched for after.
@@ -332,6 +339,8 @@ def _operation_id(day: str, lessons: list[Lesson]) -> str:
 
 
 CODE_ROOT = Path(__file__).resolve().parent.parent
+# `git rev-parse HEAD` on a local checkout answers in milliseconds; 5 s bounds a hung git, and a
+# timeout only leaves the revision unknown.
 CODE_REVISION_TIMEOUT_SECONDS = 5
 
 

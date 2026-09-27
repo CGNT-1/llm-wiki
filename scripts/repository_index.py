@@ -51,7 +51,12 @@ MAX_INDEXED_SOURCES = 20_000
 # `_policy` accepts at most 128 roots; a repository with more tracked top-level
 # directories than this is refused rather than silently narrowed.
 MAX_CODE_ROOTS = 128
+# The same 10 s bound repository_scope gives a git probe, whose comment records the
+# hang it was measured against.
 GIT_TIMEOUT_SECONDS = 10.0
+# `git ls-files -z` and probes, refused past it: this repository lists 2 094 files in
+# 107 385 bytes (about 51 per path, 2026-09-27), so 4 MiB holds MAX_INDEXED_SOURCES
+# paths at four times that length.
 MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024
 
 
@@ -1071,6 +1076,12 @@ def _uncovered_roots(root: Path, recorded: tuple[str, ...]) -> list[str]:
 # `docs/research/2026-09-10-warm-index-answers-inside-the-loop.md`.
 
 REFRESH_ROLE = "doctor"
+# The nightly's refresh of every indexed repository (also `--budget-seconds`). One
+# repository of 436 sources indexed from scratch in 118.9 s (MCP_REPOSITORY_INDEX_SECONDS
+# in mcp_server), and a refresh builds only what changed, so 15 minutes covers several
+# full builds; past it each repository not yet built is named `deferred` for the next
+# pass, never half-built. Scales
+# with the number of repositories: a settings candidate.
 REFRESH_ALL_BUDGET_SECONDS = 15 * 60
 _CLI_OK_STATUSES = frozenset(
     {

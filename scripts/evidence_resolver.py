@@ -14,10 +14,22 @@ from pathlib import Path
 from bounded_io import read_stable_bytes
 from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
+# Bounded reads of evidence files; a file past its bound is refused by name, never
+# cut, so a citation or an archive check fails rather than reading a partial file.
+# A daily log read for archiving (also by archive_daily): the largest of 32 daily logs
+# on the installed vault on 2026-09-27 was 867 318 bytes, so 16 MiB is about 19 times
+# that; review if days grow toward it.
 MAX_DAILY_BYTES = 16 * 1024 * 1024
+# A source a grounded answer cites. Basis unknown: value predates measurement; the
+# largest note is about 19 KB and the largest journal segment about 4 MiB.
 MAX_GROUNDED_SOURCE_BYTES = 8 * 1024 * 1024
+# An archive bag's manifest or compile receipt, and one BagIt tag file. Basis unknown:
+# value predates measurement; no bag existed on the installed vault on 2026-09-27.
 MAX_ARCHIVE_MANIFEST_BYTES = 1024 * 1024
 MAX_TAG_FILE_BYTES = 1024 * 1024
+# Bags in one archive month and entries in one listed directory; a month past it is
+# refused rather than resolved from a partial listing. An archive writes about one
+# bag per archived daily log, some 31 a month, so 10 000 only stops a corrupted one.
 MAX_BAGS_PER_MONTH = 10_000
 MAX_DIRECTORY_ENTRIES = 10_000
 ARCHIVE_SCHEMA = Path(__file__).with_name("schemas") / "archive-manifest-v1.json"

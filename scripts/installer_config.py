@@ -17,10 +17,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bounded_io import IO_CHUNK_BYTES  # the one read chunk, shared with every bounded reader
 from integration_hook_config import MAX_CONFIG_BYTES  # one bound for the hook configuration
 from lsp_process_tree import ProcessTree
 
+# Output of `opencode debug config`, read when the installer checks the entry OpenCode sees; a
+# larger output is not parsed and the entry reads `configured_unverified`. Basis unknown: value
+# predates measurement; review when a real output nears it.
 MAX_DEBUG_BYTES = 4 * 1024 * 1024
+# The same probe's deadline; a probe that times out reports `configured_unverified` rather than
+# blocking the install. Basis unknown: value predates measurement; review when a real probe times
+# out.
 DEBUG_TIMEOUT_SECONDS = 15.0
 PROFILE_START = "# >>> LLM-Wiki installer >>>"
 PROFILE_END = "# <<< LLM-Wiki installer <<<"
@@ -485,7 +492,6 @@ def _profile_with_block(existing: str, block: str) -> str:
 # Time to stop a debug child after its answer. basis unknown — value predates measurement; review when a cleanup times out on a slow runner.
 CLEANUP_SECONDS = 2.0
 
-READ_CHUNK_BYTES = 64 * 1024
 
 # Poll interval while reading a child's output; small against CLEANUP_SECONDS, no correctness depends on it.
 POLL_SECONDS = 0.005
@@ -517,7 +523,7 @@ class _BoundedReader:
     def _drain(self, name: str, stream) -> None:
         """Read until end of stream or until the ceiling is reached."""
         while True:
-            data = stream.read(READ_CHUNK_BYTES)
+            data = stream.read(IO_CHUNK_BYTES)
             if not data:
                 return
             if self._store(name, data):

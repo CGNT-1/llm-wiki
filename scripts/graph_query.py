@@ -16,12 +16,19 @@ import json
 import time
 from pathlib import Path
 
+# Edge hops one query may chain; a fourth is refused by name. Basis unknown: value
+# predates measurement; each hop multiplies the rows one step may fan out to.
 MAX_HOPS = 3
 # Largest page a graph query accepts; navigation answers accept 100.
 MAX_LIMIT = 200
 # Default row count of a graph query page; navigation answers default to 10.
 DEFAULT_LIMIT = 50
+# The query text (untrusted input), refused past 4 KiB; a pipeline of one filter, three
+# hops and a limit is a few hundred bytes. Basis: a guard, not a fit.
 MAX_QUERY_BYTES = 4096
+# One node's expansion in one hop: past either ceiling the engine refuses that node,
+# and the answer names it among the refused nodes instead of listing part of it.
+# Basis unknown: values predate measurement.
 HOP_ROW_CEILING = 200
 HOP_WORK_CEILING = 1000
 

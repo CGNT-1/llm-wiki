@@ -19,6 +19,9 @@ from typing import Any
 import lane_score
 from provenance import authority_weight, curated_pages_first, source_type_weight, substance_weight
 
+# Abandoned optional stages allowed to run on at once (docs/research/2026-08-26-who-pays-for-an-
+# abandoned-optional-stage.md); bounds threads a slow lane can hold. Basis unknown: value predates
+# measurement; review when stages are refused for lack of a slot.
 MAX_OPTIONAL_STRAGGLERS = 2
 
 # The ceiling on one optional stage, on top of the share of the caller's budget
@@ -400,6 +403,8 @@ BM25_WEIGHT = 2.0
 DENSE_WEIGHT = 1.0
 GRAPH_WEIGHT = 0.5
 
+# The graph lane walks one hop from its seeds (docs/research/2026-09-22-the-walk-has-nothing-to-
+# walk.md): memory questions never route to it, so no measurement justifies more.
 GRAPH_MAX_HOPS = 1
 # The graph lane's shape: the top-ranked hits a one-hop walk starts from, the
 # neighbours taken per seed and in all. Ranking parameters of the hybrid design, not

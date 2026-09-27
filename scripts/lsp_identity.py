@@ -51,6 +51,9 @@ _REPOSITORY_CONFIG_NAMES = {
     "gopls": "go.mod",
     "rust-analyzer": "Cargo.toml",
 }
+# go.mod or Cargo.toml hashed into a server's identity; a longer file hashes as empty, so precise
+# navigation degrades rather than stops. Basis unknown: value predates measurement; review when a
+# real manifest nears it.
 MAX_REPOSITORY_CONFIG_BYTES = 256 * 1024
 
 # `_probe_node` reports in Pyright's namespace because that is the only caller

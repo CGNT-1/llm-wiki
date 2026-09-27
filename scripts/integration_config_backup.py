@@ -13,6 +13,9 @@ from pathlib import Path
 from reliable_memory import fsync_directory
 from settings import setting_value
 
+# Configuration backups kept per file beside the age setting and MAX_BACKUP_BYTES; the newest is
+# always kept. Basis unknown: value predates measurement; review when an operator needs an older
+# backup.
 MAX_BACKUPS = 10
 # Backups older than the setting `retention.config_backup_days` (90 by default) go,
 # the newest always kept; the count and byte bounds hold alongside.

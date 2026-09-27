@@ -45,6 +45,8 @@ TRAVERSED_EDGES = {
 }
 CONFIRMED_CONFIDENCE = {"confirmed", "high"}
 ZERO_OID = frozenset("0")
+# A revision is a caller-supplied git argument; a SHA is 40-64 characters and a ref name is short,
+# so 1 KiB refuses input no real revision needs (security bound).
 MAX_REVISION_LENGTH = 1024
 
 

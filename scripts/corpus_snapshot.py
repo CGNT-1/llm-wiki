@@ -38,10 +38,23 @@ COLLECTOR_VERSION = "corpus-collector/v1"
 EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
 
 MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
+# Directory entries one corpus collection may inspect before it refuses, a bound on a
+# walk over a tree the user controls. Basis unknown: value predates measurement; the
+# live vault holds about 1 185 entries (2026-09-27). Review when a vault nears it.
 MAX_CORPUS_INSPECTED_ENTRIES = 50_000
+# Directories one corpus collection walks; the live knowledge tree has 76 (2026-09-27). A vault-
+# size bound like `corpus.max_files`; review when it becomes a setting.
 MAX_CORPUS_DIRECTORIES = 5_000
+# Nesting depth of the corpus walk; the live knowledge tree is 5 deep (2026-09-27), so 16 only
+# refuses a runaway tree.
 MAX_CORPUS_DEPTH = 16
+# Headings held in memory for one generation build; exceeding it refuses the build. A vault-size
+# bound like `corpus.max_files`. Basis unknown: value predates measurement; review when doctor
+# warns on corpus size.
 MAX_CORPUS_HEADINGS = 100_000
+# Chunks held in memory for one generation build; the FTS writer holds the same count
+# (`search_memory.MAX_GENERATION_FTS_CHUNKS`). A vault-size bound. Basis unknown: value predates
+# measurement; review when doctor warns on corpus size.
 MAX_CORPUS_CHUNKS = 100_000
 # Default wall-clock budget for one corpus collection (`collect_corpus`).
 DEFAULT_DEADLINE_SECONDS = 30.0

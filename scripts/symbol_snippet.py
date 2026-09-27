@@ -29,7 +29,12 @@ from path_coverage import _current_sha, _freshness, contained_scope
 MAX_LOCATIONS = 5
 # One source file read for a snippet; fresh positions re-read up to 4 MiB.
 MAX_FILE_BYTES = 1024 * 1024
+# Lines of one definition shown; a longer body is cut and the snippet says
+# `truncated: true`. Basis unknown: value predates measurement (about two screens).
 MAX_SNIPPET_LINES = 120
+# Symbols sharing the asked name; past 200 the answer is refused ("too many symbols
+# share this name") so the caller qualifies it instead of reading a partial list.
+# Basis unknown: value predates measurement.
 MAX_NAME_MATCHES = 200
 # `constant` joined on 2026-09-12: a module-level UPPER_CASE name is a
 # definition an operator asks for by name like any other.

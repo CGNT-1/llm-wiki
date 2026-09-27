@@ -26,6 +26,7 @@ try:
 except ImportError:  # pragma: no cover - Windows has no fcntl module
     _fcntl = None
 
+from bounded_io import IO_CHUNK_BYTES
 from corpus_snapshot import always_pruned_directory_name
 from lsp_profiles import navigable_suffixes, profile_configuration_names
 from reliable_memory import canonical_json_bytes
@@ -52,8 +53,16 @@ PYTHON_CONFIG_NAMES = frozenset(
         "uv.lock",
     }
 )
+# The size of a checkout one freshness proof walks and hashes; a larger one is refused
+# with a ValueError and navigation answers from structural evidence instead. Basis
+# unknown: both values predate measurement (introduced with the proof, 2026-07-22).
+# Review when a repository the operator navigates approaches either, or when they
+# move into scripts/settings.py.
 MAX_REVISION_FILES = 100_000
 MAX_REVISION_BYTES = 2 * 1024 * 1024 * 1024
+# Bounded read of `git status --porcelain=v2 -z` (untrusted output). A changed-file
+# record is about 115 bytes plus its path, so 16 MiB holds MAX_REVISION_FILES records
+# with paths averaging about 50 bytes; a larger status is refused, not truncated.
 MAX_GIT_STATUS_BYTES = 16 * 1024 * 1024
 # `git status` when the caller gave no deadline (docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
 GIT_STATUS_TIMEOUT_SECONDS = 5.0
@@ -61,17 +70,40 @@ _GIT_COMMIT_RE = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 # Time to reap a git child after it was stopped; the stop itself is already bounded.
+# A killed process is reaped in milliseconds; basis unknown beyond that.
 _PROCESS_CLEANUP_SECONDS = 0.2
+# The private-index fast path is armed only below these bounds; above them the proof
+# takes the slower full verification, so exceeding one costs time, never an answer.
+# Measured 2026-09-27: this repository's index is 232 KB for 1 981 files, about 117
+# bytes an entry, so 64 MiB covers well over MAX_REVISION_FILES entries. The two
+# unmatched-file bounds (entries the pass did not hash) predate measurement; review
+# if verification is seen falling back on ordinary checkouts.
 _MAX_PRIVATE_INDEX_BYTES = 64 * 1024 * 1024
 _MAX_PRIVATE_UNMATCHED_TRACKED_FILES = 4096
 _MAX_PRIVATE_UNMATCHED_TRACKED_BYTES = 32 * 1024 * 1024
+# Bounded reads of the user's git config, attributes and ignore files, which the proof
+# copies into its private repository (untrusted input). Measured 2026-09-27 on this
+# machine: a user .gitconfig of 181 bytes and a repository config of 916 bytes, so
+# 256 KiB is over 250 times a real file; a larger one is refused, not truncated.
+# Review if a legitimate configuration is ever refused.
 _MAX_PRIVATE_CONFIG_BYTES = 256 * 1024
 _MAX_PRIVATE_ATTRIBUTES_BYTES = 256 * 1024
 _MAX_PRIVATE_IGNORE_BYTES = 256 * 1024
+# `.git/HEAD` holds a 40/64-hex object id or `ref: <path>`; a ref is a file path, so
+# Linux's PATH_MAX (4096 bytes, limits.h) bounds any HEAD git itself could follow.
 _MAX_HEAD_FENCE_BYTES = 4096
+# An index entry path longer than 0xFFF bytes is stored with the 12-bit length field
+# saturated and read to its NUL (gitformat-index(5)); 4096 is that field's range plus
+# the NUL, and PATH_MAX again. A longer name makes the entry unreadable, not cut.
 _MAX_PRIVATE_INDEX_PATH_BYTES = 4096
-_HASH_CHECK_CHUNK_BYTES = 64 * 1024
+# Hashing uses the shared read step (bounded_io.IO_CHUNK_BYTES).
+_HASH_CHECK_CHUNK_BYTES = IO_CHUNK_BYTES
+# One write between stop checks: 1 MiB goes to a local disk in milliseconds, so a
+# cancel is heard within one chunk; the size affects only that latency.
 _PRIVATE_WRITE_CHUNK_BYTES = 1024 * 1024
+# The inventory hint is a cache: a hint over either bound is simply not kept, and
+# the next proof rescans. The bounds cap the cache's memory (4096 paths, 1 MiB of
+# names); basis unknown beyond that — review if proofs rescan large checkouts often.
 _MAX_INVENTORY_HINT_ENTRIES = 4096
 _MAX_INVENTORY_HINT_PATH_BYTES = 1024 * 1024
 _UNSUPPORTED_INDEX_EXTENSIONS = frozenset({b"link", b"sdir", b"UNTR", b"FSMN"})

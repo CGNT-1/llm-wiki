@@ -22,6 +22,9 @@ SCHEMA_VERSION = "repository-scope/v1"
 # written for, not the machine's speed. Research:
 # `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
 GIT_TIMEOUT_SECONDS = 10.0
+# The scope probe's git output is a handful of paths and object ids from `rev-parse`;
+# each path is bounded by PATH_MAX (4 096 bytes on Linux, limits.h), so 8 KiB holds
+# the answer and anything larger is refused as not git's answer.
 MAX_GIT_OUTPUT_BYTES = 8192
 MAX_PATH_LENGTH = 4096
 

@@ -51,17 +51,37 @@ from reliable_memory import (
 # handler -- imported under this module's own private name because that is the
 # attribute its tests replace. Research:
 # `docs/research/2026-09-17-inst-the-second-installer-gets-the-first-ones-guarantees.md`.
+# The whole explicit install when no deadline is given: a 19 MB download and unpack. Value
+# predates measurement; review when an install times out on a working network.
 DEFAULT_INSTALL_TIMEOUT_SECONDS = 120.0
+# How often a second installer checks the install lock; capped by the deadline.
 LOCK_POLL_SECONDS = 0.01
+# A lock file younger than this may still be being written by its owner, so it is not judged
+# stale yet. Value predates measurement.
 LOCK_INITIALIZATION_GRACE_SECONDS = 10.0
 COPY_CHUNK_BYTES = IO_CHUNK_BYTES
+# The unpacked Pyright 1.1.411 package is 19.3 MB in 5 424 files (measured 2026-09-27 in
+# cache/code-tools). 64 MiB, about 3.3 times that, refuses a wrong or hostile archive before it
+# fills the disk (`pyright_archive_aggregate_limit`). Review when the pinned version changes.
 MAX_TOTAL_FILE_BYTES = 64 * 1024 * 1024
+# Linux PATH_MAX (`getconf PATH_MAX /` = 4096): a member path the OS could not open is refused.
 MAX_PATH_BYTES = 4096
+# NAME_MAX of ext4, APFS and NTFS (`getconf NAME_MAX /` = 255): one component the OS can create.
 MAX_PATH_COMPONENT_BYTES = 255
+# Security bounds on untrusted pax extended headers (POSIX.1-2001): one member's header bytes,
+# their field count, and the whole archive's hidden metadata. The pinned tarball needs none
+# of this room; the values only stop a crafted archive from making the parser allocate without
+# bound, and each refusal is `pyright_archive_pax_limit`. The exact values predate measurement;
+# review when a pinned archive is refused for them.
 MAX_PAX_BYTES = 1024 * 1024
 MAX_PAX_FIELDS = 256
 MAX_EXTENDED_METADATA_BYTES = 16 * 1024 * 1024
+# Windows lists the installer's parent directory to recognise its own staging name. It holds a
+# few pinned versions; 16 384 only bounds a hostile directory, and past it the listing is refused
+# (`windows_workspace.list_directory`), never cut. Value predates measurement; review if refused.
 MAX_RUNTIME_PARENT_ENTRIES = 16_384
+# /proc/self/mountinfo is 2.4 KB on this host (2026-09-27), about 100 bytes a mount; 4 MiB
+# covers tens of thousands of mounts on a container host and refuses a runaway read.
 MAX_MOUNT_TABLE_BYTES = 4 * 1024 * 1024
 # The installer's own lock file; doctor's runtime locks allow 4 KiB.
 MAX_LOCK_BYTES = 1024
@@ -3529,6 +3549,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# How many chained causes a failed download prints. The path chains at most
+# HTTPError -> URLError -> OSError, so 5 leaves room; the bound also ends a cyclic
+# `__context__` chain. A deeper chain ends with a line saying more causes exist.
+# Review if a failure report ever ends at the fifth cause.
 MAX_CAUSE_DEPTH = 5
 
 
@@ -3547,6 +3571,13 @@ def _print_cause_chain(error: BaseException) -> None:
             return
         print(f"  caused by: {type(cause).__name__}: {cause}", file=sys.stderr)
         cause = cause.__cause__ or cause.__context__
+    _say_more_causes(cause)
+
+
+def _say_more_causes(cause: BaseException | None) -> None:
+    """The chain went on past the printed depth: say so instead of stopping silently."""
+    if cause is not None:
+        print(f"  ... further causes not shown (more than {MAX_CAUSE_DEPTH})", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

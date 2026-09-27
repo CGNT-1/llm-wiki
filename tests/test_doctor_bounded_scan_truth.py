@@ -1,18 +1,12 @@
-"""A bounded read may refuse deletion; it may not allege corruption.
+"""A health read judges every transaction row, and only on evidence.
 
-The doctor caps every operational scan at ``MAX_OPERATIONAL_ROWS``. The
-``operation`` table is larger than the ``transaction`` table by construction --
-every transaction that is neither preparing nor discarded must own at least one
-operation -- so the operation scan is the first to hit the ceiling, and it hits
-it during ordinary growth rather than under attack.
-
-Two false statements followed from that. The truncation appended
-``transaction_state_unknown``, a corruption claim, to the deletion codes. And
-the transactions whose operations fell past the ceiling looked like
-transactions with no operations at all, which the row check reads as corrupt.
-
-Both are permanent, because the table only grows, so both contradict
-``knowledge/notes/self-resolving-health-findings-decision.md``.
+The doctor used to cap the transaction and operation scans at
+``MAX_OPERATIONAL_ROWS`` (10 000). The installed vault outgrew it (29 275
+transactions, 37 509 operations on 2026-09-27), so every report judged a third
+of the rows and said so. Both tables are now streamed whole; these tests hold a
+vault past the old cap to the same truth as a small one: no truncation, no
+corruption alleged from rows unread, and a real defect found wherever it lies.
+See ``docs/research/2026-09-27-doctor-reads-every-transaction.md``.
 """
 
 from __future__ import annotations
@@ -27,6 +21,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import doctor  # noqa: E402
+
+# The row cap the transaction scans used to have; a vault past it is ordinary.
+OLD_SCAN_CAP = 10_000
 
 _SCHEMA = """
 CREATE TABLE "transaction" (
@@ -121,26 +118,25 @@ def _now() -> datetime:
 def test_an_operation_table_over_the_ceiling_is_not_called_corrupt(
     tmp_path: Path, now: datetime
 ) -> None:
-    """The rows the scan never read cannot be evidence of anything."""
+    """Every operation is read, so a healthy table past the old cap is healthy."""
     per_transaction = 3
-    count = doctor.MAX_OPERATIONAL_ROWS // per_transaction + 200
+    count = OLD_SCAN_CAP // per_transaction + 200
     _build_vault(
         tmp_path, now, transactions=count, operations_each=per_transaction
     )
 
     details = _check(tmp_path, now)["details"]
 
-    assert "transaction_operation_scan_truncated" in details["codes"]
-    assert "transaction_metadata_corrupt" not in details["codes"]
+    assert details["codes"] == []
     assert "transaction_state_corrupt" not in details["deletion_codes"]
 
 
-def test_a_truncated_scan_does_not_claim_an_unknown_transaction_state(
+def test_a_scan_past_the_old_cap_claims_no_unknown_transaction_state(
     tmp_path: Path, now: datetime
 ) -> None:
     """`transaction_state_unknown` is a claim about a row that was read."""
     per_transaction = 3
-    count = doctor.MAX_OPERATIONAL_ROWS // per_transaction + 200
+    count = OLD_SCAN_CAP // per_transaction + 200
     _build_vault(
         tmp_path, now, transactions=count, operations_each=per_transaction
     )
@@ -150,27 +146,28 @@ def test_a_truncated_scan_does_not_claim_an_unknown_transaction_state(
     assert "transaction_state_unknown" not in details["deletion_codes"]
 
 
-def test_a_truncated_scan_still_refuses_deletion(
+def test_a_table_past_the_old_cap_is_read_whole(
     tmp_path: Path, now: datetime
 ) -> None:
-    """Fail closed: a read that could not see every row cannot permit deletion."""
+    """No row cap, so no incomplete read: every row is counted by its state."""
     per_transaction = 3
-    count = doctor.MAX_OPERATIONAL_ROWS // per_transaction + 200
+    count = OLD_SCAN_CAP // per_transaction + 200
     _build_vault(
         tmp_path, now, transactions=count, operations_each=per_transaction
     )
 
     details = _check(tmp_path, now)["details"]
 
-    assert "transaction_scan_incomplete" in details["deletion_codes"]
+    assert "transaction_scan_incomplete" not in details["deletion_codes"]
+    assert details["states"]["committed"] == count
 
 
 def test_a_healthy_vault_over_the_ceiling_is_not_in_error(
     tmp_path: Path, now: datetime
 ) -> None:
-    """Ordinary growth past a read ceiling is not a health problem."""
+    """Ordinary growth past the old cap is not a health problem."""
     per_transaction = 3
-    count = doctor.MAX_OPERATIONAL_ROWS // per_transaction + 200
+    count = OLD_SCAN_CAP // per_transaction + 200
     _build_vault(
         tmp_path, now, transactions=count, operations_each=per_transaction
     )
@@ -181,7 +178,7 @@ def test_a_healthy_vault_over_the_ceiling_is_not_in_error(
 def test_a_vault_under_the_ceiling_is_unaffected(
     tmp_path: Path, now: datetime
 ) -> None:
-    """The change touches only the truncated path."""
+    """A small vault reads as it always did."""
     _build_vault(tmp_path, now, transactions=50, operations_each=3)
 
     result = _check(tmp_path, now)
@@ -204,7 +201,7 @@ def test_a_real_unknown_state_is_still_an_error(
     assert "transaction_state_unknown" in result["details"]["deletion_codes"]
 
 
-def test_a_missing_operation_under_the_ceiling_is_still_corrupt(
+def test_a_missing_operation_is_still_corrupt(
     tmp_path: Path, now: datetime
 ) -> None:
     """A complete read that finds no operations still accuses."""
@@ -257,3 +254,90 @@ def test_a_committed_transaction_still_needs_a_plan_hash(
 
     assert result["status"] == "error"
     assert "transaction_state_corrupt" in result["details"]["deletion_codes"]
+
+
+def _set_plan_hash(state_root: Path, transaction_id: str, plan_hash: str) -> None:
+    database = state_root / "run/markdown-transactions.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'UPDATE "transaction" SET plan_hash = ? WHERE id = ?', (plan_hash, transaction_id)
+        )
+
+
+def _delete_operations(state_root: Path, transaction_id: str) -> None:
+    database = state_root / "run/markdown-transactions.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute('DELETE FROM "operation" WHERE transaction_id = ?', (transaction_id,))
+
+
+def _corrupt_codes(state_root: Path, now: datetime) -> tuple[bool, bool]:
+    details = _check(state_root, now)["details"]
+    return (
+        "transaction_metadata_corrupt" in details["codes"],
+        "transaction_state_corrupt" in details["deletion_codes"],
+    )
+
+
+def test_a_corrupt_row_past_the_old_cap_is_found(tmp_path: Path, now: datetime) -> None:
+    """Past the cap the verdict was about the cap, not the rows: the capped scan called
+    this healthy vault corrupt, and the oldest rows it left unread could hide a real defect."""
+    _build_vault(tmp_path, now, transactions=OLD_SCAN_CAP + 200, operations_each=1)
+    healthy = _corrupt_codes(tmp_path, now)
+    _set_plan_hash(tmp_path, "tx-000000", "")
+
+    assert (healthy, _corrupt_codes(tmp_path, now)) == ((False, False), (True, True))
+
+
+def test_a_missing_operation_past_the_old_cap_is_found(tmp_path: Path, now: datetime) -> None:
+    """A truncated operation read abstained on every row; a whole read accuses on evidence."""
+    _build_vault(tmp_path, now, transactions=OLD_SCAN_CAP // 3 + 200, operations_each=3)
+    _delete_operations(tmp_path, "tx-000000")
+
+    assert _corrupt_codes(tmp_path, now) == (True, True)
+
+
+def test_an_operation_without_its_transaction_is_corrupt(tmp_path: Path, now: datetime) -> None:
+    """The operation read joined its transaction, so an orphan operation vanished from view."""
+    _build_vault(tmp_path, now, transactions=3, operations_each=1)
+    database = tmp_path / "run/markdown-transactions.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'INSERT INTO "operation" VALUES (?, 0, ?, ?, ?, ?, 1, 2, 1)',
+            ("tx-gone", "create", "knowledge/notes/orphan.md", "absent", "c" * 64),
+        )
+
+    assert _corrupt_codes(tmp_path, now) == (True, True)
+
+
+def test_a_transaction_quarantined_before_planning_is_not_corrupt(
+    tmp_path: Path, now: datetime
+) -> None:
+    """`_commit_promotion` rolls back the plan and operations, then quarantines the row."""
+    _build_vault(
+        tmp_path, now, transactions=3, operations_each=0, state="quarantined", plan_hash=""
+    )
+
+    assert _corrupt_codes(tmp_path, now) == (False, False)
+
+
+def test_a_quarantined_transaction_with_a_plan_still_owns_operations(
+    tmp_path: Path, now: datetime
+) -> None:
+    """The exemption is for a row that never planned, not for a planned one missing work."""
+    _build_vault(tmp_path, now, transactions=3, operations_each=0, state="quarantined")
+
+    assert _corrupt_codes(tmp_path, now) == (True, True)
+
+
+def test_an_undo_listing_past_its_bound_refuses_deletion_without_accusing(
+    tmp_path: Path, now: datetime
+) -> None:
+    """Directories the listing never reached are unknown, not missing."""
+    _build_vault(tmp_path, now, transactions=doctor.MAX_RUNTIME_ENTRIES + 50, operations_each=1)
+
+    details = _check(tmp_path, now)["details"]
+
+    assert (
+        "transaction_artifact_state_unknown" in details["deletion_codes"],
+        "transaction_metadata_corrupt" in details["codes"],
+    ) == (True, False)

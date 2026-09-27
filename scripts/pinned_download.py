@@ -27,6 +27,8 @@ MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024
 MAX_MEMBERS = 8192
 # One archive member; an exported vault's members are bounded at 16 MiB.
 MAX_MEMBER_BYTES = 32 * 1024 * 1024
+# Depth of one archive member path: the deepest installed server file is 16 components deep
+# (rust-analyzer's toolchain, measured in cache/code-tools 2026-09-27); 64 refuses a crafted one.
 MAX_PATH_COMPONENTS = 64
 
 

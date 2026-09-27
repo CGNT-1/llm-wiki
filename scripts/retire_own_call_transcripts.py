@@ -33,6 +33,9 @@ from retire_lsp_evidence import SCAN_BUDGET_SECONDS  # noqa: E402
 
 OWN_CALL_ENTRYPOINT = "sdk-cli"
 HEAD_LINES = 40  # the entry point is in the first records of a transcript
+# Transcripts one nightly pass retires; the rest wait for the next night, so nothing is lost.
+# Bounds one pass beside its deadline. Basis unknown: value predates measurement; review when a
+# pass stops on this count.
 MAX_TRANSCRIPTS_PER_PASS = 2000
 
 

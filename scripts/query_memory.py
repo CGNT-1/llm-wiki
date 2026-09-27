@@ -979,6 +979,9 @@ def _packed_context(evidence: list[GroundedEvidence], index_text: str, budget: o
     return rendered
 
 
+# Words shorter than three characters (articles, particles) carry no evidence for a citation's
+# relevance; CJK is matched by bigrams instead. Basis unknown: value predates measurement; review
+# when a relevance check misses a real short term.
 _RELEVANCE_MIN_TOKEN_LENGTH = 3
 # Function words carry no evidence, so sharing only these proves nothing.
 _RELEVANCE_STOPWORDS = frozenset(
@@ -2590,6 +2593,9 @@ def _provider_response(
 
 
 
+# The redacted excerpt of an unparsable answer kept in the error (docs/research/2026-09-13-an-
+# unparsable-answer-must-say-what-it-said.md): enough to name the cause, bounded so the error
+# stays one line.
 _UNPARSABLE_EXCERPT_CHARS = 200
 
 
