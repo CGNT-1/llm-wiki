@@ -106,6 +106,15 @@ _MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
 _MAX_ORDINARY_WRITES = _MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
 _INTERNAL_WRITE_SECONDS = 1.0
 _OWNER_JOIN_SECONDS = 1.0
+# On Windows a pipe stream is a C-runtime descriptor: the UCRT's `_read` holds the
+# descriptor's lock for the whole blocking `ReadFile`, and `_close` takes the same lock,
+# so closing a stream its owner is still reading waits for that read forever. A cancel
+# issued before the read began finds nothing (ERROR_NOT_FOUND) and is lost. See
+# docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md.
+_CLOSE_WAITS_FOR_A_READ = os.name == "nt"
+# Windows `select()` accepts only sockets, so the reader waits on a pipe in one blocking
+# read instead of polling it; that read is what `_CLOSE_WAITS_FOR_A_READ` waits on.
+_PIPES_HAVE_NO_SELECT = os.name == "nt"
 
 
 class ProtocolViolation(RuntimeError):
@@ -277,7 +286,7 @@ class _OwnedReader:
         self._stopped = stopped
 
     def read(self, size: int = -1) -> bytes:
-        if os.name == "nt":
+        if _PIPES_HAVE_NO_SELECT:
             return self._stream.read(size)
         descriptor = _descriptor_of(self._stream)
         if descriptor is None:
@@ -995,6 +1004,12 @@ def _owner_never_started(owner: threading.Thread) -> bool:
     return owner.ident is None and owner not in threading.enumerate()
 
 
+def _owner_holds_stream(owner: threading.Thread, stream: BinaryIO) -> bool:
+    """A live owner is inside the descriptor's read or write; only it may close it."""
+    held = _CLOSE_WAITS_FOR_A_READ and _descriptor_of(stream) is not None
+    return held and owner is not threading.current_thread() and owner.is_alive()
+
+
 def _owner_present(owner: threading.Thread) -> bool:
     return owner.ident is not None or owner in threading.enumerate()
 
@@ -1134,8 +1149,8 @@ class LspProtocol:
         self._io_stopped.set()
         self._put_stop_sentinel()
         self._cancel_started_owners_io()
-        self._interrupt_stream(self._reader)
-        self._interrupt_stream(self._writer)
+        self._interrupt_unowned_streams()
+        self._cancel_until_owners_stop(startup_deadline)
         cleanup_errors, cleanup_interruption = self._join_owners_after_failed_start(startup_deadline)
         if not cleanup_errors:
             _raise_collected_errors((startup_error,))
@@ -1306,9 +1321,34 @@ class LspProtocol:
         self._io_stopped.set()
         self._cancel_owner_io(self.reader_thread)
         self._cancel_owner_io(self.writer_thread)
-        self._interrupt_stream(self._reader)
-        self._interrupt_stream(self._writer)
+        self._interrupt_unowned_streams()
         self._put_stop_sentinel()
+
+    def _interrupt_unowned_streams(self) -> None:
+        self._interrupt_unowned(self._reader, self.reader_thread)
+        self._interrupt_unowned(self._writer, self.writer_thread)
+
+    def _interrupt_unowned(self, stream: BinaryIO, owner: threading.Thread) -> None:
+        """Close a stream nobody is inside; a live Windows owner closes its own on exit."""
+        if _owner_holds_stream(owner, stream):
+            self._shutdown_stream_sockets(stream)
+            return
+        self._interrupt_stream(stream)
+
+    def _cancel_until_owners_stop(self, deadline: float) -> None:
+        self._cancel_until_stopped(self.reader_thread, self._reader, deadline)
+        self._cancel_until_stopped(self.writer_thread, self._writer, deadline)
+
+    def _cancel_until_stopped(self, owner: threading.Thread, stream: BinaryIO, deadline: float) -> None:
+        """Re-issue the cancel until the owner leaves its call, never past the deadline.
+
+        One cancel sent before the owner's `ReadFile` or `WriteFile` began finds nothing
+        and is lost; the owner then blocks until the peer writes, which for a closed
+        conversation is never. Each retry waits on the owner's exit, not on a clock.
+        """
+        while _owner_holds_stream(owner, stream) and time.monotonic() < deadline:
+            self._cancel_owner_io(owner)
+            owner.join(_CANCELLATION_POLL_SECONDS)
 
     def _reset_write_accounting(self) -> None:
         with self._state_lock:
@@ -1327,6 +1367,7 @@ class LspProtocol:
         deadline = _close_deadline(deadline)
         self._close_logically()
         self._stop_io()
+        self._cancel_until_owners_stop(deadline)
         self._join_owners(deadline)
         self._reset_write_accounting()
         self._drain_write_queue()
@@ -2009,6 +2050,11 @@ class LspProtocol:
                 next_layer = getattr(current, "buffer", None)
             current = next_layer
         return tuple(layers)
+
+    @classmethod
+    def _shutdown_stream_sockets(cls, stream: BinaryIO) -> None:
+        for layer in cls._stream_layers(stream):
+            _shutdown_socket(getattr(layer, "_sock", None))
 
     @classmethod
     def _interrupt_stream(cls, stream: BinaryIO) -> None:

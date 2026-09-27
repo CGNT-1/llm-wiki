@@ -97,6 +97,14 @@ required-version = "==0.12.3"
 testpaths = ["tests"]
 # `conftest.py` injects scripts/ into sys.path; no package install needed.
 pythonpath = ["scripts"]
+# A test still running after this many seconds has every thread's stack dumped to the
+# log, so a hang names itself instead of silently burning the CI job until it is
+# cancelled (run 36312497314 lost 48 minutes on one hung test and named nothing).
+# Basis: the slowest legitimate test of the last green main run (36260843078: 88 470
+# test cases in 36 jobs) took 384.9 s; 600 s is about 1.5 times that and well inside the
+# 60-minute Windows job limit. Raise it if a legitimate test ever needs longer.
+# docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md
+faulthandler_timeout = 600
 
 [tool.pyright]
 # Declared so Pyright never searches ancestor directories for its settings.

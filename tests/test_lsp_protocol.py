@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -2831,3 +2832,77 @@ def test_windows_owner_handles_are_retained_cancelled_and_closed_once(
     assert protocol._writer_os_handle is None
     assert not protocol.reader_thread.is_alive()
     assert not protocol.writer_thread.is_alive()
+
+
+class _CrtPipeReader:
+    """A Windows pipe as the C runtime serves it: close waits for a read in progress.
+
+    The fake records a close that arrives while its owner is inside `read` instead of
+    blocking, which on Windows is the hang of CI run 36312497314. See
+    docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md.
+    """
+
+    def __init__(self) -> None:
+        self._read_fd, self._write_fd = os.pipe()
+        self.inside_read = threading.Event()
+        self.released = threading.Event()
+        self.closed_during_read = False
+
+    def fileno(self) -> int:
+        return self._read_fd
+
+    def read(self, _size: int = -1) -> bytes:
+        self.inside_read.set()
+        self.released.wait(LONG_TIMEOUT)
+        self.inside_read.clear()
+        return b""
+
+    def close(self) -> None:
+        self.closed_during_read = self.closed_during_read or self.inside_read.is_set()
+        self.released.set()
+        os.close(self._read_fd)
+        os.close(self._write_fd)
+
+
+class _LateCancelProtocol(LspProtocol):
+    """CancelSynchronousIo at the platform boundary: the first cancel finds no read yet."""
+
+    reader_cancels = 0
+
+    def _cancel_owner_io(self, owner: threading.Thread) -> None:
+        if owner is not self.reader_thread:
+            return
+        self.reader_cancels += 1
+        if self.reader_cancels > 1:
+            self._reader.released.set()
+
+
+def test_a_lost_cancel_is_repeated_and_a_read_stream_is_never_closed_under_its_reader(monkeypatch) -> None:
+    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", True, raising=False)
+    monkeypatch.setattr(lsp_protocol, "_PIPES_HAVE_NO_SELECT", True, raising=False)
+    reader = _CrtPipeReader()
+    protocol = _LateCancelProtocol(
+        reader, _BlockingWriter(block_after=100), "crt-pipe", fatal_callback=lambda _reason: None  # type: ignore[arg-type]
+    )
+    assert reader.inside_read.wait(LONG_TIMEOUT)
+
+    protocol.close()
+
+    assert not reader.closed_during_read
+    assert protocol.reader_cancels > 1
+    assert not protocol.reader_thread.is_alive()
+
+
+def test_a_peer_closes_cleanly_after_its_client_left() -> None:
+    """A send that met a departed client leaves nothing for close to send again.
+
+    Under load the fatal-callback test's handler sent its second frame after teardown
+    had closed the client; the buffered peer writer kept it and raised BrokenPipeError
+    from close. docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md
+    """
+    client, server = socket.socketpair()
+    peer = FakeLspPeer(server)
+    client.close()
+    with pytest.raises(OSError):
+        peer.send_raw(b"Worse\r\n\r\n")
+    peer.close()

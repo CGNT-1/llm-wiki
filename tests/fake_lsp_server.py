@@ -42,7 +42,6 @@ class FakeLspPeer:
     def __init__(self, sock: socket.socket) -> None:
         self._socket = sock
         self.reader = sock.makefile("rb")
-        self.writer = sock.makefile("wb")
         self._write_lock = threading.Lock()
 
     def read(self) -> dict[str, Any]:
@@ -52,18 +51,20 @@ class FakeLspPeer:
         self.send_raw(_frame(message))
 
     def send_raw(self, value: bytes) -> None:
+        """One unbuffered send, so a failed send leaves nothing behind for close.
+
+        A buffered writer kept the bytes a departed client never read and raised the
+        same BrokenPipeError again from `close()`, in teardown, after the handler had
+        already met it. See docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md.
+        """
         with self._write_lock:
-            self.writer.write(value)
-            self.writer.flush()
+            self._socket.sendall(value)
 
     def close(self) -> None:
         try:
-            self.writer.close()
+            self.reader.close()
         finally:
-            try:
-                self.reader.close()
-            finally:
-                self._socket.close()
+            self._socket.close()
 
 
 def _send_oversized_frame(peer: FakeLspPeer, request_id: object) -> None:
@@ -950,12 +951,18 @@ def _write_pid_file(path: str, pid: int) -> None:
     os.replace(temporary, path)
 
 
-def _report_descendant_pid(args: argparse.Namespace, pid: int) -> None:
-    """The pid goes to a file, to a log, or — with neither asked for — to stdout."""
+def _print_or_file_pid(args: argparse.Namespace, pid: int) -> None:
+    """The pid file when one is asked for; stdout when no log is asked for either."""
     if args.descendant_pid_file:
         _write_pid_file(args.descendant_pid_file, pid)
-    elif not args.descendant_pid_log:
+        return
+    if not args.descendant_pid_log:
         print(json.dumps({"descendant_pid": pid}), flush=True)
+
+
+def _report_descendant_pid(args: argparse.Namespace, pid: int) -> None:
+    """The pid goes to a file, to a log, or — with neither asked for — to stdout."""
+    _print_or_file_pid(args, pid)
     if args.descendant_pid_log:
         with open(args.descendant_pid_log, "a", encoding="ascii") as stream:
             stream.write(f"{pid}\n")
