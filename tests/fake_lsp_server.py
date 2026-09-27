@@ -891,7 +891,11 @@ def _process_server_parser() -> argparse.ArgumentParser:
 
 
 def _report_group_signal(_signum: int, _frame: object) -> None:
-    print(json.dumps({"group_signal": "SIGTERM"}), flush=True)
+    """One unbuffered write: `print` here re-entered stdout's buffer and killed the fixture.
+
+    See `docs/research/2026-09-27-a-signal-handler-writes-without-a-buffer.md`.
+    """
+    os.write(sys.stdout.fileno(), json.dumps({"group_signal": "SIGTERM"}).encode() + b"\n")
 
 
 def _terminate_descendant(descendant: subprocess.Popen) -> None:
