@@ -1814,7 +1814,9 @@ def test_doctor_reports_missing_pyright(tmp_path, monkeypatch) -> None:
         lambda *a, **k: _missing_pyright_identity(),
     )
     check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT)
-    assert check["status"] == "degraded"
+    # Never installed is an optional feature not taken, not a fault (2026-09-27,
+    # docs/research/2026-09-27-what-is-not-yet-due-is-not-a-warning.md).
+    assert check["status"] == "skipped"
     assert check["details"]["status"] == "missing"
     assert check["details"]["codes"] == ["pyright_missing"]
     assert "install_pyright" in check["details"]["recommended_action"]

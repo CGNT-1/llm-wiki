@@ -31,7 +31,7 @@ import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
 from evidence_resolver import _daily_part_bounds
-from install_control import SCHEDULER_LIMIT_HOURS, validate_install_state
+from install_control import SCHEDULER_LIMIT_HOURS, installed_at, validate_install_state
 from iso_time import utc_text
 from reliable_memory import (
     open_readonly_operational_db,
@@ -2993,14 +2993,26 @@ def _pyright_check(
     details["executable_sha256_present"] = identity.executable_sha256 is not None
     if identity.qualified:
         return _result("pyright", "ok", "Pyright identity is qualified.", details)
+    return _unqualified_pyright_result(identity, details, codes)
+
+
+def _unqualified_pyright_result(identity, details: dict, codes: list[str]) -> dict:
+    """Not installed at all is an optional feature not taken; anything else degrades."""
     _record_pyright_degradation(identity, details, codes)
     details["recommended_action"] = _pyright_recommended_action(codes)
-    return _result(
-        "pyright",
-        "degraded",
-        _pyright_degraded_message(codes),
-        details,
-    )
+    if tuple(identity.degradation_codes) == ("pyright_missing",):
+        return _result("pyright", "skipped", _PYRIGHT_NOT_INSTALLED_MESSAGE, details)
+    return _result("pyright", "degraded", _pyright_degraded_message(codes), details)
+
+
+# Pyright is installed by a separate, explicit operator action; absent from every
+# discovery source with nothing else wrong, it is an optional feature not taken,
+# as `models` says of semantic search. Present but wrong still degrades. See
+# docs/research/2026-09-27-what-is-not-yet-due-is-not-a-warning.md.
+_PYRIGHT_NOT_INSTALLED_MESSAGE = (
+    "Pyright is not installed (optional); Python code navigation answers from "
+    f"structure alone. To install: {_PYRIGHT_INSTALL_ACTION}"
+)
 
 
 def _extend_unique(codes: list[str], extra) -> None:
@@ -5157,7 +5169,8 @@ def _scheduler_check(
     details["last_weekly_at"] = state.get("last_weekly_at")
     details["last_update"] = state.get("last_update")
     verdicts = _scheduler_verdicts(state, now, home or Path.home())
-    return _with_findings(_nightly_result(state, now, details), verdicts)
+    nightly = _nightly_result(state, now, details, installed_at(state_root))
+    return _with_findings(nightly, verdicts)
 
 
 def _scheduler_verdicts(state: dict, now: datetime, home: Path) -> tuple[tuple[str, str] | None, ...]:
@@ -5495,14 +5508,42 @@ def _state_instant(text: str) -> datetime | None:
     return parsed.astimezone()
 
 
-def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
+def _nightly_result(
+    state: dict, now: datetime, details: dict, installed: datetime | None = None
+) -> dict:
     status = state.get("last_nightly_status")
     last_date = str(state.get("last_nightly_date", ""))[:10]
     if status == "failed":
         return _result("scheduler", "error", "Last nightly maintenance failed.", details)
     if not status or not last_date:
-        return _result("scheduler", "skipped", "Nightly maintenance status is unknown.", details)
+        return _never_ran_result(installed, now, details)
     return _nightly_freshness_result(state, status, last_date, now, details)
+
+
+# The first nightly after an install is due within one schedule period (the pass
+# runs daily) plus the longest a pass may run before its unit stops it; derived,
+# so it follows `SCHEDULER_LIMIT_HOURS`. `NIGHTLY_FRESH_SECONDS` measures the gap
+# between two completions and is too short here: an install at 03:30 waits 23.5 h
+# for the next 03:00 and may then run 4 h. See
+# docs/research/2026-09-27-what-is-not-yet-due-is-not-a-warning.md.
+FIRST_NIGHTLY_DUE_SECONDS = 24 * 3600 + SCHEDULER_LIMIT_HOURS["nightly"] * 3600
+
+
+def _never_ran_result(installed: datetime | None, now: datetime, details: dict) -> dict:
+    """No nightly on record: pending until the first one is due, then a finding.
+
+    Without an install record nothing says when the clock started, so the old
+    answer stands.
+    """
+    if installed is None:
+        return _result("scheduler", "skipped", "Nightly maintenance status is unknown.", details)
+    due_by = _as_utc(installed) + timedelta(seconds=FIRST_NIGHTLY_DUE_SECONDS)
+    details["first_nightly_due_by"] = due_by.isoformat()
+    if _as_utc(now) <= due_by:
+        message = f"Nightly maintenance has not run yet; the first pass is due by {due_by:%Y-%m-%d %H:%M} UTC."
+        return _result("scheduler", "ok", message, details)
+    message = f"Nightly maintenance has never run since the install at {_as_utc(installed):%Y-%m-%d %H:%M} UTC."
+    return _result("scheduler", "degraded", message, details)
 
 
 def _mcp_package_available() -> bool:
@@ -8271,12 +8312,27 @@ def _last_snapshot_at(root: Path) -> datetime | None:
     return datetime.fromtimestamp(int(stamp), tz=timezone.utc)
 
 
+def _no_snapshot_result(installed: datetime | None, now: datetime, details: dict) -> dict:
+    """No snapshot yet: pending while the install is younger than the freshness
+    bound (a vault that young has not missed one), a finding after it. See
+    docs/research/2026-09-27-what-is-not-yet-due-is-not-a-warning.md.
+    """
+    if installed is None:
+        return _result("backup", "degraded", "No knowledge snapshot has been taken yet.", details)
+    due_by = _as_utc(installed) + timedelta(seconds=BACKUP_FRESH_SECONDS)
+    details["first_snapshot_due_by"] = due_by.isoformat()
+    if _as_utc(now) <= due_by:
+        message = f"No knowledge snapshot yet; the first is due by {due_by:%Y-%m-%d %H:%M} UTC."
+        return _result("backup", "ok", message, details)
+    return _result("backup", "degraded", "No knowledge snapshot has been taken yet.", details)
+
+
 def _latest(*moments: datetime | None) -> datetime | None:
     known = [moment for moment in moments if moment is not None]
     return max(known, default=None)
 
 
-def _backup_check(home_path: Path, now: datetime) -> dict:
+def _backup_check(home_path: Path, now: datetime, installed: datetime | None = None) -> dict:
     """Whether the memory's second copy was taken recently."""
     from snapshot_knowledge import last_checked_at, snapshot_root
 
@@ -8284,7 +8340,7 @@ def _backup_check(home_path: Path, now: datetime) -> dict:
     taken = _latest(_last_snapshot_at(root), last_checked_at(root))
     details = {"last_snapshot_at": taken.isoformat() if taken else None}
     if taken is None:
-        return _result("backup", "degraded", "No knowledge snapshot has been taken yet.", details)
+        return _no_snapshot_result(installed, now, details)
     age_days = (_as_utc(now) - taken).total_seconds() / 86400
     if age_days * 86400 > BACKUP_FRESH_SECONDS:
         return _result("backup", "degraded", f"The last knowledge snapshot is {age_days:.1f} days old.", details)
@@ -8315,7 +8371,10 @@ def _deferrable_checks(
         ),
         ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
         ("tools", lambda budget: _tool_failure_check(state_path, budget)),
-        ("backup", lambda _budget: _backup_check(home_path, generated_at)),
+        (
+            "backup",
+            lambda _budget: _backup_check(home_path, generated_at, installed_at(state_path)),
+        ),
         ("models", lambda _budget: _models_check()),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),

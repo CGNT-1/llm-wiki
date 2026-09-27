@@ -4490,6 +4490,31 @@ def _install_root_kind(install_root: Path) -> str:
     return "unsafe"
 
 
+def installed_at(state_root: Path) -> datetime | None:
+    """When the committed install began (`run/install/manifest.json`), or None.
+
+    Doctor grades "never ran" and "no snapshot yet" from this instant: before
+    the first pass is due they are pending, after it they are findings. See
+    `docs/research/2026-09-27-what-is-not-yet-due-is-not-a-warning.md`.
+    """
+    path = Path(state_root) / "run" / "install" / "manifest.json"
+    try:
+        manifest = _optional_install_record(path, "install-manifest/")
+    except (InstallControlError, OSError, UnicodeError, ValueError):
+        return None
+    return _committed_instant(manifest)
+
+
+def _committed_instant(manifest: Mapping[str, object] | None) -> datetime | None:
+    stamp = (manifest or {}).get("committed_at")
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def validate_install_state(state_root: Path) -> dict[str, object]:
     install_root = Path(state_root) / "run" / "install"
     kind = _install_root_kind(install_root)
