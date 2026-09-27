@@ -2915,9 +2915,25 @@ def test_a_peer_closes_cleanly_after_its_client_left() -> None:
     client, server = socket.socketpair()
     peer = FakeLspPeer(server)
     client.close()
-    with pytest.raises(OSError):
-        peer.send_raw(b"Worse\r\n\r\n")
+    assert _send_until_the_client_is_gone(peer), "the departed client was never reported"
     peer.close()
+
+
+def _send_until_the_client_is_gone(peer: FakeLspPeer) -> bool:
+    """Send until the OS reports the departed client; True once it does.
+
+    On Linux the first send to a closed socketpair end fails; on Windows the pair is
+    TCP over loopback, the first send is buffered and a later one meets the reset
+    (CI run 36339197300). The test is about what close does after that failure, so
+    it waits for the failure on every platform, bounded by LONG_TIMEOUT.
+    """
+    deadline = time.monotonic() + LONG_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            peer.send_raw(b"Worse\r\n\r\n")
+        except OSError:
+            return True
+    return False
 
 
 def test_only_a_pipe_is_left_to_its_windows_owner(monkeypatch: pytest.MonkeyPatch) -> None:

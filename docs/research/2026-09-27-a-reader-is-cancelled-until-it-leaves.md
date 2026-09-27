@@ -146,3 +146,14 @@ to sockets, so the rule now holds only a descriptor-backed stream with no socket
 (`_fd_stream_held`). Guard: `test_only_a_pipe_is_left_to_its_windows_owner` (fails on the
 previous code). Linux cannot reproduce the Winsock semantics, so real Windows CI remains
 the check.
+
+## Follow-up: a departed client is reported later on Windows (2026-09-27)
+
+CI run 36339197300 passed every close on Windows; one test remained red there,
+`test_a_peer_closes_cleanly_after_its_client_left`: "DID NOT RAISE OSError". On Windows
+`socket.socketpair()` is TCP over loopback, so the first send to a closed end is buffered
+and only a later send meets the reset; on Linux the first one fails. The test is about
+what `close` does after that failure, so it now sends until the OS reports the departed
+client, bounded by `LONG_TIMEOUT`, on every platform. The same run's macOS job passed its
+2341 tests and failed only at the artifact upload ("Failed to CreateArtifact: Unable to
+make request: ENOTFOUND"), a GitHub network error outside the code.
