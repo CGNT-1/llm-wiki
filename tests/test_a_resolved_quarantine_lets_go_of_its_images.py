@@ -8,7 +8,12 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from tests.test_a_prune_keeps_what_resolves_a_quarantine import _append, _quarantine, _unresolved, _vault
+from tests.test_a_prune_keeps_what_resolves_a_quarantine import (
+    _append,
+    _quarantine,
+    _unresolved,
+    _vault,
+)
 
 SOON = timedelta(days=3)
 
