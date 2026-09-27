@@ -26,6 +26,7 @@ See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -33,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from daily_log_append import BREADCRUMB_APPEND_BUDGET_SECONDS  # noqa: E402
 from integration_adapter import BACKLOG_DRAIN_SECONDS, drain_pending_backlog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 
@@ -66,20 +68,51 @@ def _is_orphan(path: Path, now: float) -> bool:
         return False
 
 
-def _remove(path: Path) -> int:
-    """The bytes reclaimed, or zero when the file went away or would not."""
+def _remove(path: Path) -> tuple[int, str | None]:
+    """(bytes reclaimed, why it could not be) — a file that went away is not a failure.
+
+    Every other `OSError` used to read as zero bytes and vanish from the report
+    (audit 2026-09-27 C-3, docs/research/2026-09-27-a-sweep-says-what-it-could-not-do.md).
+    """
     try:
         size = path.stat().st_size
         path.unlink()
-    except OSError:
-        return 0
-    return size
+    except FileNotFoundError:
+        return 0, None
+    except OSError as error:
+        return 0, f"{type(error).__name__}: {path.name}"
+    return size, None
 
 
-def sweep_orphan_temporaries(directory: Path | None = None) -> dict[str, int]:
+def _with_reason(result: dict[str, object], reasons: list[str]) -> dict[str, object]:
+    if not reasons:
+        return result
+    return {**result, "reason": reasons[0]}
+
+
+def _reasons(outcomes: list[tuple[int, str | None]]) -> list[str]:
+    return [reason for _size, reason in outcomes if reason is not None]
+
+
+def _removed_sizes(outcomes: list[tuple[int, str | None]]) -> list[int]:
+    return [size for size, _reason in outcomes if size]
+
+
+def _reclaimed(paths: list[Path], unfinished: bool = False) -> dict[str, object]:
+    outcomes = [_remove(path) for path in paths]
+    removed, reasons = _removed_sizes(outcomes), _reasons(outcomes)
+    result: dict[str, object] = {
+        "removed": len(removed),
+        "bytes": sum(removed),
+        "failed": len(reasons),
+        "unfinished": unfinished,
+    }
+    return _with_reason(result, reasons)
+
+
+def sweep_orphan_temporaries(directory: Path | None = None) -> dict[str, object]:
     root = directory if directory is not None else STATE_ROOT / "run"
-    reclaimed = [_remove(path) for path in _orphan_temporaries(root, time.time())]
-    return {"removed": sum(1 for size in reclaimed if size), "bytes": sum(reclaimed)}
+    return _reclaimed(_orphan_temporaries(root, time.time()))
 
 
 # A write into `knowledge/` stages `.<name>.<nonce>.tmp` beside its target and
@@ -91,30 +124,36 @@ def sweep_orphan_temporaries(directory: Path | None = None) -> dict[str, int]:
 # in `scripts/` to it. Research:
 # docs/research/2026-09-26-a-killed-write-leaves-nothing-behind.md
 STAGED_WRITE_NAME = re.compile(r"^\..+[.-][0-9a-f]{16,}\.tmp$")
-MAX_KNOWLEDGE_ENTRIES = 200_000
 
 
-def _staged_knowledge_writes(root: Path, now: float) -> list[Path]:
+def _staged_in(directory: str, names: list[str], now: float) -> list[Path]:
+    candidates = [Path(directory) / name for name in names if STAGED_WRITE_NAME.match(name)]
+    return [path for path in candidates if _is_orphan(path, now)]
+
+
+def _staged_knowledge_writes(root: Path, now: float, deadline: float) -> tuple[list[Path], bool]:
+    """(staged copies found, whether the walk stopped at the step's deadline).
+
+    Bounded by the reclaim step's own deadline, not by a count: the count it had
+    counted matching files, not the walk, so it bounded nothing and had no basis
+    (audit 2026-09-27 C-2). What a late walk did not reach waits for the next night.
+    """
     found: list[Path] = []
-    for count, path in enumerate(root.rglob(".*.tmp")):
-        if count >= MAX_KNOWLEDGE_ENTRIES:
-            break
-        if STAGED_WRITE_NAME.match(path.name) and _is_orphan(path, now):
-            found.append(path)
-    return found
+    for directory, _subdirectories, names in os.walk(root):
+        if time.monotonic() >= deadline:
+            return found, True
+        found.extend(_staged_in(directory, names, now))
+    return found, False
 
 
-def _reclaimed(paths: list[Path]) -> dict[str, int]:
-    sizes = [_remove(path) for path in paths]
-    return {"removed": sum(1 for size in sizes if size), "bytes": sum(sizes)}
-
-
-def sweep_staged_knowledge_writes(root: Path | None = None) -> dict[str, int]:
+def sweep_staged_knowledge_writes(
+    root: Path | None = None, deadline: float = float("inf")
+) -> dict[str, object]:
     """Staged copies a killed write left beside a Markdown target."""
     base = root or ROOT / "knowledge"
     if not base.is_dir():
         return _reclaimed([])
-    return _reclaimed(_staged_knowledge_writes(base, time.time()))
+    return _reclaimed(*_staged_knowledge_writes(base, time.time(), deadline))
 
 
 # The nightly kills this step after `RECLAIM_STEP_SECONDS`; the image prune stops
@@ -152,17 +191,26 @@ def prune_settled_transactions(deadline: float = float("inf")) -> dict[str, obje
         return {"pruned": 0, "failed": 1, "reason": str(error)[:120]}
 
 
-def prune_transaction_history() -> dict[str, int]:
+# How long one slice of the history prune holds the writer gate: half the budget a
+# hook's breadcrumb append has for the whole write, so an append that arrives as a
+# slice starts still keeps half its time (audit 2026-09-27 B-1,
+# docs/research/2026-09-27-a-prune-keeps-what-resolves-a-quarantine.md).
+HISTORY_SLICE_SECONDS = BREADCRUMB_APPEND_BUDGET_SECONDS / 2
+
+
+def prune_transaction_history(deadline: float = float("inf")) -> dict[str, int]:
     """Settled rows past the history window (`HISTORY_RETENTION_DAYS`).
 
     The image prune above kept the rows, and the table only grew: 23 557 rows,
-    55 MB on 2026-09-24. Failure is reported, never raised.
+    55 MB on 2026-09-24. Bounded by the step's deadline and sliced, so it never
+    holds the gate for the whole step. Failure is reported, never raised.
     """
     from markdown_transaction import active_or_legacy_coordinator
 
     try:
         coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
-        return {**coordinator.prune_history(), "failed": 0}
+        pruned = coordinator.prune_history(deadline=deadline, slice_seconds=HISTORY_SLICE_SECONDS)
+        return {**pruned, "failed": 0}
     except Exception as error:  # noqa: BLE001
         return {"attempts": 0, "transactions": 0, "failed": 1, "reason": str(error)[:120]}
 
@@ -232,9 +280,9 @@ def reclaim(budget_seconds: float) -> dict[str, object]:
     return {
         "backlog": drain_pending_backlog(budget_seconds),
         "transactions": prune_settled_transactions(deadline),
-        "history": prune_transaction_history(),
+        "history": prune_transaction_history(deadline),
         "temporaries": sweep_orphan_temporaries(),
-        "staged_writes": sweep_staged_knowledge_writes(),
+        "staged_writes": sweep_staged_knowledge_writes(deadline=deadline),
         "empty_shards": remove_empty_intent_shards(),
         "snapshot": snapshot_memory(),
         "co_activation": rebuild_co_activation(),
@@ -251,13 +299,14 @@ def _report(result: dict[str, object]) -> str:
         f"snapshot {snapshot['status']} ({snapshot['commit']}); "
         f"pruned {transactions['pruned']} settled transaction(s){_unfinished_note(transactions)}; "
         f"dropped {result['history']['transactions']} transaction row(s) and "
-        f"{result['history']['attempts']} attempt row(s) past the history window; "
+        f"{result['history']['attempts']} attempt row(s) past the history window"
+        f"{_unfinished_note(result['history'])}; "
         f"drained {drained} checkpoint(s); "
         f"{len(backlog['remaining'])} project(s) still queued; "
         f"{len(backlog['failed'])} project(s) failed; "
         f"removed {temporaries['removed']} orphaned temporary file(s), "
         f"{temporaries['bytes']} byte(s), {result['staged_writes']['removed']} staged "
-        f"knowledge write(s), and {result['empty_shards']} empty intent shard(s)"
+        f"knowledge write(s){_unfinished_note(result['staged_writes'])}, and {result['empty_shards']} empty intent shard(s)"
         f"{_failure_note(result)}"
     )
 
@@ -268,7 +317,8 @@ def _unfinished_note(transactions: dict) -> str:
 
 def _failures(result: dict[str, object]) -> list[str]:
     """What this pass could not do; the report printed counts and hid these (audit 2026-09-26 B-23)."""
-    failed = [f"{key}: {result[key].get('reason', 'failed')}" for key in ("transactions", "history") if result[key].get("failed")]
+    keys = ("transactions", "history", "temporaries", "staged_writes")
+    failed = [f"{key}: {result[key].get('reason', 'failed')}" for key in keys if result[key].get("failed")]
     failed.extend(_snapshot_failure(result["snapshot"]))
     failed.extend(_backlog_failure(result["backlog"]))
     return failed

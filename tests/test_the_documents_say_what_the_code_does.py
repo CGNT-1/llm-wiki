@@ -30,6 +30,10 @@ STALE_CLAIMS = (
     re.compile(r"performs no automatic Git operation", re.IGNORECASE),
     re.compile(r"build_context\.py --slug"),
     re.compile(r"removed during implementation"),
+    # The nightly also commits the knowledge snapshot (audit 2026-09-27 C-17).
+    re.compile(r"one automatic Git operation", re.IGNORECASE),
+    # The v3 layout is adopted by the installers, not a target (audit 2026-09-27 C-17).
+    re.compile(r"proposed target"),
 )
 
 
@@ -48,3 +52,12 @@ def test_a_superseded_status_document_says_it_is_history(document: str) -> None:
     head = (ROOT / document).read_text(encoding="utf-8")[:600]
 
     assert "docs/AUDIT-2026-09-24-live.md" in head
+
+
+def test_the_contract_names_when_a_server_earns_its_retries_back() -> None:
+    """CLAUDE.md said three retries for good; a healthy run restores them (audit 2026-09-27 C-17)."""
+    from pyright_session import HEALTHY_RUN_SECONDS
+
+    contract = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+
+    assert f"ran {int(HEALTHY_RUN_SECONDS)} s before failing" in contract

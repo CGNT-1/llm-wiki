@@ -19,6 +19,9 @@ from typing import Any
 import lane_score
 from provenance import authority_weight, curated_pages_first, source_type_weight, substance_weight
 
+# Abandoned optional stages allowed to run on at once (docs/research/2026-08-26-who-pays-for-an-
+# abandoned-optional-stage.md); bounds threads a slow lane can hold. Basis unknown: value predates
+# measurement; review when stages are refused for lack of a slot.
 MAX_OPTIONAL_STRAGGLERS = 2
 
 # The ceiling on one optional stage, on top of the share of the caller's budget
@@ -113,7 +116,25 @@ def _promote_exact_filename(
 
 
 class OptionalStageTimeout(TimeoutError):
-    """An optional uninterruptible stage exceeded its isolated budget."""
+    """An optional uninterruptible stage exceeded its isolated budget.
+
+    `reason` is what the trace reports and `partial` whether the answer lost
+    part of what it could have had while it waited.
+    """
+
+    reason = "optional_stage_timeout"
+    partial = True
+
+
+class OptionalStageNotAdmitted(OptionalStageTimeout):
+    """The caller did not wait: the stage's known cost exceeds the window on offer,
+    or no slot was free. Nothing timed out and nothing waited was lost, so it is
+    reported as what it is (audit 2026-09-27 B-9,
+    docs/research/2026-09-27-a-stage-not-waited-for-is-not-a-timeout.md).
+    """
+
+    reason = "optional_stage_not_admitted"
+    partial = False
 
 
 # What one kind of optional stage last cost, when a run of it finished --
@@ -268,7 +289,7 @@ def _run_optional_bounded(
     admitted = _optional_stage_admitted(kind, deadline, cancelled)
     slots = _optional_stage_slots(kind)
     if not slots.acquire(blocking=False):
-        raise OptionalStageTimeout("optional stage capacity exhausted")
+        raise OptionalStageNotAdmitted("optional stage capacity exhausted")
     completed = threading.Event()
     result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
     _start_optional_worker(operation, result, completed, slots, kind, observes)
@@ -291,7 +312,7 @@ def _require_admitted_optional_stage(admitted: bool) -> None:
     arrive at the same lexical answer the caller would have had for nothing.
     """
     if not admitted:
-        raise OptionalStageTimeout("optional stage exceeds the budget on offer")
+        raise OptionalStageNotAdmitted("optional stage exceeds the budget on offer")
 
 
 def _start_optional_worker(
@@ -382,7 +403,14 @@ BM25_WEIGHT = 2.0
 DENSE_WEIGHT = 1.0
 GRAPH_WEIGHT = 0.5
 
+# The graph lane walks one hop from its seeds (docs/research/2026-09-22-the-walk-has-nothing-to-
+# walk.md): memory questions never route to it, so no measurement justifies more.
 GRAPH_MAX_HOPS = 1
+# The graph lane's shape: the top-ranked hits a one-hop walk starts from, the
+# neighbours taken per seed and in all. Ranking parameters of the hybrid design, not
+# cuts of results: the lane adds candidates beside the lexical and dense ones
+# (docs/research/2026-09-22-the-walk-has-nothing-to-walk.md). Basis of the numbers
+# unknown — review when a rank evaluation measures the lane's recall.
 GRAPH_SEED_LIMIT = 5
 GRAPH_PER_SEED_LIMIT = 4
 GRAPH_GLOBAL_LIMIT = 12
@@ -1382,7 +1410,7 @@ def _weigh_by_trust(
     alongside = _neighbour_boosts(scores, meta)
     weighted: dict[str, float] = {}
     for key, value in scores.items():
-        authority = authority_weight(meta[key].get("authority"))
+        authority = authority_weight(meta[key].get("authority"), meta[key].get("relative_path"))
         page = source_type_weight(
             meta[key].get("type"),
             meta[key].get("relative_path"),
@@ -1929,11 +1957,12 @@ def _run_dense_backend(
     *,
     deadline_monotonic: float | None,
     cancelled: Callable[[], bool] | None,
-) -> tuple[Sequence[Mapping[str, Any]] | None, bool, bool | None, bool]:
-    """(hits, ran, available, timed out).
+) -> tuple[Sequence[Mapping[str, Any]] | None, bool, bool | None, str | None]:
+    """(hits, ran, available, why the leg is missing or None).
 
     None hits mean the backend is unavailable; an empty sequence means it
-    answered and found nothing.
+    answered and found nothing. A leg that did not run is named as a timeout or
+    as not admitted, never one for the other (audit 2026-09-27 B-9).
     """
     try:
         hits = _call_dense(
@@ -1942,9 +1971,9 @@ def _run_dense_backend(
             deadline_monotonic=deadline_monotonic,
             cancelled=cancelled,
         )
-    except OptionalStageTimeout:
-        return None, False, False, True
-    return hits, True, hits is not None, False
+    except OptionalStageTimeout as stopped:
+        return None, False, False, stopped.reason
+    return hits, True, hits is not None, None
 
 
 def _profile_edge_types(
@@ -2055,6 +2084,7 @@ class _RerankTrace:
     duration_ms: object = None
     fallback_reason: str | None = None
     optional_timeout: bool = False
+    optional_reason: str | None = None
 
 
 def _as_optional_str(value: object) -> str | None:
@@ -2233,7 +2263,7 @@ def _rerank_worker_deadline(stage_deadline: float) -> float:
         return stage_deadline
     if _rerank_cost_worth_learning():
         return time.monotonic() + OPTIONAL_STAGE_MAX_SECONDS
-    raise OptionalStageTimeout("the rerank is known not to fit this window")
+    raise OptionalStageNotAdmitted("the rerank is known not to fit this window")
 
 
 def _rerank_cost_worth_learning() -> bool:
@@ -2352,9 +2382,10 @@ def _apply_reranking(
             cancelled=cancelled,
             trace=trace,
         )
-    except OptionalStageTimeout:
-        trace.fallback_reason = "optional_stage_timeout"
-        trace.optional_timeout = True
+    except OptionalStageTimeout as stopped:
+        trace.fallback_reason = stopped.reason
+        trace.optional_timeout = stopped.partial
+        trace.optional_reason = stopped.reason
     except TimeoutError:
         raise
     except Exception:  # noqa: BLE001 - a failed reranker keeps the fused order
@@ -2478,14 +2509,15 @@ def _run_dense_stage(
     if dense_backend is None or "dense" not in wanted:
         return
     _check_stopped(deadline_monotonic, cancelled)
-    run.dense_hits, run.ran_dense, run.dense_available, timed_out = _run_dense_backend(
+    run.dense_hits, run.ran_dense, run.dense_available, missing = _run_dense_backend(
         dense_backend,
         filters,
         deadline_monotonic=deadline_monotonic,
         cancelled=cancelled,
     )
-    if timed_out:
-        run.optional_failure = "optional_stage_timeout"
+    if missing is not None:
+        # A dense leg that did not run leaves its candidates out: partial either way.
+        run.optional_failure = missing
         run.partial = True
     _check_stopped(deadline_monotonic, cancelled)
 
@@ -3736,9 +3768,7 @@ def _rerank_signals(trace: _RerankTrace) -> tuple[str, ...]:
 
 
 def _rerank_failure(trace: _RerankTrace, current: str | None) -> str | None:
-    if trace.optional_timeout:
-        return current or "optional_stage_timeout"
-    return current
+    return current or trace.optional_reason
 
 
 def _maybe_rerank(

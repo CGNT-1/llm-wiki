@@ -20,7 +20,9 @@ STATES = {state: 0 for state in doctor.TRANSACTION_STATES}
 
 
 def _details(unresolved: int = 0, invalid: bool = False) -> dict:
-    return {"quarantined_unresolved": unresolved, "state_invalid": invalid}
+    """Doctor's own empty details, so a field added there reaches this test too."""
+    details, _states = doctor._empty_transaction_details()
+    return {**details, "quarantined_unresolved": unresolved, "state_invalid": invalid}
 
 
 def test_a_healthy_vault_says_so():

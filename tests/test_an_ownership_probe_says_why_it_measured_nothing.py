@@ -55,4 +55,6 @@ def test_the_report_names_the_reason_of_an_unavailable_scenario() -> None:
 
     run._name_unmeasured_ownership()
 
-    assert run.errors == [{"phase": "ownership:timeout", "code": "raced"}]
+    assert [(entry["phase"], entry["code"], "message" in entry) for entry in run.errors] == [
+        ("ownership:timeout", "raced", True)
+    ]

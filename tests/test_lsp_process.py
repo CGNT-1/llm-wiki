@@ -2744,13 +2744,17 @@ def test_explicit_restart_and_autonomous_wake_bootstrap_one_replacement(
     explicit_threads: list[threading.Thread] = []
     explicit_errors: list[BaseException] = []
 
-    def pause_explicit_restart(instance: LspProcess, deadline: float) -> None:
-        current = threading.current_thread()
+    def note_restart_entry(current: threading.Thread, deadline: float) -> None:
         if current is explicit_threads[0]:
             explicit_paused.set()
             assert release_explicit.wait(max(0.0, deadline - time.monotonic()))
-        elif current is coordinator.recovery_thread:
+            return
+        if current is coordinator.recovery_thread:
             autonomous_replacement_entered.set()
+
+    def pause_explicit_restart(instance: LspProcess, deadline: float) -> None:
+        current = threading.current_thread()
+        note_restart_entry(current, deadline)
         try:
             real_restart_generation(instance, deadline)
         finally:
@@ -9162,14 +9166,17 @@ def _exercise_explicit_restart_retirement_deadline_finishes_without_caller_retry
     allow_fresh_cleanup = threading.Event()
     caller_deadline = time.monotonic() + 0.05
 
-    def deadline_sensitive_terminate(current: object, *, deadline: float) -> None:
-        if current is tree and deadline <= caller_deadline:
+    def hold_tree_cleanup(deadline: float) -> None:
+        if deadline <= caller_deadline:
             threading.Event().wait(max(0.0, deadline - time.monotonic()) + 0.005)
             raise TimeoutError("restart caller retirement deadline expired")
+        fresh_cleanup_started.set()
+        if not allow_fresh_cleanup.wait(max(0.0, deadline - time.monotonic())):
+            raise TimeoutError("fresh autonomous cleanup stayed blocked")
+
+    def deadline_sensitive_terminate(current: object, *, deadline: float) -> None:
         if current is tree:
-            fresh_cleanup_started.set()
-            if not allow_fresh_cleanup.wait(max(0.0, deadline - time.monotonic())):
-                raise TimeoutError("fresh autonomous cleanup stayed blocked")
+            hold_tree_cleanup(deadline)
         terminate(current, deadline=deadline)  # type: ignore[arg-type]
 
     monkeypatch.setattr(
@@ -9947,18 +9954,22 @@ def test_heartbeat_refreshes_lease_while_tree_cleanup_driver_is_blocked(
     assert not _pid_alive(descendant)
 
 
+# The write each artifact kind exercises on the owner directory.
+_MOCK_WINDOWS_ARTIFACT_WRITES = {
+    "owner": lambda owner: owner.write_record("owner.json", {"state": "running"}),
+    "failure": lambda owner: owner.write_record("failure.json", {"code": "injected"}),
+    "lease": lambda owner: owner.write_lease({"state": "live"}),
+}
+
+
 def _exercise_mock_windows_artifact_write(
     owner: lsp_process._OwnerDirectory,
     artifact: str,
 ) -> None:
-    if artifact == "owner":
-        owner.write_record("owner.json", {"state": "running"})
-    elif artifact == "failure":
-        owner.write_record("failure.json", {"code": "injected"})
-    elif artifact == "lease":
-        owner.write_lease({"state": "live"})
-    else:  # pragma: no cover - parametrization is closed below
+    write = _MOCK_WINDOWS_ARTIFACT_WRITES.get(artifact)
+    if write is None:  # pragma: no cover - parametrization is closed below
         raise AssertionError(artifact)
+    write(owner)
 
 
 def _mock_windows_artifact_owner(

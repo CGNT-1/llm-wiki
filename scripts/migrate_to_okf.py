@@ -44,6 +44,9 @@ from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
+# One page read whole for frontmatter migration; above MAX_KNOWLEDGE_PAGE_BYTES (8 MiB), which
+# every other reader uses. Basis unknown: value predates measurement; review when it is aligned
+# with that ceiling.
 MAX_MIGRATION_PAGE_BYTES = 16 * 1024 * 1024
 
 # Editorial / contract files at the vault root — left alone.

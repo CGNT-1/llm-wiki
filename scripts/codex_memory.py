@@ -44,6 +44,9 @@ TURN_END_LOCK_SECONDS = 0.5
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 SCRIPT_TIMEOUT_SECONDS = 10
 MAX_HOOK_INPUT_BYTES = 64 * 1024
+# Codex's config.toml and hooks.json are read whole before a merge; 256 KiB refuses a file that is
+# not a hand-kept configuration. Basis unknown: value predates measurement; review when a real
+# Codex config nears it.
 MAX_HOOK_CONFIG_BYTES = 256 * 1024
 CODEX_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"}

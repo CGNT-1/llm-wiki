@@ -65,7 +65,11 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
+# The project-state block injected at session start, clipped to keep it compact. A token-cost
+# trade-off, not measured; review with the session-start token budget.
 MAX_CONTEXT_CHARS = 2400  # keep the injection compact
+# A project root path from the host payload; 32 KiB is far past any real path and refuses
+# malformed input (resource bound on host input).
 MAX_PROJECT_ROOT_CHARS = 32 * 1024
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 

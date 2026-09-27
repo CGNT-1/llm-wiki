@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import transaction_lineage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -137,5 +138,5 @@ def test_a_checkpoint_retry_that_also_lost_a_cas_race_resolves() -> None:
 def test_the_base_identity_removes_only_the_attempt_epoch_pair(
     operation_id: str, expected: str | None
 ) -> None:
-    resolved = doctor._base_operation_identity(operation_id)
+    resolved = transaction_lineage.base_operation_identity(operation_id)
     assert resolved == (operation_id if expected is None else expected)

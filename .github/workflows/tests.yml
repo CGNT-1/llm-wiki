@@ -37,6 +37,26 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_VERSION: 8.30.1
 
+  # A vulnerable anyio and cryptography sat in the lock unseen: nothing read the
+  # lock against advisories. pip-audit is pinned by hash in uv.lock (the `audit`
+  # group, synced alone), and it reads every extra and group the lock resolves.
+  # See docs/research/2026-09-27-the-lock-is-audited.md.
+  dependency-audit:
+    name: timing::focused::dependency-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv sync --locked --only-group audit
+      - run: uv export --locked --all-extras --all-groups --no-emit-project --format requirements-txt -o "${{ runner.temp }}/locked-requirements.txt"
+      - run: uv run --locked --no-sync pip-audit --requirement "${{ runner.temp }}/locked-requirements.txt" --disable-pip --progress-spinner off
+
   lint:
     name: timing::focused::lint
     runs-on: ubuntu-24.04
@@ -61,8 +81,10 @@ jobs:
       # Nothing parsed PowerShell and nothing ran shellcheck: a syntax error in
       # install.ps1 reached a release, and install.sh was never checked beyond
       # `bash -n`. The owner's complexity gate stays out: it is machine-local
-      # tooling under ~/.claude, not part of this repository.
-      # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md.
+      # tooling under ~/.claude, not part of this repository. The shell's own
+      # complexity is measured by tests/test_shell_functions_stay_simple.py.
+      # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md
+      # and docs/research/2026-09-27-shell-functions-are-measured-too.md.
       - run: shellcheck install.sh
       - name: Every tracked PowerShell file parses
         shell: pwsh
@@ -566,6 +588,7 @@ jobs:
     if: always()
     needs:
       - gitleaks
+      - dependency-audit
       - lint
       - pytest-full
       - clean-production

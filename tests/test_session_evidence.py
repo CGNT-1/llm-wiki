@@ -212,8 +212,8 @@ def test_a_session_record_ranks_below_a_compiled_page() -> None:
     """
     from provenance import authority_weight
 
-    assert authority_weight("session") < authority_weight("ai-derived")
-    assert authority_weight("session") < authority_weight("user")
+    assert authority_weight("session", "knowledge/notes/x.md") < authority_weight("ai-derived", "knowledge/notes/x.md")
+    assert authority_weight("session", "knowledge/notes/x.md") < authority_weight("user", "knowledge/notes/x.md")
 
 
 def test_the_record_declares_the_session_authority() -> None:

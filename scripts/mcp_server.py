@@ -47,6 +47,7 @@ import re
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
@@ -68,20 +69,43 @@ from bounded_io import read_stable_bytes  # noqa: E402
 # A queue commit locks readers out for milliseconds; wait it out instead of
 # reporting a live queue as unreadable.
 QUEUE_READ_BUSY_MS = 1_000
+# Bounds on what one tool call reads or accepts. The input bounds are published in
+# the tools' JSON schemas (`maxLength`, `maxItems`, `maximum`), so a client sees them
+# before calling, and a value past one is refused with an error, never cut.
+# A page read whole: the largest note on the installed vault on 2026-09-27 was about
+# 19 KB, so 4 MiB refuses only a file that is not a note (slugs cannot reach journals).
 MAX_MCP_PAGE_BYTES = 4 * 1024 * 1024
+# One cited evidence slice and all of an answer's slices together; past either the
+# answer fails by name rather than quoting a cut span. Basis unknown: values predate
+# measurement; review if grounded answers are refused for their evidence size.
 MAX_MCP_EVIDENCE_BYTES = 64 * 1024
 MAX_MCP_TOTAL_EVIDENCE_BYTES = 256 * 1024
+# A search question (characters). Basis unknown: value predates measurement; a
+# question is a sentence, so 8 192 only refuses a pasted document.
 MAX_MCP_QUERY_LENGTH = 8_192
+# A page slug is one file name: NAME_MAX, 255 bytes on ext4/APFS/NTFS.
 MAX_MCP_SLUG_LENGTH = 255
+# get_context's lists: pages per call, and the `include` list the tool still accepts
+# for compatibility and ignores (bounded so an ignored argument costs nothing). Basis
+# unknown: values predate measurement.
 MAX_MCP_CONTEXT_SLUGS = 20
 MAX_MCP_CONTEXT_INCLUDE = 10
 MAX_MCP_INCLUDE_LENGTH = 64
+# The largest token_budget a caller may ask get_context for. Basis unknown: value
+# predates measurement; review if a client's context window makes it too small.
 MAX_MCP_CONTEXT_TOKENS = 32_768
+# An error message returned to a client, after secret redaction: a display bound so a
+# failing tool never answers with a whole traceback.
 MAX_MCP_ERROR_CHARS = 256
+# Every MCP tool call's default deadline unless a longer one is declared
+# (docs/research/2026-09-25-a-grounded-recall-has-the-time-it-needs-and-no-more.md).
 MCP_OPERATION_SECONDS = 10.0
 # What a lexical-only pass needs, kept back from the hybrid run: 0.13-0.19 s
 # measured on the live vault on 2026-09-25, five times over.
 LEXICAL_FALLBACK_RESERVE_SECONDS = 1.0
+# A precise architecture call's deadline, which may include starting a language
+# server cold. Basis unknown: value predates measurement (2026-07-31); review when a
+# cold start is timed on the installed profiles. A settings candidate.
 MCP_LSP_STARTUP_SECONDS = 60.0
 # CODE-03: indexing a repository builds a whole generation, so its budget is a
 # measurement, not a choice. The real second repository on this machine --
@@ -91,8 +115,20 @@ MCP_LSP_STARTUP_SECONDS = 60.0
 # rather than half-built, because the build registers only after every artifact
 # is written, fsynced and validated.
 MCP_REPOSITORY_INDEX_SECONDS = 600.0
+# One repository source file read to answer a navigation question (untrusted input);
+# a larger file is refused by lsp_security, never cut. Basis unknown: value predates
+# measurement; review if a real source file is refused.
 MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
+# Graph facts one navigation answer may gather (nodes of a symbol, locations, cached
+# sources). Answers render at most `code_navigation_renderer.MAX_LIMIT` rows and say
+# how many they left out; this bound is a hundred times that. CALLS edges are read
+# anchored on the symbol's nodes (`_anchored_call_edges`), so the bound is per symbol.
 MAX_NAVIGATION_GRAPH_FACTS = 10_000
+# One answer's cache of sources it read: four of the largest files it may read. Past it
+# the least recently read source is evicted and read again if asked for, so no span
+# drops out of the answer (it used to refuse the next source silently, 2026-09-27).
+# The value bounds memory, not correctness; basis unknown beyond that, review if one
+# answer re-reads the same file repeatedly.
 MAX_NAVIGATION_SOURCE_CACHE_BYTES = 64 * 1024 * 1024
 PRECISE_ARCHITECTURE_MODES = frozenset(
     {"definition", "references", "implementations", "type", "diagnostics"}
@@ -211,10 +247,18 @@ def _architecture_operation_seconds(arguments: dict) -> float:
     )
 
 
+def _retrieval_operation_seconds(_arguments: dict | None = None) -> float:
+    """A retrieval answer waits for its reranker: `mcp.retrieval_seconds` (B-9,
+    docs/research/2026-09-27-a-rerank-has-the-window-it-was-measured-to-need.md)."""
+    from settings import setting_value
+
+    return float(setting_value("mcp.retrieval_seconds"))
+
+
 def _recall_operation_seconds(arguments: dict) -> float:
     """A grounded answer waits on a provider: one round trip measured 32.5 s (A-17)."""
     if arguments.get("grounded") is not True:
-        return MCP_OPERATION_SECONDS
+        return _retrieval_operation_seconds()
     from query_memory import QA_DEADLINE_SECONDS
 
     return QA_DEADLINE_SECONDS
@@ -223,6 +267,7 @@ def _recall_operation_seconds(arguments: dict) -> float:
 _TOOL_BUDGETS = {
     "get_architecture": _architecture_operation_seconds,
     "recall": _recall_operation_seconds,
+    "get_decisions": _retrieval_operation_seconds,
 }
 
 
@@ -1407,12 +1452,61 @@ def _get_context(
     collected_at = _utc_now_seconds()
     snapshot = collect_corpus(ROOT, deadline=operation_deadline)
     selection = _context_selection(snapshot, set(slugs))
-    compiled = _compiled_context(
-        snapshot, selection, token_budget, operation_deadline
+    answer = functools.partial(
+        _context_answer, snapshot, selection, token_budget, include, collected_at, operation_deadline
     )
+    result = _context_within_budget(answer, token_budget)
     _record_context_injections(selection["selected_paths"])
+    return result
+
+
+def _context_answer(snapshot, selection, token_budget, include, collected_at, deadline, text_tokens: int) -> dict:
+    """The answer with its text packed into `text_tokens`, counted as the answer is."""
+    from answer_budget import BYTES_PER_TOKEN
+
+    compiled = _compiled_context(snapshot, selection, text_tokens * BYTES_PER_TOKEN, deadline)
     result = _context_result(compiled, snapshot, selection, token_budget, include)
     return {**result, "collected_at": collected_at}
+
+
+def _context_within_budget(answer, token_budget: int) -> dict:
+    """The answer whose whole body, not only its text, fits `token_budget`.
+
+    The text gets the whole budget when the answer then fits; otherwise the largest
+    text allowance whose answer fits is searched by halving, because a smaller text
+    also lists fewer items (audit 2026-09-27 B-12,
+    docs/research/2026-09-27-a-context-answer-fits-the-budget-it-was-given.md).
+    """
+    whole = _fitting_answer(answer, token_budget, token_budget)
+    if whole is not None:
+        return whole
+    return _largest_fitting_answer(answer, token_budget)
+
+
+def _largest_fitting_answer(answer, token_budget: int) -> dict:
+    best, low, high = None, 1, token_budget - 1
+    while low <= high:
+        middle = (low + high) // 2
+        result = _fitting_answer(answer, middle, token_budget)
+        if result is None:
+            high = middle - 1
+            continue
+        best, low = result, middle + 1
+    if best is None:
+        raise ValueError("token_budget cannot hold this answer's own item list; ask for fewer pages or a larger budget")
+    return best
+
+
+def _fitting_answer(answer, text_tokens: int, token_budget: int) -> dict | None:
+    """The answer packed into `text_tokens`, or None when it does not fit the budget."""
+    from answer_budget import estimate_tokens
+    from context_budget import BudgetExceededError
+
+    try:
+        result = answer(text_tokens)
+    except BudgetExceededError:
+        return None
+    return result if estimate_tokens(result) <= token_budget else None
 
 
 def _utc_now_seconds() -> str:
@@ -1531,50 +1625,39 @@ def _compiled_context(snapshot, selection: dict, token_budget: int, deadline):
         )
 
 
-def _without_text(item: dict) -> dict:
-    return {key: value for key, value in item.items() if key != "text"}
+# What an agent reads about a packed item: where it comes from and what it is. Its
+# text is in `text`; `item_id` and `source_sha256` spell the source and its digest
+# again, 190 characters an item, and `relevance` is the packer's own bookkeeping
+# (audit 2026-09-27 B-12).
+_ITEM_FIELDS = (
+    "source", "parent_id", "representation", "heading_path", "byte_start", "byte_end",
+    "type", "status", "project", "valid_from", "valid_to", "aliases",
+)
 
 
-def _page_items(items: list) -> list:
-    return [item for item in items if item["source"].endswith(".md")]
-
-
-def _symbol_items(items: list) -> list:
-    return [item for item in items if not item["source"].endswith(".md")]
-
-
-def _items_of_type(items: list, types: set) -> list:
-    return [item for item in items if item["type"] in types]
-
-
-def _items_of_representation(items: list, representation: str) -> list:
-    return [item for item in items if item["representation"] == representation]
-
-
-def _materialization_trace(compiled) -> list:
-    return [asdict(item) for item in compiled.trace.materializations]
+def _item_descriptor(item: dict) -> dict:
+    """The item's fields that say something: no empty value, no parent that is its source."""
+    kept = {key: item[key] for key in _ITEM_FIELDS if item.get(key) not in (None, [], ())}
+    if kept.get("parent_id") == kept.get("source"):
+        kept.pop("parent_id", None)
+    return kept
 
 
 def _context_result(compiled, snapshot, selection: dict, token_budget: int, include):
-    # The packed text is sent once, in `text`; the lists name what it holds. Each
-    # list repeated every item's text, about four times the answer (audit
-    # 2026-09-26 B-18, docs/research/2026-09-26-a-context-answer-sends-its-text-once.md).
-    items = [_without_text(asdict(item)) for item in compiled.items]
+    # The packed text is sent once, in `text`; `items` names each item once, without
+    # its text. Six typed copies of the list and three traces named every item up to
+    # five times (audit 2026-09-26 B-18, 2026-09-27 B-12,
+    # docs/research/2026-09-27-a-context-answer-fits-the-budget-it-was-given.md).
+    from answer_budget import estimate_text_tokens
+
     return {
         "text": compiled.text,
-        "packed_tokens": compiled.packed_tokens,
+        "packed_tokens": estimate_text_tokens(compiled.text),
         "token_budget": token_budget,
         "corpus_generation": snapshot.corpus_sha256,
         "repo_map": sorted(selection["selected_paths"]),
-        "pages": _page_items(items),
-        "symbols": _symbol_items(items),
-        "decisions": _items_of_type(items, {"decision"}),
-        "incidents": _items_of_type(items, {"debugging", "incident"}),
-        "active_task": _items_of_type(items, {"project-state"}),
-        "evidence": _items_of_representation(items, "l2"),
-        "retrieval_trace": asdict(compiled.trace.retrieval),
-        "materialization_trace": _materialization_trace(compiled),
-        "packing_trace": asdict(compiled.trace.packing),
+        "items": [_item_descriptor(asdict(item)) for item in compiled.items],
+        "dropped": [asdict(item) for item in compiled.trace.packing.dropped],
         "missing_slugs": selection["missing"],
         "include": include,
     }
@@ -1634,13 +1717,12 @@ def _log_decision(
     summary: str, rationale: str = "", *, deadline: float | None = None
 ) -> dict:
     """Append a decision to the daily log."""
-    from datetime import datetime
-
     from daily_log_append import append_daily
+    from iso_time import local_now
     from memory_state import ROOT
 
     slug = "manual-decision"
-    now = datetime.now()
+    now = local_now()
     block = f"\n## [{now.strftime('%H:%M:%S')}] manual decision\n"
     block += f"Trigger: manual\nslug: {slug}\nroot: {ROOT}\n\n"
     block += f"Decision: {summary}\n"
@@ -2022,14 +2104,18 @@ def _with_lines_from_disk(answer, request: dict):
     return refreshed_answer(answer, request["resolved"], _definition_row_keys(answer))
 
 
-def _architecture_definition(request: dict) -> list:
-    """Where the symbol is defined, from the generation's definition occurrence."""
-    from symbol_snippet import definition_sites
+def _architecture_definition(request: dict) -> dict:
+    """Where the symbol is defined, from the generation's definition occurrence.
 
-    return _with_lines_from_disk(
-        definition_sites(request["resolved"], request["symbol"], request["deadline"]),
-        request,
-    )
+    `definition_omitted` appears only when the list was cut, like the other keys
+    this answer carries only when the source has them.
+    """
+    from symbol_snippet import definition_report
+
+    report = definition_report(request["resolved"], request["symbol"], request["deadline"])
+    answer = {"definition": _with_lines_from_disk(report["sites"], request)}
+    omitted = {"definition_omitted": report["sites_omitted"]} if report["sites_omitted"] else {}
+    return {**answer, **omitted}
 
 
 def _architecture_symbol(request: dict) -> dict:
@@ -2044,7 +2130,7 @@ def _architecture_symbol(request: dict) -> dict:
         "symbol": request["symbol"],
         # A "where is it" question is answered by the definition, not by the
         # call sites around it (parity run 2026-09-12, task T04).
-        "definition": _architecture_definition(request),
+        **_architecture_definition(request),
         "callers": callers.get("callers", []),
         "callees": callees.get("callees", []),
         "dependencies": dependencies.get("dependencies", []),
@@ -2646,21 +2732,29 @@ def _navigation_relative_path(
     _check_navigation_stop(deadline)
     relative = span.get("relative_path")
     if not isinstance(relative, str):
-        file_value = span.get("file")
-        if not isinstance(file_value, str):
-            raise ValueError("graph span has no source path")
-        file_path = Path(file_value)
-        if file_path.is_absolute():
-            root = Path(scope.checkout_root).resolve(strict=True)
-            _check_navigation_stop(deadline)
-            source = file_path.resolve(strict=True)
-            _check_navigation_stop(deadline)
-            relative = source.relative_to(root).as_posix()
-        else:
-            relative = file_value
+        relative = _file_relative_path(scope, span, deadline=deadline)
     normalized = validate_repository_relative_path(relative)
     _check_navigation_stop(deadline)
     return normalized
+
+
+def _file_relative_path(scope, span: dict, *, deadline: float | None) -> str:
+    """A span that names only its `file`: relative as given, absolute under the checkout."""
+    file_value = span.get("file")
+    if not isinstance(file_value, str):
+        raise ValueError("graph span has no source path")
+    file_path = Path(file_value)
+    if not file_path.is_absolute():
+        return file_value
+    return _checkout_relative(scope, file_path, deadline=deadline)
+
+
+def _checkout_relative(scope, file_path: Path, *, deadline: float | None) -> str:
+    root = Path(scope.checkout_root).resolve(strict=True)
+    _check_navigation_stop(deadline)
+    source = file_path.resolve(strict=True)
+    _check_navigation_stop(deadline)
+    return source.relative_to(root).as_posix()
 
 
 def _navigation_source_bytes(
@@ -2685,30 +2779,44 @@ def _navigation_source_bytes(
 
 
 class _NavigationSourceCache:
+    """The sources one answer read, least recently read evicted first.
+
+    It used to refuse a source once the cache was full, and that source's spans
+    left the answer without a count. Evicting instead keeps every span: a source
+    read again costs one bounded read under the answer's deadline.
+    """
+
     __slots__ = ("_bytes", "_values")
 
     def __init__(self) -> None:
-        self._values: dict[tuple[str, str, str], tuple[bytes, str] | None] = {}
+        self._values: OrderedDict[tuple[str, str, str], tuple[bytes, str]] = OrderedDict()
         self._bytes = 0
 
     def read(self, scope, relative_path: str, *, deadline: float | None):
         key = (scope.repository_id, scope.checkout_id, relative_path)
-        if key in self._values:
-            return self._values[key]
-        if len(self._values) >= MAX_NAVIGATION_GRAPH_FACTS:
-            return None
+        cached = self._values.get(key)
+        if cached is not None:
+            self._values.move_to_end(key)
+            return cached
         content = _navigation_source_bytes(scope, relative_path, deadline=deadline)
         return self._remember(key, content)
 
     def _remember(self, key, content: bytes):
-        """Cache the bytes unless they would push the cache past its ceiling."""
-        if self._bytes + len(content) > MAX_NAVIGATION_SOURCE_CACHE_BYTES:
-            self._values[key] = None
-            return None
         cached = (content, hashlib.sha256(content).hexdigest())
+        self._make_room(len(content))
         self._values[key] = cached
         self._bytes += len(content)
         return cached
+
+    def _make_room(self, incoming: int) -> None:
+        """Evict the least recently read sources until `incoming` bytes and one entry fit."""
+        while self._values and self._over_budget(incoming):
+            _key, (evicted, _digest) = self._values.popitem(last=False)
+            self._bytes -= len(evicted)
+
+    def _over_budget(self, incoming: int) -> bool:
+        too_many = len(self._values) >= MAX_NAVIGATION_GRAPH_FACTS
+        return too_many or self._bytes + incoming > MAX_NAVIGATION_SOURCE_CACHE_BYTES
 
 
 def _navigation_digest(value: object) -> str | None:
@@ -3023,6 +3131,27 @@ def _call_edge_source_key(direction: str) -> str:
     return "source_node_id"
 
 
+def _anchored_call_edges(graph, node_key: str, node_ids: set, deadline) -> list:
+    """The CALLS edges whose `node_key` end is one of these nodes, read anchored in SQL.
+
+    Reading every CALLS edge up to the fact bound and filtering afterwards lost a
+    symbol's calls silently once the repository held more CALLS edges than the bound
+    (law 9 class d, docs/research/2026-09-27-a-cut-says-what-it-left-out.md). The ids go
+    in slices of `evidence_graph.MAX_NODE_FILTER`, which the reader refuses past.
+    """
+    from evidence_graph import MAX_NODE_FILTER
+
+    ordered = sorted(node_ids)
+    edges: list = []
+    for start in range(0, len(ordered), MAX_NODE_FILTER):
+        _check_navigation_stop(deadline)
+        anchor = {f"{node_key}s": ordered[start : start + MAX_NODE_FILTER]}
+        edges.extend(
+            graph.edges(edge_types=("CALLS",), max_rows=MAX_NAVIGATION_GRAPH_FACTS, deadline=deadline, **anchor)
+        )
+    return edges
+
+
 def _matching_call_edges(edges, source_key: str, node_ids: set, deadline):
     for edge in edges:
         _check_navigation_stop(deadline)
@@ -3064,13 +3193,9 @@ def _collected_call_locations(graph, symbol, scope, direction, deadline, source_
         node["node_id"] for node in _graph_nodes_for_symbol(graph, symbol, deadline)
     }
     _check_navigation_stop(deadline)
-    edges = graph.edges(
-        edge_types=("CALLS",),
-        max_rows=MAX_NAVIGATION_GRAPH_FACTS,
-        deadline=deadline,
-    )
-    _check_navigation_stop(deadline)
     source_key = _call_edge_source_key(direction)
+    edges = _anchored_call_edges(graph, source_key, node_ids, deadline)
+    _check_navigation_stop(deadline)
     version = _graph_generation_version(graph)
     locations = []
     remaining = MAX_NAVIGATION_GRAPH_FACTS
@@ -3352,11 +3477,7 @@ def _verified_call_edge(graph, source, target, scope, deadline, source_cache) ->
         graph, target_symbol, target_anchor, scope, deadline, source_cache
     )
     _check_navigation_stop(deadline)
-    edges = graph.edges(
-        edge_types=("CALLS",),
-        max_rows=MAX_NAVIGATION_GRAPH_FACTS,
-        deadline=deadline,
-    )
+    edges = _anchored_call_edges(graph, "source_node_id", source_ids, deadline)
     _check_navigation_stop(deadline)
     return _edge_connects(edges, source_ids, target_ids, deadline)
 
@@ -4054,7 +4175,7 @@ def _build_tool_definitions() -> list:
     return [
         _make_tool(
             name="recall",
-            description="Search the knowledge vault. Returns ranked results with titles, summaries, and paths. Use this to find relevant knowledge pages.",
+            description="Search the knowledge vault. Returns ranked results with titles, paths, and the matching text. Use this to find relevant knowledge pages.",
             inputSchema=TOOL_INPUT_SCHEMAS["recall"],
         ),
         _make_tool(
@@ -5335,13 +5456,11 @@ def _degrade_stale_envelope(envelope: dict) -> None:
         envelope["warnings"].append(warning)
 
 
-def _signal_freshness(signal: str, signals: set, behind: bool) -> str:
-    """Fresh only when the signal ran on an index no page has moved past."""
+def _signal_freshness(signal: str, signals: set, answer: str) -> str:
+    """The answer's own freshness, for a signal that ran."""
     if signal not in signals:
         return "missing"
-    if behind:
-        return "stale"
-    return "fresh"
+    return answer
 
 
 def _reranker_freshness(trace: dict) -> str:
@@ -5369,31 +5488,6 @@ def _generation_built_ns(generation: object) -> int | None:
         return None
 
 
-def _newest_page_ns() -> int:
-    """The latest change to anything the generation indexes (audit B-19).
-
-    Notes and their directories (a removed or renamed page moves only its
-    directory's mtime), and each project's `state.md` and `context.md`, the
-    project files the corpus collects. See
-    `docs/research/2026-09-25-an-answer-is-stale-when-any-indexed-source-moved.md`.
-    """
-    from memory_state import ROOT
-
-    knowledge = ROOT / "knowledge"
-    notes = knowledge / "notes"
-    sources = [*notes.rglob("*.md"), *_directories(notes), *_project_sources(knowledge / "projects")]
-    return max((_mtime_ns(path) for path in sources), default=0)
-
-
-
-def _directories(root: Path) -> list[Path]:
-    return [root, *(path for path in root.rglob("*") if path.is_dir())] if root.is_dir() else []
-
-
-def _project_sources(projects: Path) -> list[Path]:
-    return [path for name in ("state.md", "context.md") for path in projects.glob(f"*/{name}")]
-
-
 def _mtime_ns(path: Path) -> int:
     try:
         return path.stat().st_mtime_ns
@@ -5401,40 +5495,70 @@ def _mtime_ns(path: Path) -> int:
         return 0
 
 
-def _index_is_behind(generation: object) -> bool:
-    """A page changed after the generation was built, so search cannot see it yet.
+def _answer_freshness(generation: object, paths: list[str]) -> str:
+    """Whether this answer's own sources still say what the generation holds.
 
-    See `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    Stale when a source the answer cites changed or vanished since the build, or
+    when a compiled note did (knowledge the index cannot see yet). An uncited
+    project `state.md`, rewritten by sessions all day, no longer makes every answer
+    stale (audit 2026-09-27 B-10,
+    docs/research/2026-09-27-an-answer-is-fresh-by-its-own-sources.md).
     """
     built = _generation_built_ns(generation)
     if built is None:
-        return False
-    if _newest_page_ns() <= built:
-        return False
-    return _sources_differ(generation, built)
+        return "fresh"
+    return _freshness_from_digests(generation, paths, built)
 
 
-def _sources_differ(generation: str, built: int) -> bool:
-    """Something the generation indexes really changed, not only its file time.
-
-    A touched page, an edited README or a renamed directory moved a time and left
-    every answer "stale" until the next build, which reused the old generation and
-    never moved its manifest (audit 2026-09-26 B-15,
-    docs/research/2026-09-26-an-answer-is-stale-only-when-a-source-changed.md).
-    """
-    from memory_state import ROOT
-
+def _freshness_from_digests(generation: object, paths: list[str], built: int) -> str:
     recorded = _recorded_memory_digests(generation)
     if recorded is None:
+        return "unknown"
+    if _cited_source_moved(recorded, paths, built) or _notes_moved(recorded, built):
+        return "stale"
+    return "fresh"
+
+
+def _cited_source_moved(recorded: dict[str, str], paths: list[str], built: int) -> bool:
+    from memory_state import ROOT
+
+    cited = [path for path in paths if _is_memory_path(path)]
+    return any(_cited_changed(ROOT, path, recorded, built) for path in cited)
+
+
+def _cited_changed(root: Path, relative: str, recorded: dict[str, str], built: int) -> bool:
+    path = root / relative
+    if not path.is_file():
         return True
-    current = _memory_source_files(ROOT)
-    gone = set(recorded) - {path.relative_to(ROOT).as_posix() for path in current}
-    return bool(gone) or any(_changed_since(ROOT, path, recorded, built) for path in current)
+    return _changed_since(root, path, recorded, built)
 
 
-def _memory_source_files(root: Path) -> list[Path]:
-    knowledge = root / "knowledge"
-    return [*(knowledge / "notes").rglob("*.md"), *_project_sources(knowledge / "projects")]
+def _notes_moved(recorded: dict[str, str], built: int) -> bool:
+    """A compiled note was added, edited or removed since the build."""
+    from memory_state import ROOT
+
+    current = list((ROOT / "knowledge" / "notes").rglob("*.md"))
+    if _recorded_notes(recorded) - {path.relative_to(ROOT).as_posix() for path in current}:
+        return True
+    return any(_changed_since(ROOT, path, recorded, built) for path in current)
+
+
+def _recorded_notes(recorded: dict[str, str]) -> set[str]:
+    return {path for path in recorded if path.startswith("knowledge/notes/")}
+
+
+def _answer_paths(data) -> list[str]:
+    """The vault-relative paths an answer's rows cite."""
+    rows = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [path for path in map(_row_path, rows) if path]
+
+
+def _row_path(row: object) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("path") or "").replace("\\", "/")
 
 
 def _changed_since(root: Path, path: Path, recorded: dict[str, str], built: int) -> bool:
@@ -5498,11 +5622,11 @@ def _recall_components(data) -> dict:
         return {}
     generation = trace.get("corpus_generation")
     signals = set(trace.get("signals_used", []))
-    behind = _index_is_behind(generation)
+    answer = _answer_freshness(generation, _answer_paths(data))
     components = {
         signal: {
             "generation": generation,
-            "freshness": _signal_freshness(signal, signals, behind),
+            "freshness": _signal_freshness(signal, signals, answer),
         }
         for signal in _requested_signals(trace)
     }
@@ -5537,7 +5661,7 @@ def _index_timestamp(name: str, data) -> str | None:
 def _context_components(data) -> dict:
     if not isinstance(data, dict):
         return {}
-    if "packing_trace" not in data:
+    if "items" not in data:
         return {}
     return {
         "context_compiler": {
@@ -5547,12 +5671,23 @@ def _context_components(data) -> dict:
     }
 
 
+# Every navigation status says how fresh its answer is; only an answer computed
+# from the current revision is fresh. `unsupported` has no answer at all, and an
+# unknown status is not assumed fresh (audit 2026-09-27 C-19,
+# docs/research/2026-09-27-an-answer-without-a-provider-is-not-fresh.md).
+_NAVIGATION_FRESHNESS = {
+    "ok": "fresh",
+    "partial": "fresh",
+    "stale": "stale",
+    "unsupported": "missing",
+    "not_ready": "unknown",
+    "timeout": "unknown",
+    "error": "unknown",
+}
+
+
 def _navigation_freshness(status) -> str:
-    if status == "stale":
-        return "stale"
-    if status in {"timeout", "error", "not_ready"}:
-        return "unknown"
-    return "fresh"
+    return _NAVIGATION_FRESHNESS.get(str(getattr(status, "value", status)), "unknown")
 
 
 def _navigation_provider_component(data: dict, freshness: str) -> dict:
@@ -6619,7 +6754,9 @@ def run_server() -> int:
     return exit_code
 
 
-# How long a closing server waits for model inference to reach a safe point.
+# How long a closing server waits for model inference to reach a safe point. Basis
+# unknown: value predates measurement; a warm question costs about 1.3 s and a cold
+# one about 12 s (WARMUP_LIMIT_SECONDS above), so 30 s outlasts one of each.
 SHUTDOWN_INFERENCE_SECONDS = 30.0
 
 

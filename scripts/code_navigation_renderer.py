@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 
+from answer_budget import estimate_text_tokens as estimate_tokens
 from code_intelligence import Capability
 from code_navigation import (
     NavigationDiagnostic,
@@ -18,10 +19,19 @@ from code_navigation import (
 DEFAULT_LIMIT = 10
 # Largest row count a rendered navigation answer accepts; `graph_query` accepts 200.
 MAX_LIMIT = 100
-MAX_ESTIMATED_TOKENS = 1_200
+# The 4 800 bytes a rendered navigation answer has been built for, stated in tokens
+# at the measured `answer_budget.BYTES_PER_TOKEN` (2): 1 200 under the earlier
+# 4-bytes estimate. Only the unit moved, not the answer. See
+# docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md.
+MAX_ESTIMATED_TOKENS = 2_400
+# Display cuts inside that answer: a hover past 2 KiB and a signature past its first
+# line or 1 KiB are cut at a UTF-8 boundary and flagged `truncated` with the full size,
+# so they cannot crowd out the rows. Basis unknown: values predate measurement.
 _HOVER_BYTE_CEILING = 2048
-_MAX_JSON_SAFE_INTEGER = 2**53 - 1
 _SIGNATURE_BYTE_CEILING = 1024
+# JSON numbers are IEEE-754 doubles for most readers (RFC 8259 §6): integers above
+# 2^53 - 1 lose precision, so a larger one is refused rather than rendered wrong.
+_MAX_JSON_SAFE_INTEGER = 2**53 - 1
 
 _RESOLUTION_ORDER = {
     "lsp_confirmed": 0,
@@ -33,10 +43,6 @@ _RESOLUTION_ORDER = {
     "unresolved": 6,
     "unsupported": 7,
 }
-
-
-def estimate_tokens(text: str) -> int:
-    return (len(text.encode("utf-8")) + 3) // 4
 
 
 def _coerce_limit(limit: int | None) -> int:

@@ -670,6 +670,49 @@ def _blocked_children(blocker: str, old: datetime) -> list[dict[str, object]]:
     return [child, *(descendants if blocker == "descendant" else [])]
 
 
+def _clear_blocker(database: sqlite3.Connection, blocker: str, old: datetime) -> None:
+    """Remove what held the purge back; a retained dead child stays as it is."""
+    if blocker == "descendant":
+        database.execute(
+            "UPDATE tasks SET redrive_of=NULL WHERE id='grandchild'"
+        )
+        return
+    if blocker != "dead-retained":
+        database.execute(
+            """UPDATE tasks SET state='succeeded',updated_at=?
+               WHERE id='blocked-child'""",
+            (old.isoformat(),),
+        )
+
+
+_BLOCKED_CODE = {
+    "descendant": "corrupt_child_not_leaf",
+    "nonterminal": "corrupt_child_nonterminal",
+    "young": "corrupt_child_retention_active",
+    "dead-retained": "corrupt_child_retained",
+}
+
+
+def _assert_blocked_without_progress(queue, task_id: str, blocked, blocker: str) -> None:
+    assert (blocked.state, blocked.code, blocked.links_deleted) == ("blocked", _BLOCKED_CODE[blocker], 0)
+    with sqlite3.connect(queue.db_path) as database:
+        operation = database.execute(
+            """SELECT cursor_task_id,page_count FROM corrupt_purge_operations
+               WHERE task_id=?""",
+            (task_id,),
+        ).fetchone()
+    assert operation == ("", 0)
+
+
+def _assert_purged_with_its_child(queue, task_id: str, completed) -> None:
+    assert (completed.state, completed.complete, completed.links_deleted) == ("purged", True, 1)
+    with sqlite3.connect(queue.db_path) as database:
+        remaining = database.execute(
+            "SELECT COUNT(*) FROM tasks WHERE id IN (?, 'blocked-child')", (task_id,)
+        ).fetchone()
+    assert remaining == (0,)
+
+
 @pytest.mark.parametrize(
     "blocker", ["descendant", "nonterminal", "young", "dead-retained"]
 )
@@ -690,48 +733,15 @@ def test_purge_deletes_only_terminal_retention_eligible_leaves(
 
     blocked = queue.purge_quarantined(task_id, owner=owner)
 
-    expected_code = {
-        "descendant": "corrupt_child_not_leaf",
-        "nonterminal": "corrupt_child_nonterminal",
-        "young": "corrupt_child_retention_active",
-        "dead-retained": "corrupt_child_retained",
-    }[blocker]
-    assert (blocked.state, blocked.code, blocked.links_deleted) == (
-        "blocked",
-        expected_code,
-        0,
-    )
+    _assert_blocked_without_progress(queue, task_id, blocked, blocker)
     with sqlite3.connect(queue.db_path) as database:
-        operation = database.execute(
-            """SELECT cursor_task_id,page_count FROM corrupt_purge_operations
-               WHERE task_id=?""",
-            (task_id,),
-        ).fetchone()
-        assert operation == ("", 0)
-        if blocker == "descendant":
-            database.execute(
-                "UPDATE tasks SET redrive_of=NULL WHERE id='grandchild'"
-            )
-        elif blocker != "dead-retained":
-            database.execute(
-                """UPDATE tasks SET state='succeeded',updated_at=?
-                   WHERE id='blocked-child'""",
-                (old.isoformat(),),
-            )
+        _clear_blocker(database, blocker, old)
 
     if blocker == "dead-retained":
         registry.release(owner)
         return
 
-    completed = queue.purge_quarantined(task_id, owner=owner)
-
-    assert completed.state == "purged"
-    assert completed.complete is True
-    assert completed.links_deleted == 1
-    with sqlite3.connect(queue.db_path) as database:
-        assert database.execute(
-            "SELECT COUNT(*) FROM tasks WHERE id IN (?, 'blocked-child')", (task_id,)
-        ).fetchone() == (0,)
+    _assert_purged_with_its_child(queue, task_id, queue.purge_quarantined(task_id, owner=owner))
     registry.release(owner)
 
 

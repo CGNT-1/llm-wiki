@@ -26,7 +26,7 @@ Claude Code、Codex 和 OpenCode 在会话结束时都会忘掉一切。LLM Wiki
       ↓  轻量钩子把每个会话事件交给 integration_adapter.py
 会话记录  →  knowledge/raw/sessions/<日期>/  （已脱敏，每次会话都保留）
 每日日志  →  knowledge/daily/<日期>.md
-      ↓  编译（空闲时在会话开始时进行，并且每晚进行）
+      ↓  编译（空闲时在会话开始时编译已结束的日期；每晚编译所有日期）
 知识页面  →  knowledge/notes/<slug>.md   （每条引用都与来源核对）
       ↓
 任何代理的下一次会话：学到的规则、未完成事项、最近的决策、项目状态——
@@ -95,7 +95,7 @@ uv run python scripts/doctor.py
 uv run python scripts/search_memory.py "auth"
 ```
 
-`doctor` 只读，报告哪些正常、哪些处于 degraded 状态、哪些损坏，以及该运行什么。
+`doctor` 不做任何改动（锁检测会创建并删除一个临时文件），报告哪些正常、哪些处于 degraded 状态、哪些损坏，以及该运行什么。
 
 ### 依赖配置
 

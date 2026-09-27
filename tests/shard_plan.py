@@ -144,6 +144,17 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _maintain_weights(args: argparse.Namespace) -> bool:
+    """Rewrite the weights when asked; True when that was the whole job."""
+    if args.refresh is not None:
+        _write_weights(refreshed(weights(), slowest(sorted(args.refresh.rglob("*.xml")))))
+        return True
+    if args.weigh:
+        _write_weights(refreshed(weights(), weigh(args.weigh)))
+        return True
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the shard in a child `python -m pytest`, not in this process.
 
@@ -153,11 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     else. Handing the work to `python -m pytest` keeps that shape identical.
     """
     args = _parse(argv)
-    if args.refresh is not None:
-        _write_weights(refreshed(weights(), slowest(sorted(args.refresh.rglob("*.xml")))))
-        return 0
-    if args.weigh:
-        _write_weights(refreshed(weights(), weigh(args.weigh)))
+    if _maintain_weights(args):
         return 0
     _require_selected(args.shard, args.of)
     files = plan(args.of)[args.shard - 1]

@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.powershell_literal import ps_literal
 from tests.slow_machine import SHORT_TIMEOUT
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +39,19 @@ ROOT = Path(__file__).resolve().parent.parent
 # writer hold below: blocking on the gate would cost WRITER_HOLD_SECONDS.
 SESSION_START_BUDGET_SECONDS = 5.0
 WRITER_HOLD_SECONDS = 30.0
+
+# A process the installer killed stays a zombie until init or a subreaper reaps it,
+# and `kill -0` answers for a zombie as for a live process; under load the check ran
+# before the reaping and reported a dead child as a survivor. `alive` asks `ps` for the
+# state as well: `Z` is a zombie on Linux and on BSD/macOS alike. See
+# docs/research/2026-09-27-a-zombie-is-not-a-survivor.md.
+_ALIVE_SHELL = """alive() {
+  local state
+  kill -0 "$1" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$1" 2>/dev/null)" || return 1
+  case "$state" in *Z*) return 1 ;; esac
+}
+"""
 
 
 def _existing_transcript(tmp_path) -> str:
@@ -2501,8 +2515,8 @@ def _compiled_fake_uv(compiler: str, source: Path, executable: Path) -> Path:
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                f"Add-Type -Path {json.dumps(str(source))} "
-                f"-OutputAssembly {json.dumps(str(executable))} "
+                f"Add-Type -Path {ps_literal(str(source))} "
+                f"-OutputAssembly {ps_literal(str(executable))} "
                 "-OutputType ConsoleApplication",
             ],
             capture_output=True,
@@ -2796,7 +2810,8 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
     installer.chmod(0o700)
     orchestrator = tmp_path / "orchestrate-signal.sh"
     orchestrator.write_text(
-        textwrap.dedent(
+        _ALIVE_SHELL
+        + textwrap.dedent(
             f"""
             set -euo pipefail
             # A shell without job control starts an asynchronous job with
@@ -2811,7 +2826,7 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
             started=0
             for ((attempt = 0; attempt < 500; attempt++)); do
               if [ -f child.started ]; then started=1; break; fi
-              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              if ! alive "$installerPid"; then break; fi
               sleep 0.01
             done
             if [ "$started" -ne 1 ]; then exit 90; fi
@@ -2823,7 +2838,7 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
             fi
             printf '%s' "$installerExit" > installer.status
             childPid="$(cat child.pid)"
-            if kill -0 "$childPid" 2>/dev/null; then
+            if alive "$childPid"; then
               : > child.alive
               kill -TERM "$childPid"
             fi
@@ -2885,7 +2900,8 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
     installer.chmod(0o700)
     orchestrator = tmp_path / "orchestrate-tree-signal.sh"
     orchestrator.write_text(
-        textwrap.dedent(
+        _ALIVE_SHELL
+        + textwrap.dedent(
             """
             set -euo pipefail
             ./installer-under-test.sh &
@@ -2893,7 +2909,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
             started=0
             for ((attempt = 0; attempt < 500; attempt++)); do
               if [ -f grandchild.started ]; then started=1; break; fi
-              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              if ! alive "$installerPid"; then break; fi
               sleep 0.01
             done
             if [ "$started" -ne 1 ]; then exit 90; fi
@@ -2907,7 +2923,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
             : > survivors
             for pidFile in uv.pid child.pid grandchild.pid; do
               pid="$(cat "$pidFile")"
-              if kill -0 "$pid" 2>/dev/null; then
+              if alive "$pid"; then
                 printf '%s:%s\n' "$pidFile" "$pid" >> survivors
                 kill -s KILL "$pid" 2>/dev/null || :
               fi
@@ -2967,7 +2983,8 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
     installer.chmod(0o700)
     orchestrator = tmp_path / "orchestrate-stopped-tree.sh"
     orchestrator.write_text(
-        textwrap.dedent(
+        _ALIVE_SHELL
+        + textwrap.dedent(
             """
             set -euo pipefail
             ./installer-under-test.sh &
@@ -2975,7 +2992,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             started=0
             for ((attempt = 0; attempt < 500; attempt++)); do
               if [ -f grandchild.started ]; then started=1; break; fi
-              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              if ! alive "$installerPid"; then break; fi
               sleep 0.01
             done
             if [ "$started" -ne 1 ]; then exit 90; fi
@@ -2989,7 +3006,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             : > survivors
             for pidFile in uv.pid child.pid grandchild.pid; do
               pid="$(cat "$pidFile")"
-              if kill -0 "$pid" 2>/dev/null; then
+              if alive "$pid"; then
                 printf '%s:%s\n' "$pidFile" "$pid" >> survivors
                 kill -s KILL "$pid" 2>/dev/null || :
               fi
@@ -3068,7 +3085,8 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
     installer.chmod(0o700)
     orchestrator = tmp_path / "orchestrate-stopped-tree.sh"
     orchestrator.write_text(
-        textwrap.dedent(
+        _ALIVE_SHELL
+        + textwrap.dedent(
             f"""
             set -euo pipefail
             ./installer-under-test.sh &
@@ -3076,7 +3094,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             started=0
             for ((attempt = 0; attempt < 500; attempt++)); do
               if [ -f grandchild.started ]; then started=1; break; fi
-              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              if ! alive "$installerPid"; then break; fi
               sleep 0.01
             done
             if [ "$started" -ne 1 ]; then exit 90; fi
@@ -3086,7 +3104,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             # it; elsewhere the installer's own smoke timer ends the wait, so
             # the poll has to outlast that timer.
             for ((attempt = 0; attempt < 1000; attempt++)); do
-              if ! kill -0 "$installerPid" 2>/dev/null; then finished=1; break; fi
+              if ! alive "$installerPid"; then finished=1; break; fi
               sleep 0.01
             done
             if [ "$finished" -ne 1 ]; then
@@ -3102,7 +3120,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             : > survivors
             for pidFile in uv.pid child.pid grandchild.pid; do
               pid="$(cat "$pidFile")"
-              if kill -0 "$pid" 2>/dev/null; then
+              if alive "$pid"; then
                 printf '%s:%s\n' "$pidFile" "$pid" >> survivors
                 kill -s KILL "$pid" 2>/dev/null || :
               fi
@@ -3155,6 +3173,10 @@ def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_pat
     functions = _shell_functions(
         source,
         "restore_test_monitor_mode",
+        "send_signal",
+        "test_group_is_own",
+        "stop_test_group",
+        "stop_test_process",
         "test_tree_alive",
         "stop_test_child",
         "stop_test_timer",
@@ -3242,6 +3264,10 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
     functions = _shell_functions(
         source,
         "restore_test_monitor_mode",
+        "send_signal",
+        "test_group_is_own",
+        "stop_test_group",
+        "stop_test_process",
         "test_tree_alive",
         "stop_test_child",
         "stop_test_timer",
@@ -3299,7 +3325,9 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
 def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
     bash = _require_bash()
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    functions = _shell_functions(source, "test_tree_alive", "stop_test_child")
+    functions = _shell_functions(
+        source, "send_signal", "test_group_is_own", "stop_test_group", "stop_test_process", "test_tree_alive", "stop_test_child"
+    )
     runner = tmp_path / "exercise-cleanup.sh"
     runner.write_text(
         textwrap.dedent(
@@ -3500,7 +3528,7 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
         function Ok($msg) {{ Write-Output "[OK] $msg" }}
         function Warn($msg) {{ Write-Output "[WARN] $msg" }}
         {section}
-        New-Item -ItemType File -Path {json.dumps(str(later))} | Out-Null
+        New-Item -ItemType File -Path {ps_literal(str(later))} | Out-Null
         """
     )
     env = os.environ.copy()
@@ -3574,7 +3602,7 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    function = _shell_function(source, "configure_codex_mcp")
+    function = _shell_functions(source, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
@@ -3637,7 +3665,7 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -3649,9 +3677,9 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
             $all = @($args)
             $index = [Array]::IndexOf($all, 'config-state')
             if ($index -lt 0) {{ throw 'config-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
+            & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        $code = Install-CodexMcp -VaultRoot {json.dumps(str(ROOT))} -Config {json.dumps(str(config))}
+        $code = Install-CodexMcp -VaultRoot {ps_literal(str(ROOT))} -Config {ps_literal(str(config))}
         exit $code
         """
     )
@@ -3779,7 +3807,7 @@ def test_windows_installer_probe_reports_absent_without_touching_the_file(tmp_pa
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -3791,9 +3819,9 @@ def test_windows_installer_probe_reports_absent_without_touching_the_file(tmp_pa
             $all = @($args)
             $index = [Array]::IndexOf($all, 'hooks-state')
             if ($index -lt 0) {{ throw 'hooks-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
+            & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        Get-CodexInlineHooksState -VaultRoot {ps_literal(str(ROOT))} -CodexDir {ps_literal(str(codex_dir))}
         """
     )
 
@@ -3826,7 +3854,7 @@ def test_windows_installer_probe_reports_conflict_for_partial_inline_hooks(tmp_p
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -3838,9 +3866,9 @@ def test_windows_installer_probe_reports_conflict_for_partial_inline_hooks(tmp_p
             $all = @($args)
             $index = [Array]::IndexOf($all, 'hooks-state')
             if ($index -lt 0) {{ throw 'hooks-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
+            & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        Get-CodexInlineHooksState -VaultRoot {ps_literal(str(ROOT))} -CodexDir {ps_literal(str(codex_dir))}
         """
     )
 
@@ -3911,7 +3939,7 @@ def test_windows_installer_probe_reports_disabled_when_the_feature_is_off(tmp_pa
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -3923,9 +3951,9 @@ def test_windows_installer_probe_reports_disabled_when_the_feature_is_off(tmp_pa
             $all = @($args)
             $index = [Array]::IndexOf($all, 'hooks-state')
             if ($index -lt 0) {{ throw 'hooks-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
+            & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        Get-CodexInlineHooksState -VaultRoot {ps_literal(str(ROOT))} -CodexDir {ps_literal(str(codex_dir))}
         """
     )
 
@@ -4349,7 +4377,7 @@ def test_install_scripts_generate_context(tmp_path):
             }
         }
     }
-    sh_codex_mcp = _shell_function(install_sh, "configure_codex_mcp")
+    sh_codex_mcp = _shell_functions(install_sh, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
     assert (
         _unmet_substrings(
             (
@@ -4433,7 +4461,7 @@ def test_windows_installer_resolves_one_external_state_root(tmp_path):
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(install_path))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(install_path))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -4468,15 +4496,13 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
     state = str(tmp_path / "state's data")
     uv_path = str(tmp_path / "bin's tools" / "uv.exe")
 
-    def ps_literal(value: str) -> str:
-        return "'" + value.replace("'", "''") + "'"
 
     command = textwrap.dedent(
         f"""
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -4545,15 +4571,13 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
     uv_path = str(tmp_path / "uv.exe")
     runner = str(tmp_path / "vault/scripts/run-scheduled-task.ps1")
 
-    def ps_literal(value: str) -> str:
-        return "'" + value.replace("'", "''") + "'"
 
     command = textwrap.dedent(
         f"""
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @(
             'Get-LLMWikiLimitHours', 'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',

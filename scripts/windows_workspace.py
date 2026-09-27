@@ -15,6 +15,8 @@ _WINDOWS_RESERVED = {
     *(f"com{number}" for number in range(1, 10)),
     *(f"lpt{number}" for number in range(1, 10)),
 }
+# Windows' extended-length path limit: "approximately 32,767 characters" (Microsoft, Maximum
+# Path Length Limitation).
 _MAX_LOCAL_PATH_CHARACTERS = 32_767
 
 
@@ -739,6 +741,8 @@ def open_writable_directory_path(path: Path) -> int:
     return _open_directory_path(path, writable_leaf=True)
 
 
+# One GetFileInformationByHandleEx batch: 64 KiB holds a few hundred directory records per
+# call; the loop fetches batches until the directory ends, so this bounds memory, not entries.
 _DIRECTORY_BUFFER_BYTES = 64 * 1024
 
 
@@ -852,16 +856,20 @@ def write_all(handle: int, content: bytes, *, chunk_bytes: int) -> None:
         raise TypeError("Windows workspace content must be bytes")
     offset = 0
     while offset < len(content):
-        chunk = content[offset : offset + chunk_bytes]
-        buffer = ctypes.create_string_buffer(chunk)
-        written = wintypes.DWORD()
-        if not _API.write_file(
-            handle, buffer, len(chunk), ctypes.byref(written), None
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
-        if written.value <= 0:
-            raise OSError("sealed workspace write made no progress")
-        offset += int(written.value)
+        offset += _written_chunk_bytes(handle, content[offset : offset + chunk_bytes])
+
+
+def _written_chunk_bytes(handle: int, chunk: bytes) -> int:
+    """One WriteFile call; how many bytes it took, never zero."""
+    buffer = ctypes.create_string_buffer(chunk)
+    written = wintypes.DWORD()
+    if not _API.write_file(
+        handle, buffer, len(chunk), ctypes.byref(written), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if written.value <= 0:
+        raise OSError("sealed workspace write made no progress")
+    return int(written.value)
 
 
 def read_chunks(handle: int, *, chunk_bytes: int, max_bytes: int):

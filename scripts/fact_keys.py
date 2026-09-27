@@ -41,7 +41,10 @@ if str(SCRIPTS) not in sys.path:
 
 STORE_RELATIVE = Path("cache") / "fact-keys" / "keys.sqlite3"
 USER_TURN = "**user:**"
+# Turns sent to the model in one fact-key call. basis unknown — value predates measurement; review when a batch's answer is truncated or refused.
 BATCH_TURNS = 25
+# The prompt's own "up to five short facts": a sixth is past what was asked, not
+# lost knowledge (the turn's text stays searchable). Change both together.
 MAX_KEYS_PER_TURN = 5
 MAX_KEY_CHARS = 160
 MAX_TURN_CHARS = 1500

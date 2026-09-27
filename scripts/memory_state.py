@@ -198,10 +198,25 @@ def trim_state_to_budget(state: dict[str, Any]) -> int:
     return dropped
 
 
-def save_state(state: dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+def _serialized_state(state: dict[str, Any]) -> str:
     trim_state_to_budget(state)
-    atomic_write(STATE_FILE, json.dumps(state, indent=2, ensure_ascii=False))
+    return json.dumps(state, indent=2, ensure_ascii=False)
+
+
+def _write_state_text(text: str) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    atomic_write(STATE_FILE, text)
+
+
+def save_state(state: dict[str, Any]) -> None:
+    _write_state_text(_serialized_state(state))
+
+
+def _state_unchanged(text: str) -> bool:
+    try:
+        return STATE_FILE.read_bytes() == text.encode("utf-8")
+    except OSError:
+        return False
 
 
 def _sharing_violation(exc: PermissionError) -> bool:
@@ -532,8 +547,15 @@ def update_state(
     with _state_lock(timeout=lock_timeout):
         state, readable = _state_for_update()
         mutator(state)
+        text = _serialized_state(state)
+        # An unchanged state is neither linked nor written: linking first and then
+        # finding the write a duplicate left `.previous` the same inode as the
+        # file itself, so in-place damage would take both (audit 2026-09-27 C-20,
+        # docs/research/2026-09-27-a-previous-state-is-a-different-file.md).
+        if _state_unchanged(text):
+            return state
         _keep_previous(readable)
-        save_state(state)
+        _write_state_text(text)
         return state
 
 
@@ -601,6 +623,18 @@ def daily_logs(daily_dir: Path) -> list[Path]:
     return sorted(
         path for path in daily_dir.glob("*.md") if DAILY_LOG_NAME.fullmatch(path.name) is not None
     )
+
+
+def closed_daily_logs(daily_dir: Path) -> list[Path]:
+    """Every daily log but the newest: the newest is the one still being appended to.
+
+    Compiling it at every session start sent the whole open day again after each
+    append, padded to the compile window each time (2026-09-11: 36 KB of day text in
+    six batches for a 10.6 KB day). Like a log's active segment, it is compiled when
+    it closes; the nightly and a manual run still take every day. See
+    `docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md`.
+    """
+    return daily_logs(daily_dir)[:-1]
 
 
 def file_hash(path: Path) -> str:

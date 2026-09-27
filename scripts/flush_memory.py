@@ -18,6 +18,7 @@ work when no provider answered was retired on 2026-09-25
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import sys
 import threading
@@ -27,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from iso_time import local_now  # noqa: E402
 from memory_state import (  # noqa: E402
     MAX_CAPTURE_INTENT_BYTES,
     ROOT,
@@ -35,11 +37,13 @@ from memory_state import (  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
+# The classifier reads the last 60 000 characters, the window of session-promotion-policy-
+# decision; the stored record keeps everything and the prompt names what was omitted (see
+# _bounded_classifier_evidence).
 MAX_TRANSCRIPT_CHARS = 60_000
 # What a session record may read from a transcript file; the record itself is
 # bounded again after rendering.
 MAX_RECORD_CHARS = 4_000_000
-MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 MAX_CAPTURE_TERMINAL_BYTES = 64 * 1024
 
 _CAPTURE_SOURCE_FIELDS = (
@@ -593,7 +597,7 @@ def _capture_tier_outcome(tier: str) -> str:
 
 
 def _capture_now() -> datetime:
-    return datetime.now().astimezone()
+    return local_now()
 
 
 def _require_capture_time(value: object) -> datetime:
@@ -720,7 +724,7 @@ def _capture_decision_bytes(
     chosen_at: datetime | None,
 ) -> bytes:
     from llm_client import LLMResult
-    from reliable_memory import canonical_json_bytes, validate_schema
+    from reliable_memory import MAX_CAPTURE_DECISION_BYTES, canonical_json_bytes, validate_schema
 
     if not isinstance(result, LLMResult):
         raise TypeError("capture decision requires an LLM result")
@@ -881,7 +885,7 @@ def _existing_capture_decision(
         candidate.lstat()
     except FileNotFoundError:
         return None
-    from reliable_memory import read_runtime_bytes
+    from reliable_memory import MAX_CAPTURE_DECISION_BYTES, read_runtime_bytes
 
     encoded = read_runtime_bytes(
         candidate,
@@ -892,19 +896,48 @@ def _existing_capture_decision(
     decision = _decode_capture_decision(encoded)
     if _orphaned_by_another_task(indexed, decision, active):
         return _retire_orphaned_decision(candidate)
-    _require_capture_decision_identity(decision, intent, active)
+    _require_capture_decision_identity(decision, intent, _sealing_binding(indexed, active))
+    fences = (task_fence, intent_fence, owner)
+    return _held_by_this_task(queue, coordinator, lease, active, fences, indexed, encoded), decision
+
+
+def _sealing_binding(indexed: object, active: object) -> object:
+    """The binding the decision was made under: this task's, or the ancestor's it inherited.
+
+    A redrive reuses the decision its dead ancestor published, and that file names
+    the ancestor's task and link (audit 2026-09-27 B-14,
+    docs/research/2026-09-27-a-redrive-keeps-the-decision-its-parent-sealed.md).
+    """
     if indexed is None:
-        indexed = _index_capture_decision(
-            queue,
-            coordinator,
-            lease,
-            active,
-            task_fence,
-            intent_fence,
-            owner,
-            encoded,
+        return active
+    return dataclasses.replace(active, task_id=indexed.task_id, active_digest=indexed.active_link_digest)
+
+
+def _held_by_this_task(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    fences: tuple[object, object, object],
+    indexed: object,
+    encoded: bytes,
+) -> object:
+    """Index a decision nobody indexed yet, or seal this redrive to its ancestor's."""
+    task_fence, intent_fence, owner = fences
+    if indexed is None:
+        return _index_capture_decision(
+            queue, coordinator, lease, active, task_fence, intent_fence, owner, encoded
         )
-    return indexed, decision
+    if indexed.task_id != active.task_id:
+        queue.adopt_semantic_decision(
+            indexed,
+            task_id=active.task_id,
+            active_link_digest=active.active_digest,
+            task_fence=task_fence,
+            intent_fence=intent_fence,
+            owner=owner,
+        )
+    return indexed
 
 
 def _orphaned_by_another_task(indexed: object, decision: Mapping[str, object], active: object) -> bool:
@@ -1087,6 +1120,7 @@ def _commit_capture_markdown(
         coordinator.vault / plan["path"],
         plan["block"].encode("utf-8"),
         preconditions=_capture_transaction_preconditions(sealed, intent_fence),
+        inherited_bindings=queue.sealed_ancestor_bindings(lease.id, active.intent_id, "flush"),
     )
     if transaction.state != "committed":
         raise RuntimeError("capture Markdown transaction did not commit")

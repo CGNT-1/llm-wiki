@@ -130,11 +130,15 @@ def _raise_first_error(
 ) -> None:
     """Raise what was collected, chaining the prior error when there is one."""
     if errors:
-        if prior_error is not None:
-            raise errors[0] from prior_error
-        raise errors[0]
+        _raise_collected(errors[0], prior_error)
     if prior_error is not None:
         raise prior_error
+
+
+def _raise_collected(error: BaseException, prior_error: BaseException | None) -> None:
+    if prior_error is not None:
+        raise error from prior_error
+    raise error
 
 
 def raise_collected_errors(

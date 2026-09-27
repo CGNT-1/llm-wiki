@@ -25,6 +25,8 @@ from reliable_memory import (
 )
 
 CACHE_SCHEMA_VERSION = 1
+# One cached compile plan; the largest on the live vault is 22.6 KB (2026-09-27), so 16 MiB only
+# refuses a corrupted or foreign entry before it is parsed.
 MAX_CACHE_ENTRY_BYTES = 16 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMPILE_PLAN_SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "compile-plan-v2.json"

@@ -21,9 +21,15 @@ from pathlib import Path
 if os.name == "posix":
     import fcntl
 
+# /proc entries walked to prove a process group empty. This host allows 127 124 threads
+# (`/proc/sys/kernel/threads-max`, 2026-09-27); 131 072 is past that, and a scan that reaches it
+# answers "unknown", never "dead".
 _LINUX_PROC_SCAN_LIMIT = 131_072
+# One /proc/<pid>/stat line: the longest here was 372 bytes (2026-09-27); 4 KiB refuses garbage.
 _LINUX_PROC_STAT_LIMIT = 4096
 _LINUX_DEAD_STATES = frozenset({b"Z", b"X", b"x"})
+# Descriptors a launched child inherits: the only caller passes one (workspace_revision's
+# snapshot). 8 refuses a leak of the parent's descriptors into a server.
 _MAX_PASS_FDS = 8
 
 if os.name == "nt":
@@ -935,15 +941,19 @@ def _resume_one_thread(thread_id: int) -> None:
     if not thread:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        previous_count = int(_KERNEL32.ResumeThread(thread))
-        if previous_count == 0xFFFFFFFF:
-            raise ctypes.WinError(ctypes.get_last_error())
-        if previous_count != 1:
-            raise RuntimeError(
-                "suspended LSP primary thread had an invalid suspend count"
-            )
+        _require_resumed_once(int(_KERNEL32.ResumeThread(thread)))
     finally:
         _close_windows_handle(int(thread))
+
+
+def _require_resumed_once(previous_count: int) -> None:
+    """ResumeThread's previous suspend count: failure raises, anything but 1 is invalid."""
+    if previous_count == 0xFFFFFFFF:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if previous_count != 1:
+        raise RuntimeError(
+            "suspended LSP primary thread had an invalid suspend count"
+        )
 
 
 def _advance_thread_snapshot(snapshot: int, entry: _ThreadEntry32) -> bool:

@@ -65,9 +65,9 @@ class OwedAppend:
 
 def _quarantined(database: sqlite3.Connection) -> list[tuple[str, str]]:
     """Refused races that no retry in their lineage ever closed."""
-    from doctor import _resolved_by_lineage
+    from transaction_lineage import resolved_by_lineage
 
-    retried = _resolved_by_lineage(database)
+    retried = resolved_by_lineage(database)
     rows = database.execute(
         'SELECT id, operation_id FROM "transaction" WHERE state=\'quarantined\' '
         "AND error_code = ? ORDER BY created_at",

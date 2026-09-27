@@ -27,9 +27,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from iso_time import local_now  # noqa: E402
 from memory_state import ROOT, update_state  # noqa: E402
 from session_evidence import SESSION_EVIDENCE_DIR  # noqa: E402
+from settings import setting_value  # noqa: E402
 
+# Session records per consolidation call: a day is split into batches of this many, and every
+# batch is read (record_batches). A prompt-size trade-off, not measured.
 MAX_RECORDS = 12
 # Twenty calls is a very busy night and still a bounded one. The bound belongs to
 # the run, not to the day: a day with more batches than this stays pending and the
@@ -43,9 +47,13 @@ MAX_BATCHES_PER_RUN = 20
 MAX_PROMPT_CHARS = 200_000
 MIN_RECORD_CHARS = 8_000
 GAP_NOTE = "\n\n… (middle of the session omitted) …\n\n"
-MAX_ITEMS = 8
 MAX_QUOTE_CHARS = 240
+# One lesson's text as stored; the prompt asks for one sentence. A storage bound on model output,
+# not measured; review when a stored lesson reads as cut.
 MAX_TEXT_CHARS = 400
+# The consolidation answer's token cap, the only bound on how many lessons a day yields
+# (docs/research/2026-09-27-a-cut-says-what-it-left-out.md). Basis unknown: value predates
+# measurement; review when an answer is cut at this cap.
 CONSOLIDATION_MAX_TOKENS = 1200
 KINDS = ("decision", "lesson", "gotcha", "rule")
 # A rule is procedural memory: it is read before acting, not searched for after.
@@ -266,7 +274,10 @@ def _kept_lesson(item: object, records: dict[str, str]) -> Lesson | None:
 def grounded_lessons(raw: str, paths: list[Path]) -> list[Lesson]:
     records = {path.stem: _record_text(path) for path in paths}
     kept = [_kept_lesson(item, records) for item in _json_array(raw)]
-    return [lesson for lesson in kept if lesson is not None][:MAX_ITEMS]
+    # Every grounded lesson is kept: a cap of eight dropped the ninth though the
+    # prompt never asked for eight; the answer's size is bounded by
+    # CONSOLIDATION_MAX_TOKENS. docs/research/2026-09-27-a-cut-says-what-it-left-out.md
+    return [lesson for lesson in kept if lesson is not None]
 
 
 def _lesson_headline(lesson: Lesson) -> str:
@@ -328,6 +339,8 @@ def _operation_id(day: str, lessons: list[Lesson]) -> str:
 
 
 CODE_ROOT = Path(__file__).resolve().parent.parent
+# `git rev-parse HEAD` on a local checkout answers in milliseconds; 5 s bounds a hung git, and a
+# timeout only leaves the revision unknown.
 CODE_REVISION_TIMEOUT_SECONDS = 5
 
 
@@ -505,17 +518,16 @@ def _lost_batches_await_new_code(stored: dict) -> bool:
     return revision is not None and revision != stored.get("code")
 
 
-# The same bound the compile gives its provider calls (`COMPILE_PROVIDER_CEILING_S`).
-# Under the client's 90 s default the catch-up pass of 2026-09-23 stopped the
-# provider mid-answer on one day's records and the whole night counted as
-# failed. See `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
-CONSOLIDATION_PROVIDER_CEILING_S = 300
+# The same bound the compile gives its provider calls, the setting
+# `provider.draft_ceiling_seconds`. Under the client's 90 s default the catch-up pass
+# of 2026-09-23 stopped the provider mid-answer on one day's records and the whole
+# night counted as failed. See `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
 
 
 def _call_provider(prompt: str) -> str | None:
     from llm_client import call_ceiling, call_llm
 
-    with call_ceiling(CONSOLIDATION_PROVIDER_CEILING_S):
+    with call_ceiling(setting_value("provider.draft_ceiling_seconds")):
         return call_llm(
             prompt, CONSOLIDATION_SYSTEM_PROMPT, max_tokens=CONSOLIDATION_MAX_TOKENS
         )
@@ -593,7 +605,7 @@ def consolidate_day(
     keys = [_batch_key(vault, day, batch) for batch in batches]
     progress = _day_progress(state, day)
     logged = _batches_to_find(vault, day, keys, progress)
-    run = _BatchRun(day, call, moment or datetime.now(), progress, deadline, logged)
+    run = _BatchRun(day, call, moment or local_now(), progress, deadline, logged)
     run.all(batches, keys)
     if not set(keys) <= progress.done:
         return _day_outcome("partial", progress, len(batches))
@@ -699,7 +711,7 @@ def pending_days(vault: Path, state: dict, today: str | None = None) -> list[str
 def _today_or(today: str | None) -> str:
     if today is not None:
         return today
-    return datetime.now().strftime("%Y-%m-%d")
+    return local_now().strftime("%Y-%m-%d")
 
 
 def _pending(vault: Path, day: str, before: str, state: dict) -> bool:
@@ -716,7 +728,7 @@ def _skip_reason(vault: Path, day: str, state: dict | None) -> str | None:
 
 
 def _default_day() -> str:
-    return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    return (local_now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -779,16 +779,16 @@ def _python_direct_runtime_root_deletions(source: str) -> list[int]:
         def _bind(self, target: ast.AST, value: ast.AST) -> None:
             if not isinstance(target, ast.Name):
                 return
-            parts = self._path_parts(value)
-            if parts is None:
-                self.paths[-1].pop(target.id, None)
-            else:
-                self.paths[-1][target.id] = parts
-            api = self._delete_api(value)
-            if api is None:
-                self.functions[-1].pop(target.id, None)
-            else:
-                self.functions[-1][target.id] = api
+            self._bind_name(self.paths[-1], target.id, self._path_parts(value))
+            self._bind_name(self.functions[-1], target.id, self._delete_api(value))
+
+        @staticmethod
+        def _bind_name(scope: dict, name: str, bound: object) -> None:
+            """Bind `name` in this scope, or forget it when the value binds nothing."""
+            if bound is None:
+                scope.pop(name, None)
+                return
+            scope[name] = bound
 
         def visit_Assign(self, node: ast.Assign) -> None:
             self.visit(node.value)
@@ -1536,15 +1536,16 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
         {"code": "legacy_protocol_unquiesced"}
     ]
     assert checks["transactions"]["status"] == "ok"
-    assert checks["queue"]["status"] == "ok", checks["queue"]
+    # Retained succeeded and cancelled work degrades nothing; the dead task is work
+    # that did not happen and is named until it is resolved (audit 2026-09-27 B-13).
+    assert (checks["queue"]["status"], checks["queue"]["details"]["dead_unresolved"]) == ("degraded", 1)
     assert checks["run_deletion"]["status"] == "ok"
     assert checks["generation"]["status"] == "ok"
     # A legacy pair is a vault that has not adopted Reliability V3, and that
-    # is the one finding here (issue #17): capture is disabled until it does.
-    # Retention itself degrades nothing; a test vault has no scheduler and has
-    # never taken a knowledge snapshot.
+    # is the other finding here (issue #17): capture is disabled until it does.
+    # A test vault has no scheduler and has never taken a knowledge snapshot.
     degraded = {check["id"] for check in report["checks"] if check["status"] != "ok"}
-    assert degraded <= {"backup", "capture", "scheduler"}, degraded
+    assert degraded <= {"backup", "capture", "scheduler", "queue"}, degraded
     assert "Session capture is disabled" in checks["capture"]["message"]
     monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
     assert "Session capture is disabled" in session_start_context.health_block()

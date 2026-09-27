@@ -66,23 +66,32 @@ case "$SCHEDULER_MODE" in
   *) fail "--scheduler requires native or cron" ;;
 esac
 
+# One remote's push URLs cleared; `git config --get-all` exits 1 when there are none.
+clear_push_urls() {
+  local remote="$1" status=0
+  git -C "$VAULT_ROOT" config --get-all "remote.$remote.pushurl" >/dev/null 2>&1 || status=$?
+  [[ "$status" -ne 1 ]] || return 0
+  [[ "$status" -eq 0 ]] || fail "Could not inspect push URLs for remote $remote"
+  git -C "$VAULT_ROOT" config --unset-all "remote.$remote.pushurl" || \
+    fail "Could not clear push URLs for remote $remote"
+}
+
+protect_remote_push_url() {
+  local remote="$1" urls
+  clear_push_urls "$remote"
+  git -C "$VAULT_ROOT" config --add "remote.$remote.pushurl" no-push || \
+    fail "Could not protect push URLs for remote $remote"
+  urls="$(git -C "$VAULT_ROOT" remote get-url --all --push "$remote")" || \
+    fail "Could not verify push URLs for remote $remote"
+  [[ "$urls" == "no-push" ]] || fail "Could not protect push URLs for remote $remote"
+}
+
 protect_push_urls() {
-  local remote remotes status urls
+  local remote remotes
   remotes="$(git -C "$VAULT_ROOT" remote)" || fail "Could not enumerate Git remotes"
   while IFS= read -r remote; do
     [[ -n "$remote" ]] || continue
-    if git -C "$VAULT_ROOT" config --get-all "remote.$remote.pushurl" >/dev/null 2>&1; then
-      git -C "$VAULT_ROOT" config --unset-all "remote.$remote.pushurl" || \
-        fail "Could not clear push URLs for remote $remote"
-    else
-      status=$?
-      [[ "$status" -eq 1 ]] || fail "Could not inspect push URLs for remote $remote"
-    fi
-    git -C "$VAULT_ROOT" config --add "remote.$remote.pushurl" no-push || \
-      fail "Could not protect push URLs for remote $remote"
-    urls="$(git -C "$VAULT_ROOT" remote get-url --all --push "$remote")" || \
-      fail "Could not verify push URLs for remote $remote"
-    [[ "$urls" == "no-push" ]] || fail "Could not protect push URLs for remote $remote"
+    protect_remote_push_url "$remote"
   done <<< "$remotes"
 }
 
@@ -104,59 +113,61 @@ codex_inline_hooks_state() {
     --config "$codex_dir/config.toml" 2>/dev/null || echo "unknown"
 }
 
+write_codex_mcp_block() {
+  local block="$1" config="$2"
+  if [ ! -f "$config" ]; then
+    printf '%s\n' "$block" > "$config"
+    return
+  fi
+  cp -p "$config" "$config.bak" || return 1
+  if [ -s "$config" ]; then
+    printf '\n%s\n' "$block" >> "$config"
+    return
+  fi
+  printf '%s\n' "$block" >> "$config"
+}
+
+add_codex_mcp_block() {
+  local vault_root="$1" config="$2"
+  local vault_json block
+  mkdir -p "$(dirname "$config")" || return 1
+  vault_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$vault_root")" || return 1
+  block="$(printf '%s\n' \
+    '[mcp_servers.llm-wiki]' \
+    'command = "uv"' \
+    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+  write_codex_mcp_block "$block" "$config"
+}
+
+codex_mcp_state_status() {
+  case "$1" in
+    equivalent) return 0 ;;
+    conflict|invalid) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 configure_codex_mcp() {
   local vault_root="$1"
   local config="$2"
-  local state vault_json block
+  local state
   state="$(uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
     config-state --config "$config" --vault-root "$vault_root")" || return 1
-  case "$state" in
-    equivalent)
-      return 0
-      ;;
-    absent)
-      mkdir -p "$(dirname "$config")"
-      vault_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$vault_root")"
-      block="$(printf '%s\n' \
-        '[mcp_servers.llm-wiki]' \
-        'command = "uv"' \
-        "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
-      if [ -f "$config" ]; then
-        cp -p "$config" "$config.bak"
-        if [ -s "$config" ]; then
-          printf '\n%s\n' "$block" >> "$config"
-        else
-          printf '%s\n' "$block" >> "$config"
-        fi
-      else
-        printf '%s\n' "$block" > "$config"
-      fi
-      return 0
-      ;;
-    conflict|invalid)
-      return 2
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  if [ "$state" = absent ]; then
+    add_codex_mcp_block "$vault_root" "$config"
+    return
+  fi
+  codex_mcp_state_status "$state"
 }
 
 # The status line used to say "active automatic" whatever happened to the MCP
 # entry, and an entry pointing at another vault passed a plain grep. The file is
-# only read here: it is Claude Code's live state and is never rewritten in place.
+# only read: it is Claude Code's live state and is never rewritten in place.
+# install.ps1 asks the same helper, so both installers read it alike.
 claude_mcp_state() {
   local config="$1" vault_root="$2"
-  if [ ! -f "$config" ]; then
-    echo missing
-    return 0
-  fi
-  python3 - "$config" "$vault_root" <<'PY' 2>/dev/null || echo unreadable
-import json, sys
-entry = json.load(open(sys.argv[1], encoding="utf-8")).get("mcpServers", {}).get("llm-wiki")
-states = {True: "current", False: "elsewhere"}
-print("absent" if entry is None else states[sys.argv[2] in entry.get("args", [])])
-PY
+  uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/installer_config.py" \
+    claude-mcp-state --config "$config" --vault-root "$vault_root" 2>/dev/null || echo unreadable
 }
 
 claude_status_line() {
@@ -167,14 +178,12 @@ claude_status_line() {
   esac
 }
 
-# The nightly update skips a detached head, so a checkout its operator detached to
-# freeze it is told so. A remote bootstrap is no longer such a checkout (see below).
+# What the nightly update does with this checkout, in the words of the code that
+# does it: it follows only the default branch, and skips a detached head. A remote
+# bootstrap is no longer detached (see below).
 code_update_note() {
-  if git -C "$1" symbolic-ref -q HEAD >/dev/null 2>&1; then
-    echo "nightly fast-forward of the checked-out branch"
-    return 0
-  fi
-  echo "none - this checkout is pinned to one commit, which the nightly update skips; update it by hand with git"
+  uv run --locked --no-sync --directory "$1" python "$1/scripts/self_update.py" --note "$1" 2>/dev/null \
+    || echo "unknown - the nightly update target could not be read"
 }
 
 # A failed fetch used to leave the directory `git init` had made, and the next
@@ -185,14 +194,21 @@ code_update_note() {
 # local default branch with the remote one as its upstream, so the nightly fast-forward
 # reaches this vault as it reaches a cloned one. `git checkout --detach` freezes it again.
 # See docs/research/2026-09-17-a-verified-first-install-then-follows-main.md.
+pinned_fetch() {
+  local target="$1" url="$2" commit="$3"
+  git init "$target" \
+    && git -C "$target" remote add origin "$url" \
+    && git -C "$target" fetch --depth 1 origin "$commit"
+}
+pinned_branch() {
+  local target="$1" commit="$2" branch="$3"
+  git -C "$target" checkout -B "$branch" "$commit" \
+    && git -C "$target" config "branch.$branch.remote" origin \
+    && git -C "$target" config "branch.$branch.merge" "refs/heads/$branch"
+}
 fetch_pinned_checkout() {
   local target="$1" url="$2" commit="$3" branch="${4:-main}"
-  if git init "$target" \
-    && git -C "$target" remote add origin "$url" \
-    && git -C "$target" fetch --depth 1 origin "$commit" \
-    && git -C "$target" checkout -B "$branch" "$commit" \
-    && git -C "$target" config "branch.$branch.remote" origin \
-    && git -C "$target" config "branch.$branch.merge" "refs/heads/$branch"; then
+  if pinned_fetch "$target" "$url" "$commit" && pinned_branch "$target" "$commit" "$branch"; then
     return 0
   fi
   rm -rf -- "$target"
@@ -330,6 +346,10 @@ testTimeoutSeconds="${LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS:-180}"
 case "$testTimeoutSeconds" in
   ""|*[!0-9]*|0) fail "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS must be a positive integer" ;;
 esac
+# The smoke's own deadline is two thirds of the bound, rounded up: 120 s of the
+# default 180, leaving the rest for it to report and exit before it is stopped.
+# A fixed 120 meant a longer bound could never give the smoke longer.
+smokeDeadlineSeconds=$(( (testTimeoutSeconds * 2 + 2) / 3 ))
 testPid=""
 testPgid=""
 testTimerPid=""
@@ -351,33 +371,39 @@ test_tree_alive() {
     *) kill -0 -- "-$testPgid" 2>/dev/null ;;
   esac
 }
+# A signal to a target that may already be gone: its absence is not a cleanup failure.
+send_signal() {
+  if kill -s "$1" "${@:2}" 2>/dev/null; then :; fi
+}
+test_group_is_own() {
+  case "$testPgid" in
+    ""|*[!0-9]*|0|1|"$$") return 1 ;;
+  esac
+  return 0
+}
+stop_test_group() {
+  local attempt=0
+  send_signal TERM -- "-$testPgid"
+  send_signal CONT -- "-$testPgid"
+  while [ "$attempt" -lt 5 ] && test_tree_alive; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if test_tree_alive; then
+    send_signal KILL -- "-$testPgid"
+  fi
+}
+stop_test_process() {
+  send_signal TERM "$testPid"
+  send_signal CONT "$testPid"
+}
 stop_test_child() {
-  local attempt
   if [ -z "$testPid" ]; then
     return
   fi
-  case "$testPgid" in
-    ""|*[!0-9]*|0|1|"$$")
-      if test_tree_alive; then
-        if kill -s TERM "$testPid" 2>/dev/null; then :; fi
-        if kill -s CONT "$testPid" 2>/dev/null; then :; fi
-      fi
-      ;;
-    *)
-      if test_tree_alive; then
-        if kill -s TERM -- "-$testPgid" 2>/dev/null; then :; fi
-        if kill -s CONT -- "-$testPgid" 2>/dev/null; then :; fi
-        attempt=0
-        while [ "$attempt" -lt 5 ] && test_tree_alive; do
-          sleep 0.1
-          attempt=$((attempt + 1))
-        done
-        if test_tree_alive; then
-          if kill -s KILL -- "-$testPgid" 2>/dev/null; then :; fi
-        fi
-      fi
-      ;;
-  esac
+  if test_tree_alive; then
+    if test_group_is_own; then stop_test_group; else stop_test_process; fi
+  fi
   if wait "$testPid" 2>/dev/null; then :; fi
   testPid=""
   testPgid=""
@@ -387,11 +413,8 @@ stop_test_timer() {
     return
   fi
   case "$testTimerPid" in
-    *[!0-9]*|0|1|"$$") if kill -s TERM "$testTimerPid" 2>/dev/null; then :; fi ;;
-    *)
-      if kill -s TERM -- "-$testTimerPid" 2>/dev/null; then :; fi
-      if kill -s CONT -- "-$testTimerPid" 2>/dev/null; then :; fi
-      ;;
+    *[!0-9]*|0|1|"$$") send_signal TERM "$testTimerPid" ;;
+    *) send_signal TERM -- "-$testTimerPid"; send_signal CONT -- "-$testTimerPid" ;;
   esac
   if wait "$testTimerPid" 2>/dev/null; then :; fi
   testTimerPid=""
@@ -418,7 +441,7 @@ start_test_child() {
     *m*) testMonitorMode=on ;;
     *) testMonitorMode=off; set -m ;;
   esac
-  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120 &
+  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "$smokeDeadlineSeconds" &
   testPid=$! testPgid=$!
   (
     trap 'exit 0' HUP INT TERM
@@ -656,6 +679,9 @@ if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
     warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
     warn "  claude mcp remove --scope user llm-wiki"
     warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+  elif [ "$CLAUDE_MCP_STATE" = "unreadable" ]; then
+    warn "The file ~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
+    warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
   fi
   AGENT_STATUSES+=("$(claude_status_line "$CLAUDE_MCP_STATE")")
 fi
@@ -749,7 +775,24 @@ case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
     ;;
 esac
 
-# ─── 8a. Bounded runtime sync ──────────────────────────────────────
+# ─── 8a. Pinned model weights ──────────────────────────────────────
+# The read path loads weights local-only. Every pinned model whose runtime is
+# installed is fetched now, verified; with none installed, nothing is expected,
+# and the script's own lines say which it was.
+# This comes before the runtime sync: the sync builds the first generation, whose
+# vectors need these weights, and ends with the doctor check that decides whether
+# the install ends with warnings. Fetched after it, the weights left the first
+# generation without vectors and every fresh install warning about weights it was
+# about to fetch. See docs/research/2026-09-27-the-install-checks-itself-last.md.
+MODELS_EXIT=0
+uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
+case "$MODELS_EXIT" in
+  0) ok "Model weights step done" ;;
+  2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
+  *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
+esac
+
+# ─── 8b. Bounded runtime sync ──────────────────────────────────────
 
 info "Synchronizing runtime state and derived indexes..."
 SYNC_EXIT=0
@@ -761,18 +804,6 @@ case "$SYNC_EXIT" in
   0) ok "Runtime state synchronized" ;;
   1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;
   *) fail "Runtime synchronization failed" ;;
-esac
-
-# ─── 8b. Pinned model weights ──────────────────────────────────────
-# The read path loads weights local-only. Every pinned model whose runtime is
-# installed is fetched now, verified; with none installed, nothing is expected,
-# and the script's own lines say which it was.
-MODELS_EXIT=0
-uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
-case "$MODELS_EXIT" in
-  0) ok "Model weights step done" ;;
-  2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
-  *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
 
 # ─── 9. Optional: semantic + hybrid search ─────────────────────────
@@ -788,6 +819,8 @@ echo ""
 echo "=============================================="
 if [ "$SYNC_WARNING" -eq 1 ]; then
   echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
+  echo "  The runtime synchronization ran after every other step and named the checks that need"
+  echo "  attention (the doctor line above). For the state now: uv run --locked --no-sync python scripts/doctor.py"
 else
   echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
 fi

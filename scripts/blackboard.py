@@ -48,6 +48,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from iso_time import utc_text  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MAX_KNOWLEDGE_TARGET_BYTES,
     MarkdownCoordinator,
@@ -56,14 +57,26 @@ from markdown_transaction import (  # noqa: E402
 )
 from memory_state import ROOT  # noqa: E402
 from reliable_memory import begin_immediate  # noqa: E402
-from secret_redact import redact_secrets  # noqa: E402
+from secret_redact import redact_structure  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
+# Resources one blackboard claim may name (caller input); a claim over more is refused. Basis
+# unknown: value predates measurement; review when a real claim needs more.
 _MAX_RESOURCES = 64
+# One claimed resource is a path or a name; 512 bytes bounds caller input and a longer one is
+# refused. Basis unknown: value predates measurement; review when a real resource name is refused.
 _MAX_RESOURCE_BYTES = 512
+# A task, message or resolution is caller input written to a shared journal; a longer one is
+# refused, not cut. Security bound on untrusted input. Basis unknown: value predates measurement;
+# review when a real task description is refused.
 _MAX_TASK_BYTES = 4096
+# An agent name is an identifier, not prose; 128 bytes bounds caller input and a longer name is
+# refused. Basis unknown: value predates measurement; review when a host's real agent names come
+# near it.
 _MAX_AGENT_BYTES = 128
+# A claim's TTL is caller input: at least one second so the claim is observable at all.
 _MIN_TTL_SECONDS = 1
+# At most one day, so a claim an agent abandoned expires before the next daily nightly pass.
 _MAX_TTL_SECONDS = 86400
 # Settling a claim nobody was told about competes with whatever stopped the
 # announcement, so it is worth more than one try. Six attempts spread over
@@ -172,7 +185,7 @@ def _bb_dir(project: str) -> Path:
 def _append_jsonl(
     path: Path, record: dict, operation_id: str | None = None
 ) -> None:
-    block = (redact_secrets(json.dumps(record, ensure_ascii=False)) + "\n").encode("utf-8")
+    block = (json.dumps(redact_structure(record), ensure_ascii=False) + "\n").encode("utf-8")
     append_knowledge(operation_id, path, block)
 
 
@@ -313,9 +326,7 @@ def _utc_now(value: datetime | None) -> datetime:
 
 
 def _timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
+    return utc_text(value)
 
 
 def _parse_timestamp(value: object) -> datetime:

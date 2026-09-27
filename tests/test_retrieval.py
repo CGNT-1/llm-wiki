@@ -378,7 +378,10 @@ def test_public_search_goes_through_retrieve(tmp_path, monkeypatch) -> None:
     vault = tmp_path / "vault"
     notes = vault / "knowledge" / "notes"
     notes.mkdir(parents=True)
-    (notes / "page.md").write_text("# Page\nAuth decision needle.\n", encoding="utf-8")
+    # Stated as ai-derived (weight 1.0) so the fused score reaches the row unchanged.
+    (notes / "page.md").write_text(
+        "---\nsource_authority: ai-derived\n---\n# Page\nAuth decision needle.\n", encoding="utf-8"
+    )
     monkeypatch.setattr(search_memory, "ROOT", vault)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
     monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
@@ -561,7 +564,7 @@ def test_an_unweighted_candidate_keeps_its_fused_score_unchanged():
     from retrieval import fuse_rrf
 
     fused, _meta = fuse_rrf(
-        lexical=[{"path": "knowledge/notes/plain.md", "score": 1.0}],
+        lexical=[{"path": "knowledge/notes/plain.md", "authority": "ai-derived", "score": 1.0}],
         dense=None,
         graph=None,
     )
@@ -664,8 +667,8 @@ def test_what_a_page_is_weighs_on_the_order_too() -> None:
     from retrieval import fuse_rrf
 
     lexical = [
-        {"path": "docs/status.md", "type": "code", "score": 9.0},
-        {"path": "knowledge/notes/decision.md", "type": "decision", "score": 9.0},
+        {"path": "docs/status.md", "type": "code", "authority": "ai-derived", "score": 9.0},
+        {"path": "knowledge/notes/decision.md", "type": "decision", "authority": "ai-derived", "score": 9.0},
     ]
     fused, meta = fuse_rrf(lexical=lexical, dense=None, graph=None)
 
@@ -684,8 +687,8 @@ def test_a_gap_stub_does_not_answer_ahead_of_a_written_page() -> None:
     import provenance
 
     assert provenance.type_weight("gap") < provenance.DEFAULT_TYPE_WEIGHT
-    assert provenance.trust_weight("user", "decision") > provenance.trust_weight(
-        "user", "code"
+    assert provenance.trust_weight("user", "decision", "knowledge/notes/x.md") > provenance.trust_weight(
+        "user", "code", "scripts/x.py"
     )
 
 

@@ -80,14 +80,26 @@ _CAPABILITY_DIRECTION: Mapping[Capability, str | None] = MappingProxyType(
     }
 )
 
+# Facts one navigation answer gathers and graph values one step consumes; past either
+# the answer carries its `truncated`/`partial` flag rather than cutting silently. The
+# same 10 000 as mcp_server.MAX_NAVIGATION_GRAPH_FACTS (a hundred times the rows an
+# answer renders). The input bound predates measurement; review if a real symbol
+# reports truncated input.
 _MAX_NAVIGATION_FACTS = 10_000
 _MAX_NAVIGATION_INPUT_VALUES = 100_000
+# The largest source navigation reads, as mcp_server.MAX_NAVIGATION_SOURCE_BYTES.
 _MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
+# The per-session source-document cache (LRU): at most 128 documents and 16 MiB of
+# estimated memory; past either the oldest is evicted and read again when needed, so
+# the bounds cost time, never an answer. The estimate charges 512 bytes of fixed
+# overhead per document, 128 bytes per line span (a CPython tuple of two ints is
+# 56 + 2 x 28 = 112 bytes) and 4 bytes per retained character (CPython's widest string storage,
+# PEP 393), so it errs high. The two caps predate measurement.
 _MAX_SOURCE_DOCUMENT_CACHE_ENTRIES = 128
 _MAX_SOURCE_DOCUMENT_CACHE_BYTES = 16 * 1024 * 1024
 _SOURCE_DOCUMENT_CACHE_FIXED_BYTES = 512
 _SOURCE_DOCUMENT_LINE_SPAN_BYTES = 128
-_SOURCE_DOCUMENT_CACHE_CHARACTER_BYTES = 4
+_SOURCE_DOCUMENT_CACHE_CHARACTER_BYTES = 4  # PEP 393: the widest CPython str storage
 _T = TypeVar("_T")
 
 

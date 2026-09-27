@@ -57,3 +57,23 @@ def test_a_module_that_compares_times_in_sql_writes_them_in_one_width() -> None:
 
     assert {name: lines for name, lines in offenders.items() if lines} == {}
     assert "markdown_transaction.py" in offenders
+
+
+# The microsecond `Z` form `utc_text` owns; `trace_ingest` keeps its own
+# seconds-wide stamps in its own table, a different format on purpose.
+_WRITER_SHAPE = re.compile(r"\.isoformat\(timespec='microseconds'\)\.replace$")
+
+
+def _hand_rolled_lines(path: Path) -> list[int]:
+    """Lines spelling `x.isoformat(timespec=...).replace(...)`: `iso_time.utc_text` written again."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    return sorted({node.lineno for node in calls if _WRITER_SHAPE.search(ast.unparse(node.func))})
+
+
+def test_one_module_writes_the_fixed_width_instant() -> None:
+    """Four copies of the writer drifted apart (audit 2026-09-27 C-18); only iso_time may hold it."""
+    scripts = sorted((Path(__file__).resolve().parents[1] / "scripts").glob("*.py"))
+    copies = {path.name: _hand_rolled_lines(path) for path in scripts if path.name != "iso_time.py"}
+
+    assert {name: lines for name, lines in copies.items() if lines} == {}

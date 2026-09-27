@@ -115,6 +115,10 @@ def _resolve(bindings: dict[str, str], expression: ast.expr) -> str | None:
         return bindings.get(expression.id, expression.id)
     if not isinstance(expression, ast.Attribute):
         return None
+    return _resolve_attribute(bindings, expression)
+
+
+def _resolve_attribute(bindings: dict[str, str], expression: ast.Attribute) -> str | None:
     owner = _resolve(bindings, expression.value)
     if owner is None:
         return None

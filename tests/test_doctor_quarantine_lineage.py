@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import transaction_lineage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -203,7 +204,7 @@ def test_the_parent_chain_still_resolves_on_its_own() -> None:
 def test_the_base_identity_strips_only_retry_ordinals(
     operation_id: str, expected: str
 ) -> None:
-    assert doctor._base_operation_identity(operation_id) == expected
+    assert transaction_lineage.base_operation_identity(operation_id) == expected
 
 
 def test_the_maintenance_owner_opens_the_adoption_aware_coordinator(

@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from bounded_io import IO_CHUNK_BYTES
+from iso_time import utc_text
 from reliable_memory import (
     canonical_json_bytes,
     fsync_directory,
@@ -147,8 +148,16 @@ MAX_ARTIFACTS = 1024
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024
 MAX_GENERATION_BYTES = 64 * 1024 * 1024 * 1024
 MAX_GENERATION_CHILDREN = 4096
+# The catalog database file; it holds rows, not artifacts, so 256 MiB refuses only a runaway
+# catalog. Basis unknown: value predates measurement; review when doctor reports the catalog
+# nearing it.
 MAX_CATALOG_BYTES = 256 * 1024 * 1024
+# Generation rows the catalog holds; reaching it refuses a new registration rather than dropping
+# one. Basis unknown: value predates measurement; review when pruning falls behind and the row
+# count nears it.
 MAX_GENERATIONS = 1024
+# Activation history rows; reaching it refuses rather than overwriting history. Basis unknown:
+# value predates measurement; review when the history row count nears it.
 MAX_ACTIVATION_HISTORY = 16384
 HASH_CHUNK_BYTES = IO_CHUNK_BYTES
 # A caller with a deadline gets whatever is left of it, capped here. A caller
@@ -413,7 +422,7 @@ def _utc_timestamp(clock: Callable[[], datetime | str]) -> str:
     parsed = _parsed_clock(clock())
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("clock timestamp must include a UTC offset")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return utc_text(parsed)
 
 
 def _is_link_or_reparse(path: Path) -> bool:
@@ -434,16 +443,30 @@ def _validate_directory(path: Path, root: Path) -> None:
         raise PermissionError("generation directory must not be a link or reparse point")
 
 
+def _scope_from_manifest_bytes(encoded: bytes) -> RepositoryScope | None:
+    """The repository scope a canonical manifest names; None when it is not canonical."""
+    try:
+        manifest = json.loads(encoded)
+        if canonical_json_bytes(manifest) != encoded:
+            return None
+        return RepositoryScope.from_dict(manifest.get("repository_scope"))
+    except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def _sealed_entry_kind(mode: int) -> str:
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISREG(mode):
+        return "file"
+    raise PermissionError("generation members must be regular files or directories")
+
+
 def _entry_seal(path: Path, relative: str) -> _EntrySeal:
     metadata = path.lstat()
     if _is_link_or_reparse(path):
         raise PermissionError("generation members must not be links or reparse points")
-    if stat.S_ISDIR(metadata.st_mode):
-        kind = "directory"
-    elif stat.S_ISREG(metadata.st_mode):
-        kind = "file"
-    else:
-        raise PermissionError("generation members must be regular files or directories")
+    kind = _sealed_entry_kind(metadata.st_mode)
     return _EntrySeal(
         path=relative,
         kind=kind,
@@ -1019,12 +1042,16 @@ def _posix_file_identity(descriptor: int) -> tuple[object, ...]:
     return ("posix", metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
 
 
+def _windows_descriptor_identity(descriptor: int) -> tuple[object, ...]:
+    handle = msvcrt.get_osfhandle(descriptor)
+    if handle == -1:
+        raise OSError("invalid Windows file handle")
+    return _windows_handle_file_identity(handle)
+
+
 def _descriptor_file_identity(descriptor: int) -> tuple[object, ...]:
     if os.name == "nt":
-        handle = msvcrt.get_osfhandle(descriptor)
-        if handle == -1:
-            raise OSError("invalid Windows file handle")
-        return _windows_handle_file_identity(handle)
+        return _windows_descriptor_identity(descriptor)
     if os.name == "posix":
         return _posix_file_identity(descriptor)
     raise OSError("stable file identity is unavailable")
@@ -2959,17 +2986,27 @@ class GenerationCatalog:
         """
         if repository_scope is None:
             return None
-        for identifier, _registered_at, manifest in self.registered_manifests(
-            deadline=deadline, cancelled=cancelled
-        ):
-            if not self._memory_of(identifier, manifest, repository_scope):
-                continue
-            selected = self._validated_scoped_generation(
-                identifier, deadline, cancelled
+        manifests = self.registered_manifests(deadline=deadline, cancelled=cancelled)
+        candidates = (
+            self._usable_memory_generation(
+                identifier, manifest, repository_scope, deadline, cancelled
             )
-            if selected is not None:
-                return selected
-        return None
+            for identifier, _registered_at, manifest in manifests
+        )
+        return next((selected for selected in candidates if selected is not None), None)
+
+    def _usable_memory_generation(
+        self,
+        identifier: str,
+        manifest: dict[str, object],
+        scope: RepositoryScope,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> dict[str, object] | None:
+        """This registered generation when it is the scope's memory and still valid."""
+        if not self._memory_of(identifier, manifest, scope):
+            return None
+        return self._validated_scoped_generation(identifier, deadline, cancelled)
 
     def _memory_of(
         self, identifier: str, manifest: dict[str, object], scope: RepositoryScope
@@ -3016,13 +3053,7 @@ class GenerationCatalog:
         encoded = bytes(row["manifest_json"])
         if sha256_bytes(encoded) != row["manifest_sha256"]:
             return None
-        try:
-            manifest = json.loads(encoded)
-            if canonical_json_bytes(manifest) != encoded:
-                return None
-            return RepositoryScope.from_dict(manifest.get("repository_scope"))
-        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
-            return None
+        return _scope_from_manifest_bytes(encoded)
 
     def _scope_admits(
         self,

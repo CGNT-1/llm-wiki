@@ -229,7 +229,7 @@ def _recorded_weight(item: dict, key: str, fallback: float) -> float:
 def _trust_weight_of(item: dict) -> float:
     """Both factors of the trust weight, as fusion computed them for this item."""
     authority = _recorded_weight(
-        item, "authority_weight", authority_weight(item.get("authority"))
+        item, "authority_weight", authority_weight(item.get("authority"), item.get("path"))
     )
     page = _recorded_weight(item, "type_weight", type_weight(item.get("type")))
     return authority * page

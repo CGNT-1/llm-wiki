@@ -135,6 +135,9 @@ def _in_scope(page_project: str | None, project: str | None) -> bool:
     return page_project.lower() == project.lower()
 
 
+# One guard-rail line injected at every session start, cut at a word boundary with an ellipsis
+# (docs/research/2026-09-14-less-noise-at-session-start.md). The length is a token-cost trade-off,
+# not measured; review with the session-start token budget.
 SUMMARY_MAX_CHARS = 150
 
 
@@ -267,6 +270,8 @@ def _deduplicated(corrections: list[dict]) -> list[dict]:
     return unique
 
 
+# Rules shown per type at session start; the block says "N of M shown", so the cut is visible
+# (d09b58a8). A token-cost trade-off, not measured; review with the session-start token budget.
 MAX_RULES_PER_TYPE = 5
 
 

@@ -21,14 +21,14 @@ def _row(ancestry: list[str], content: str) -> dict[str, object]:
             "source_sha256": "a" * 64, "span_sha256": "b" * 64}
 
 
-def test_a_section_hit_carries_the_page_title_and_a_prose_summary() -> None:
+def test_a_section_hit_carries_the_page_title() -> None:
     import search_memory
 
     result = search_memory._generation_result(
         _row(["The Vault Updates Its Own Code", "Related"], "## Related\n- [[a]] — why.\n"), "g"
     )
 
-    assert (result["title"], result["summary"]) == ("The Vault Updates Its Own Code", "- [[a]] — why.")
+    assert result["title"] == "The Vault Updates Its Own Code"
 
 
 def test_a_page_without_headings_is_named_by_its_file() -> None:

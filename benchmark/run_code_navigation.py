@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import ctypes
 import hashlib
 import io
@@ -178,6 +177,26 @@ class _ProbeRacedError(RuntimeError):
     """Raised when the server answered before the probe could interrupt it."""
 
 
+class _OwnershipProbeError(RuntimeError):
+    """An ownership attempt that measured nothing, under a code of its own.
+
+    Four places raised a bare `RuntimeError`, so the report could not tell them
+    apart (audit 2026-09-27 B-8).
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# The resolution of the clock every probe deadline is read on. Python 3.10 on
+# Windows reads `time.monotonic()` from GetTickCount64, about 15.6 ms, against a
+# 50 ms probe budget; each unmeasured attempt's message carries it, so a failure
+# says whether the clock was that coarse. See
+# docs/research/2026-09-27-an-ownership-failure-says-what-and-when.md.
+_MONOTONIC_RESOLUTION_MS = time.get_clock_info("monotonic").resolution * 1000.0
+
+
 def _unmeasured_reason(error: BaseException) -> str:
     """Why an attempt measured nothing, as the report names it.
 
@@ -188,7 +207,22 @@ def _unmeasured_reason(error: BaseException) -> str:
     if isinstance(error, _ProbeRacedError):
         return "raced"
     cause = error.__cause__
-    return type(error).__name__ if cause is None else f"{type(error).__name__}:{type(cause).__name__}"
+    name = _error_name(error)
+    return name if cause is None else f"{name}:{type(cause).__name__}"
+
+
+def _error_name(error: BaseException) -> str:
+    if isinstance(error, _OwnershipProbeError):
+        return error.code
+    return type(error).__name__
+
+
+def _unmeasured_message(error: BaseException, elapsed_seconds: float) -> str:
+    """What the failure said, how long the attempt ran, and how fine the clock was."""
+    cause = error.__cause__
+    said = str(error) if cause is None else f"{error}: {cause}"
+    timing = f"after {elapsed_seconds * 1000.0:.1f} ms; monotonic resolution {_MONOTONIC_RESOLUTION_MS:.1f} ms"
+    return f"{said} ({timing})"
 
 
 def _wait_one_poll(completed: threading.Event, deadline: float) -> None:
@@ -207,14 +241,16 @@ def _check_probe_error(error: BaseException, scenario: str) -> None:
         return
     if isinstance(error, (KeyboardInterrupt, SystemExit)):
         raise error
-    raise RuntimeError("ownership probe reached the wrong terminal") from error
+    raise _OwnershipProbeError("wrong_terminal", "ownership probe reached the wrong terminal") from error
 
 
 def _require_single_terminal(outcome: list[tuple[str, object]], dispatched: bool) -> None:
     if not dispatched:
-        raise RuntimeError("ownership probe request was not sent")
+        raise _OwnershipProbeError("not_sent", "ownership probe request was not sent")
     if len(outcome) != 1:
-        raise RuntimeError("ownership probe did not reach the expected terminal")
+        raise _OwnershipProbeError(
+            "no_single_terminal", f"ownership probe ended with {len(outcome)} terminals, not one"
+        )
 
 
 def _check_probe_terminal(
@@ -941,13 +977,21 @@ def _resolved_matches(resolved: tuple[tuple[object, ...], str] | None, expected_
     return resolved is not None and resolved[1] == expected_hashes.get(resolved[0])
 
 
-def _direct_result_keys(
-    scope: RepositoryScope, result: object, encoding: PositionEncoding, expected_hashes: dict, deadline: float
-) -> set[tuple[object, ...]] | None:
+def _provider_locations(result: object) -> tuple | None:
+    """The locations of a provider-reported result, or None for any other result."""
     if getattr(result, "coverage", None) != "provider_reported":
         return None
     locations = getattr(result, "locations", None)
     if not isinstance(locations, tuple):
+        return None
+    return locations
+
+
+def _direct_result_keys(
+    scope: RepositoryScope, result: object, encoding: PositionEncoding, expected_hashes: dict, deadline: float
+) -> set[tuple[object, ...]] | None:
+    locations = _provider_locations(result)
+    if locations is None:
         return None
     actual: set[tuple[object, ...]] = set()
     for location in locations:
@@ -1130,6 +1174,30 @@ def _query_position(content: bytes, byte_start: int) -> tuple[int, int, int]:
     )
 
 
+def _mutation_expected(
+    needle: bytes, target_path: str, target_content: bytes | None
+) -> tuple[GoldLocation, ...]:
+    """The declaration a mutation query must reach; none when the target is gone."""
+    if target_content is None:
+        return ()
+    declaration = target_content.find(needle)
+    if declaration < 0:
+        raise ValueError("mutation workload target symbol is missing")
+    target_line, target_character, _target_codepoint = _query_position(
+        target_content, declaration
+    )
+    return (
+        GoldLocation(
+            target_path,
+            target_line,
+            target_character,
+            declaration,
+            declaration + len(needle),
+            hashlib.sha256(target_content).hexdigest(),
+        ),
+    )
+
+
 def _mutation_query(
     query_id: str,
     query_path: str,
@@ -1146,26 +1214,7 @@ def _mutation_query(
         raise ValueError("mutation workload probe symbol is missing")
     line, character, codepoint = _query_position(query_content, use)
     query_digest = hashlib.sha256(query_content).hexdigest()
-    expected: tuple[GoldLocation, ...]
-    if target_content is None:
-        expected = ()
-    else:
-        declaration = target_content.find(needle)
-        if declaration < 0:
-            raise ValueError("mutation workload target symbol is missing")
-        target_line, target_character, _target_codepoint = _query_position(
-            target_content, declaration
-        )
-        expected = (
-            GoldLocation(
-                target_path,
-                target_line,
-                target_character,
-                declaration,
-                declaration + len(needle),
-                hashlib.sha256(target_content).hexdigest(),
-            ),
-        )
+    expected = _mutation_expected(needle, target_path, target_content)
     return GoldQuery(
         query_id,
         "definition",
@@ -1573,11 +1622,11 @@ class _RealNavigationRuntime:
     def _prepare_process(self, deadline: float):
         request = self._last_request
         if request is None:
-            raise RuntimeError("ownership probe requires a prior navigation request")
+            raise _OwnershipProbeError("no_prior_request", "ownership probe requires a prior navigation request")
         self.query(request, deadline=deadline)
         process = self._session._process
         if process is None:
-            raise RuntimeError("ownership probe has no live process")
+            raise _OwnershipProbeError("no_live_process", "ownership probe has no live process")
         return request, process
 
     def _start_probe_request(
@@ -1677,6 +1726,8 @@ class _RealNavigationRuntime:
             for scenario in _OWNERSHIP_SCENARIOS
         }
         self.ownership_reasons = {}
+        self.ownership_messages = {}
+        self.ownership_recovery = {}
         for scenario in _OWNERSHIP_SCENARIOS:
             if self.cleanup_failed:
                 break
@@ -1690,22 +1741,26 @@ class _RealNavigationRuntime:
         self, scenario: str, deadline: float
     ) -> tuple[int | None, bool]:
         """The retained-owner count, or None and whether a retry is worthwhile."""
+        started = time.perf_counter()
         try:
             return self._run_ownership_scenario(scenario, deadline), False
-        except _ProbeRacedError as error:
-            self._recover_ownership_scenario()
-            self._note_unmeasured(scenario, error)
-            return None, True
         except Exception as error:
-            self._recover_ownership_scenario()
-            self._note_unmeasured(scenario, error)
-            return None, False
+            self._note_unmeasured(scenario, error, time.perf_counter() - started)
+            self._recover_ownership_scenario(scenario)
+            return None, isinstance(error, _ProbeRacedError)
 
-    def _note_unmeasured(self, scenario: str, error: BaseException) -> None:
-        """Keep the last reason a scenario measured nothing, for the report."""
-        reasons = getattr(self, "ownership_reasons", None) or {}
-        reasons[scenario] = _unmeasured_reason(error)
-        self.ownership_reasons = reasons
+    def _ownership_record(self, name: str) -> dict[str, str]:
+        """One of the per-scenario records the report reads, created on first use."""
+        record = getattr(self, name, None)
+        if record is None:
+            record = {}
+            setattr(self, name, record)
+        return record
+
+    def _note_unmeasured(self, scenario: str, error: BaseException, elapsed_seconds: float) -> None:
+        """Keep the last reason a scenario measured nothing, and what it said, for the report."""
+        self._ownership_record("ownership_reasons")[scenario] = _unmeasured_reason(error)
+        self._ownership_record("ownership_messages")[scenario] = _unmeasured_message(error, elapsed_seconds)
 
     def _ownership_attempt_or_stop(self, scenario: str, deadline: float) -> tuple[int | None, bool]:
         """One attempt, or (None, False) when no attempt may start."""
@@ -1725,12 +1780,22 @@ class _RealNavigationRuntime:
                 break
         return {"available": False, "orphan_count": None}
 
-    def _recover_ownership_scenario(self) -> None:
-        """Put the harness back where the next attempt can start."""
+    def _recover_ownership_scenario(self, scenario: str) -> None:
+        """Put the harness back where the next attempt can start, or record why it could not.
+
+        A failed reset used to be swallowed; the next attempt then started from an
+        unknown state and its failure was the only one the report named.
+        """
         if self.cleanup_failed:
             return
-        with contextlib.suppress(Exception):
+        started = time.perf_counter()
+        try:
             self._reset(time.monotonic() + _OWNERSHIP_RESET_SECONDS)
+        except Exception as error:
+            elapsed = time.perf_counter() - started
+            self._ownership_record("ownership_recovery")[scenario] = (
+                _unmeasured_reason(error), _unmeasured_message(error, elapsed)
+            )
 
     def _run_ownership_scenario(self, scenario: str, deadline: float) -> int:
         """Drive one scenario to its terminal and return the retained owners."""
@@ -2618,10 +2683,21 @@ class _FixtureRun:
 
     def _name_unmeasured_ownership(self) -> None:
         """Each scenario that measured nothing says why, so a failed gate is diagnosable."""
-        reasons = getattr(self.runtime, "ownership_reasons", {})
         for scenario, outcome in self.ownership.items():
             if not outcome["available"]:
-                self.errors.append({"phase": f"ownership:{scenario}", "code": reasons.get(scenario, "not_attempted")})
+                self.errors.extend(self._unmeasured_entries(scenario))
+
+    def _unmeasured_entries(self, scenario: str) -> list[dict[str, str]]:
+        """The scenario's own reason and message, and a failed recovery's, when there was one."""
+        reasons = getattr(self.runtime, "ownership_reasons", {})
+        messages = getattr(self.runtime, "ownership_messages", {})
+        entry = {"phase": f"ownership:{scenario}", "code": reasons.get(scenario, "not_attempted")}
+        if scenario in messages:
+            entry["message"] = messages[scenario]
+        recovery = getattr(self.runtime, "ownership_recovery", {}).get(scenario)
+        if recovery is None:
+            return [entry]
+        return [entry, {"phase": f"ownership:{scenario}:recovery", "code": recovery[0], "message": recovery[1]}]
 
     def ownership_phase(self) -> None:
         if getattr(self.runtime, "cleanup_failed", False):

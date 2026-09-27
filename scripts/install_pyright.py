@@ -38,6 +38,7 @@ from pinned_download import (
     MAX_MEMBERS,
     MAX_PATH_COMPONENTS,
     NETWORK_TIMEOUT_SECONDS,
+    retry_transient,
 )
 from pinned_download import open_pinned_url as _open_pinned_url
 from reliable_memory import (
@@ -50,17 +51,37 @@ from reliable_memory import (
 # handler -- imported under this module's own private name because that is the
 # attribute its tests replace. Research:
 # `docs/research/2026-09-17-inst-the-second-installer-gets-the-first-ones-guarantees.md`.
+# The whole explicit install when no deadline is given: a 19 MB download and unpack. Value
+# predates measurement; review when an install times out on a working network.
 DEFAULT_INSTALL_TIMEOUT_SECONDS = 120.0
+# How often a second installer checks the install lock; capped by the deadline.
 LOCK_POLL_SECONDS = 0.01
+# A lock file younger than this may still be being written by its owner, so it is not judged
+# stale yet. Value predates measurement.
 LOCK_INITIALIZATION_GRACE_SECONDS = 10.0
 COPY_CHUNK_BYTES = IO_CHUNK_BYTES
+# The unpacked Pyright 1.1.411 package is 19.3 MB in 5 424 files (measured 2026-09-27 in
+# cache/code-tools). 64 MiB, about 3.3 times that, refuses a wrong or hostile archive before it
+# fills the disk (`pyright_archive_aggregate_limit`). Review when the pinned version changes.
 MAX_TOTAL_FILE_BYTES = 64 * 1024 * 1024
+# Linux PATH_MAX (`getconf PATH_MAX /` = 4096): a member path the OS could not open is refused.
 MAX_PATH_BYTES = 4096
+# NAME_MAX of ext4, APFS and NTFS (`getconf NAME_MAX /` = 255): one component the OS can create.
 MAX_PATH_COMPONENT_BYTES = 255
+# Security bounds on untrusted pax extended headers (POSIX.1-2001): one member's header bytes,
+# their field count, and the whole archive's hidden metadata. The pinned tarball needs none
+# of this room; the values only stop a crafted archive from making the parser allocate without
+# bound, and each refusal is `pyright_archive_pax_limit`. The exact values predate measurement;
+# review when a pinned archive is refused for them.
 MAX_PAX_BYTES = 1024 * 1024
 MAX_PAX_FIELDS = 256
 MAX_EXTENDED_METADATA_BYTES = 16 * 1024 * 1024
+# Windows lists the installer's parent directory to recognise its own staging name. It holds a
+# few pinned versions; 16 384 only bounds a hostile directory, and past it the listing is refused
+# (`windows_workspace.list_directory`), never cut. Value predates measurement; review if refused.
 MAX_RUNTIME_PARENT_ENTRIES = 16_384
+# /proc/self/mountinfo is 2.4 KB on this host (2026-09-27), about 100 bytes a mount; 4 MiB
+# covers tens of thousands of mounts on a container host and refuses a runaway read.
 MAX_MOUNT_TABLE_BYTES = 4 * 1024 * 1024
 # The installer's own lock file; doctor's runtime locks allow 4 KiB.
 MAX_LOCK_BYTES = 1024
@@ -409,13 +430,16 @@ class _Stage:
     def _remove_staging_directory(self) -> None:
         """Remove the staging name only while it still names this directory."""
         if os.name != "nt":
-            if self._owns_staging_name():
-                os.rmdir(self.name, dir_fd=self.parent.value)
+            self._remove_posix_staging_directory()
             return
         if self._owns_staging_name():
             _windows_workspace.delete_handle(self.root.value)
             return
         self.published = True
+
+    def _remove_posix_staging_directory(self) -> None:
+        if self._owns_staging_name():
+            os.rmdir(self.name, dir_fd=self.parent.value)
 
     def _owns_staging_name(self) -> bool:
         try:
@@ -902,19 +926,23 @@ def _open_child_directory(
     if _entry_kind(parent, name) != "directory":
         raise PermissionError("expected a regular directory")
     if os.name == "nt":
-        if writable:
-            return _Handle(
-                _windows_workspace._relative_handle(
-                    parent.value,
-                    name,
-                    directory=True,
-                    create=False,
-                    writable=True,
-                ),
-                True,
-            )
-        return _Handle(_windows_workspace.open_directory(parent.value, name), True)
+        return _open_windows_child_directory(parent, name, writable)
     return _Handle(os.open(name, _posix_directory_flags(), dir_fd=parent.value), True)
+
+
+def _open_windows_child_directory(parent: _Handle, name: str, writable: bool) -> _Handle:
+    if writable:
+        return _Handle(
+            _windows_workspace._relative_handle(
+                parent.value,
+                name,
+                directory=True,
+                create=False,
+                writable=True,
+            ),
+            True,
+        )
+    return _Handle(_windows_workspace.open_directory(parent.value, name), True)
 
 
 def _create_child_directory(parent: _Handle, name: str) -> _Handle:
@@ -2335,11 +2363,8 @@ def _existing_result(
     deadline: float,
 ) -> InstalledPyright | None:
     _check_deadline(deadline)
-    kind = _existing_entry_kind(parent)
-    if kind is None:
+    if not _existing_install_directory(parent):
         return None
-    if kind != "directory":
-        raise PyrightInstallError("pyright_existing_install_invalid")
     try:
         return _existing_install_or_invalid(parent, root, deadline)
     except PyrightInstallError as exc:
@@ -2347,6 +2372,16 @@ def _existing_result(
             raise
     _retire_pre_era_install(parent, root)
     return None
+
+
+def _existing_install_directory(parent: _Handle) -> bool:
+    """Whether an install directory is present; any other entry there is invalid."""
+    kind = _existing_entry_kind(parent)
+    if kind is None:
+        return False
+    if kind != "directory":
+        raise PyrightInstallError("pyright_existing_install_invalid")
+    return True
 
 
 def _predates_tree_digest(error: BaseException) -> bool:
@@ -2658,13 +2693,11 @@ def _response_reader(response: object) -> object:
 
 
 def _next_download_chunk(response: object, read1: object, deadline: float) -> bytes:
-    try:
-        _set_response_read_timeout(response, deadline)
-        chunk = read1(COPY_CHUNK_BYTES)
-    except TimeoutError:
-        raise
-    except OSError as exc:
-        raise PyrightInstallError("pyright_download_failed") from exc
+    # A reset mid-stream stays an OSError here, so the retry around the whole
+    # download can tell it from a refusal; `_download_artifact` names it after the
+    # last attempt (audit 2026-09-27 C-10).
+    _set_response_read_timeout(response, deadline)
+    chunk = read1(COPY_CHUNK_BYTES)
     if not isinstance(chunk, bytes):
         raise PyrightInstallError("pyright_download_response_invalid")
     return chunk
@@ -2712,14 +2745,29 @@ def _downloaded_bytes(
     return sha256.hexdigest(), sha512.digest()
 
 
+def _download_attempt(destination: _OwnedFile, deadline: float) -> tuple[str, bytes]:
+    """One whole download from the start of the file: a retry overwrites what a reset left.
+
+    The pinned artifact is the same bytes every time, so a complete attempt writes at
+    least as far as any partial one did, and the digests check what was kept.
+    """
+    _seek_start(destination.handle)
+    return _downloaded_bytes(_opened_download(deadline), destination, deadline)
+
+
 def _download_artifact(
     destination: _OwnedFile,
     deadline: float,
 ) -> tuple[str, bytes]:
+    """The pinned package, tried again after a transient network error.
+
+    The language-server installer had this since 2026-09-23 (run 35926589114); Pyright,
+    installed on every CI run, did not (audit 2026-09-27 C-10,
+    docs/research/2026-09-27-every-pinned-download-retries-the-network.md).
+    """
     _check_deadline(deadline)
-    response_context = _opened_download(deadline)
     try:
-        return _downloaded_bytes(response_context, destination, deadline)
+        return retry_transient(lambda: _download_attempt(destination, deadline), deadline=deadline)
     except TimeoutError:
         raise
     except PyrightInstallError:
@@ -3501,6 +3549,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# How many chained causes a failed download prints. The path chains at most
+# HTTPError -> URLError -> OSError, so 5 leaves room; the bound also ends a cyclic
+# `__context__` chain. A deeper chain ends with a line saying more causes exist.
+# Review if a failure report ever ends at the fifth cause.
 MAX_CAUSE_DEPTH = 5
 
 
@@ -3519,6 +3571,13 @@ def _print_cause_chain(error: BaseException) -> None:
             return
         print(f"  caused by: {type(cause).__name__}: {cause}", file=sys.stderr)
         cause = cause.__cause__ or cause.__context__
+    _say_more_causes(cause)
+
+
+def _say_more_causes(cause: BaseException | None) -> None:
+    """The chain went on past the printed depth: say so instead of stopping silently."""
+    if cause is not None:
+        print(f"  ... further causes not shown (more than {MAX_CAUSE_DEPTH})", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

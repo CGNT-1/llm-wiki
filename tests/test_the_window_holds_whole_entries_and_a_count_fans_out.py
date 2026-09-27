@@ -200,6 +200,9 @@ class _Stand:
             return '{"queries": ["film festival attended", "documentary screenings", "film festival attended"]}'
         if system_prompt == aggregation_pass.CLUSTER_SYSTEM_PROMPT:
             return '{"groups": [[0], [1]]}'
+        return self._answer(prompt)
+
+    def _answer(self, prompt: str) -> str:
         self.answer_prompts.append(prompt)
         if len(self.answer_prompts) == 1:
             return _count_answer(

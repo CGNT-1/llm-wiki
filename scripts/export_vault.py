@@ -64,8 +64,13 @@ from model_dlp import (  # noqa: E402
     load_policy,
     require_safe_content,
 )
+from repository_scope import LOCAL_GIT_TIMEOUT_SECONDS  # noqa: E402
 
+# The exported vault archive; the export refuses past it. The live vault's knowledge is 36.5 MB
+# (2026-09-27). A vault-size ceiling: a candidate for the settings registry.
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+# Files in one exported archive; the live knowledge tree holds 1 084 Markdown files (2026-09-27).
+# A vault-size ceiling: a candidate for the settings registry.
 MAX_ARCHIVE_MEMBERS = 10_000
 # One member of an exported vault archive; installer archives allow 32 MiB per member.
 MAX_MEMBER_BYTES = 16 * 1024 * 1024
@@ -196,6 +201,7 @@ def _run(*cmd: str, check: bool = True, capture: bool = False) -> subprocess.Com
         check=check,
         text=True,
         capture_output=capture,
+        timeout=LOCAL_GIT_TIMEOUT_SECONDS,
     )
 
 

@@ -181,7 +181,7 @@ def test_renderer_constants_are_exact() -> None:
         MAX_ESTIMATED_TOKENS,
         estimate_tokens("abcd"),
         estimate_tokens("abc"),
-    ) == (10, 100, 1_200, 1, 1)
+    ) == (10, 100, 2_400, 2, 2)
 
 
 def test_renderer_puts_keys_in_exact_order() -> None:

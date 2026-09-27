@@ -403,6 +403,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         "tools",
         "backup",
         "models",
+        "settings",
         "hooks",
         "checkpoints",
         "mcp",
@@ -476,7 +477,28 @@ def test_read_only_runtime_probe_leaves_no_files_or_directories(tmp_path):
     assert not list(state_root.rglob("*.doctor-probe*"))
 
 
-def test_read_only_run_never_attempts_a_write(tmp_path, monkeypatch):
+def _whole_tree(path: Path) -> dict[str, bytes | None]:
+    """Every entry under `path`, hidden ones and directories included."""
+    return {
+        item.relative_to(path).as_posix(): item.read_bytes() if item.is_file() else None
+        for item in path.rglob("*")
+    }
+
+
+def test_a_read_only_run_leaves_every_entry_as_it_was(tmp_path):
+    """The locking probe is the one file doctor touches, and it is gone again (audit 2026-09-27 C-1)."""
+    from doctor import run_doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    before = _whole_tree(tmp_path)
+
+    run_doctor(root=root, state_root=state_root, home=home)
+
+    assert _whole_tree(tmp_path) == before
+
+
+def test_read_only_run_writes_through_no_python_file_api(tmp_path, monkeypatch):
+    """Python-level writes are refused; the SQLite locking probe writes below this layer by design."""
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
@@ -1300,7 +1322,7 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
         assert second_beat.wait(timeout=LONG_TIMEOUT)
 
     with doctor._MaintenanceHeartbeat(
-        coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT
+        coordinator, lease, deadline=time.monotonic() + LONG_TIMEOUT
     ) as guard:
         guard.run(wait_for_two_heartbeats)
 
@@ -1320,7 +1342,7 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
     assert acquired is not None
     coordinator, lease = acquired
     guard = doctor._MaintenanceHeartbeat(
-        coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT
+        coordinator, lease, deadline=time.monotonic() + LONG_TIMEOUT
     )
 
     monkeypatch.setattr(
@@ -1793,7 +1815,9 @@ def test_doctor_reports_missing_pyright(tmp_path, monkeypatch) -> None:
         lambda *a, **k: _missing_pyright_identity(),
     )
     check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT)
-    assert check["status"] == "degraded"
+    # Never installed is an optional feature not taken, not a fault (2026-09-27,
+    # docs/research/2026-09-27-what-is-not-yet-due-is-not-a-warning.md).
+    assert check["status"] == "skipped"
     assert check["details"]["status"] == "missing"
     assert check["details"]["codes"] == ["pyright_missing"]
     assert "install_pyright" in check["details"]["recommended_action"]
@@ -3180,6 +3204,10 @@ def test_doctor_windows_lsp_capability_failures_close_retained_handles(
     def fail() -> None:
         raise error_type("Windows workspace capability unavailable")
 
+    def fail_at(stage: str) -> None:
+        if failure_stage == stage:
+            fail()
+
     def open_root(path: Path) -> int:
         assert path == tmp_path / "run" / "lsp"
         if failure_stage == "open_root":
@@ -3188,8 +3216,7 @@ def test_doctor_windows_lsp_capability_failures_close_retained_handles(
 
     def list_directory(handle: int, *, max_entries: int):
         if handle == 10:
-            if failure_stage == "list_root":
-                fail()
+            fail_at("list_root")
             return [owner_entry]
         assert (handle, max_entries) == (20, len(doctor._LSP_OWNER_ENTRY_NAMES))
         if failure_stage == "cancellation_identity":
@@ -3205,12 +3232,10 @@ def test_doctor_windows_lsp_capability_failures_close_retained_handles(
 
     def identity(handle: int, *, directory: bool | None = None):
         if handle == 20:
-            if failure_stage == "owner_identity":
-                fail()
+            fail_at("owner_identity")
             return 1, owner_id, True
         if handle == 30:
-            if failure_stage == "cancellation_identity":
-                fail()
+            fail_at("cancellation_identity")
             return 1, cancellation_id, True
         assert (handle, directory) == (40, False)
         return 1, record_id, False

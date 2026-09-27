@@ -15,6 +15,7 @@ from pathlib import Path
 import install_control
 import maintenance_helpers
 import pytest
+import settings
 
 ROOT, STATE, UV = Path("/vault"), Path("/state"), Path("/usr/bin/uv")
 
@@ -58,7 +59,7 @@ def _oversized_family(reports: Path) -> tuple[Path, Path]:
     """One scheduler log past the family budget, beside a tiny sibling."""
     big = reports / "cron-nightly.log"
     small = reports / "cron-weekly.log"
-    big.write_bytes(b"x" * (maintenance_helpers.REPORT_RETENTION_BYTES + 1))
+    big.write_bytes(b"x" * (settings.setting_value("retention.report_bytes") + 1))
     small.write_bytes(b"y" * 16)
     return big, small
 

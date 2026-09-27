@@ -17,10 +17,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bounded_io import IO_CHUNK_BYTES  # the one read chunk, shared with every bounded reader
 from integration_hook_config import MAX_CONFIG_BYTES  # one bound for the hook configuration
 from lsp_process_tree import ProcessTree
 
+# Output of `opencode debug config`, read when the installer checks the entry OpenCode sees; a
+# larger output is not parsed and the entry reads `configured_unverified`. Basis unknown: value
+# predates measurement; review when a real output nears it.
 MAX_DEBUG_BYTES = 4 * 1024 * 1024
+# The same probe's deadline; a probe that times out reports `configured_unverified` rather than
+# blocking the install. Basis unknown: value predates measurement; review when a real probe times
+# out.
 DEBUG_TIMEOUT_SECONDS = 15.0
 PROFILE_START = "# >>> LLM-Wiki installer >>>"
 PROFILE_END = "# <<< LLM-Wiki installer <<<"
@@ -482,10 +489,11 @@ def _profile_with_block(existing: str, block: str) -> str:
     return existing[:start] + block + existing[end:]
 
 
+# Time to stop a debug child after its answer. basis unknown — value predates measurement; review when a cleanup times out on a slow runner.
 CLEANUP_SECONDS = 2.0
 
-READ_CHUNK_BYTES = 64 * 1024
 
+# Poll interval while reading a child's output; small against CLEANUP_SECONDS, no correctness depends on it.
 POLL_SECONDS = 0.005
 
 
@@ -510,8 +518,12 @@ class _BoundedReader:
         stream = getattr(self._process, name)
         if stream is None:
             return
+        self._drain(name, stream)
+
+    def _drain(self, name: str, stream) -> None:
+        """Read until end of stream or until the ceiling is reached."""
         while True:
-            data = stream.read(READ_CHUNK_BYTES)
+            data = stream.read(IO_CHUNK_BYTES)
             if not data:
                 return
             if self._store(name, data):
@@ -810,6 +822,41 @@ def _opencode_status(
     )
 
 
+def claude_mcp_state(config: Path, vault_root: str) -> str:
+    """Which state the llm-wiki entry of Claude Code's `~/.claude.json` is in.
+
+    One of missing, unreadable, absent, current, elsewhere. The file is Claude
+    Code's live state and is only read. Keys that differ only by case (two
+    project paths) are distinct JSON keys; PowerShell's ConvertFrom-Json refused
+    them, so both installers ask here. See
+    docs/research/2026-09-27-both-installers-read-the-claude-file-alike.md.
+    """
+    if not config.is_file():
+        return "missing"
+    try:
+        document = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return "unreadable"
+    return _claude_entry_state(document, vault_root)
+
+
+def _claude_entry_state(document: object, vault_root: str) -> str:
+    servers = document.get("mcpServers") if isinstance(document, dict) else None
+    entry = servers.get("llm-wiki") if isinstance(servers, dict) else None
+    if entry is None:
+        return "absent"
+    return "current" if _names_vault(entry, vault_root) else "elsewhere"
+
+
+def _names_vault(entry: object, vault_root: str) -> bool:
+    """Whether the entry's arguments name this vault, compared as the platform compares paths."""
+    arguments = entry.get("args") if isinstance(entry, dict) else None
+    if not isinstance(arguments, list):
+        return False
+    target = os.path.normcase(vault_root)
+    return any(isinstance(argument, str) and os.path.normcase(argument) == target for argument in arguments)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -830,6 +877,9 @@ def _parser() -> argparse.ArgumentParser:
     sync = subparsers.add_parser("sync-args")
     sync.add_argument("--root", type=Path, required=True)
     sync.add_argument("--environment")
+    claude = subparsers.add_parser("claude-mcp-state")
+    claude.add_argument("--config", type=Path, required=True)
+    claude.add_argument("--vault-root", required=True)
     return parser
 
 
@@ -886,7 +936,13 @@ def _configure_opencode_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _claude_mcp_state_command(args: argparse.Namespace) -> int:
+    print(claude_mcp_state(args.config, args.vault_root))
+    return 0
+
+
 _COMMANDS = {
+    "claude-mcp-state": _claude_mcp_state_command,
     "profile": _profile_command,
     "cron": _cron_command,
     "sync-args": _sync_args_command,

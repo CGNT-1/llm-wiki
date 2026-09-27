@@ -50,10 +50,12 @@ schema_version: project-checkpoint/v1
 """
 
 _SCHEMA = Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
+# The project lease's heartbeat, a third of DEFAULTS.project_lease_seconds (30) so two missed beats still hold it.
 _HEARTBEAT_SECONDS = 10
 MAX_JOURNAL_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_PROJECTION_BYTES = 1024 * 1024
 MAX_JOURNAL_EVENTS = 1000
+# Session start may wait this long for anything (docs/research/2026-09-18-a-slug-the-journal-refuses-is-not-a-slug.md).
 SESSION_START_RECOVERY_SECONDS = 0.25
 MAX_PROJECT_HANDOFF_CHARS = 2400
 _MAX_VALUE_CHARS = 240

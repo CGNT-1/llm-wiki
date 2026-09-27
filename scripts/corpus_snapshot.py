@@ -25,6 +25,7 @@ from bounded_io import (
 )
 from code_languages import language_for_path
 from page_status import is_retired
+from settings import raise_hint, setting_value
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
@@ -36,13 +37,24 @@ COLLECTOR_VERSION = "corpus-collector/v1"
 # `docs/research/2026-09-17-a-chunker-that-changes-changes-its-version.md`.
 EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
 
-MAX_CORPUS_FILES = 10_000
 MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-MAX_CORPUS_TOTAL_BYTES = 64 * 1024 * 1024
+# Directory entries one corpus collection may inspect before it refuses, a bound on a
+# walk over a tree the user controls. Basis unknown: value predates measurement; the
+# live vault holds about 1 185 entries (2026-09-27). Review when a vault nears it.
 MAX_CORPUS_INSPECTED_ENTRIES = 50_000
+# Directories one corpus collection walks; the live knowledge tree has 76 (2026-09-27). A vault-
+# size bound like `corpus.max_files`; review when it becomes a setting.
 MAX_CORPUS_DIRECTORIES = 5_000
+# Nesting depth of the corpus walk; the live knowledge tree is 5 deep (2026-09-27), so 16 only
+# refuses a runaway tree.
 MAX_CORPUS_DEPTH = 16
+# Headings held in memory for one generation build; exceeding it refuses the build. A vault-size
+# bound like `corpus.max_files`. Basis unknown: value predates measurement; review when doctor
+# warns on corpus size.
 MAX_CORPUS_HEADINGS = 100_000
+# Chunks held in memory for one generation build; the FTS writer holds the same count
+# (`search_memory.MAX_GENERATION_FTS_CHUNKS`). A vault-size bound. Basis unknown: value predates
+# measurement; review when doctor warns on corpus size.
 MAX_CORPUS_CHUNKS = 100_000
 # Default wall-clock budget for one corpus collection (`collect_corpus`).
 DEFAULT_DEADLINE_SECONDS = 30.0
@@ -871,6 +883,12 @@ def _same_descriptor_identity(left: os.stat_result, right: os.stat_result) -> bo
     )
 
 
+def _require_unchanged_child(listed: os.stat_result, child: int) -> None:
+    """The directory opened is the one the listing named."""
+    if not _same_descriptor_identity(listed, os.fstat(child)):
+        raise CorpusChanged("corpus child directory changed before open")
+
+
 def _descriptor_flags(*, directory: bool) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     if directory:
@@ -987,7 +1005,7 @@ class _Discovery:
         self._count_bytes(content)
         self.candidates[relative] = _Candidate(path, relative, kind, project, seal, content)
         if len(self.candidates) > self.max_files:
-            raise ValueError("corpus file limit exceeded")
+            raise ValueError(f"corpus file limit exceeded; {raise_hint('corpus.max_files')}")
 
     def _require_unseen(self, relative: str) -> None:
         if relative in self.candidates:
@@ -998,7 +1016,7 @@ class _Discovery:
             return
         self.total_bytes += len(content)
         if self.total_bytes > self.max_total_bytes:
-            raise ValueError("corpus total byte limit exceeded")
+            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
 
     def walk(self, root: Path, kind: str) -> None:
         if not root.exists():
@@ -1256,8 +1274,7 @@ class _Discovery:
             raise ValueError("corpus depth limit exceeded")
         child = _opened_listed_entry(name, descriptor, directory=True)
         try:
-            if not _same_descriptor_identity(info, os.fstat(child)):
-                raise CorpusChanged("corpus child directory changed before open")
+            _require_unchanged_child(info, child)
             self._walk_posix_directory(root, path, depth + 1, child, kind)
         finally:
             os.close(child)
@@ -2551,7 +2568,7 @@ class _Capture:
     def _count_bytes(self, size: int) -> None:
         self.total += size
         if self.total > self.policy.max_total_bytes:
-            raise ValueError("corpus total byte limit exceeded")
+            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
 
     def _store(
         self,
@@ -2668,6 +2685,11 @@ def _captured_after_retries(
     raise CorpusChanged(f"corpus never held still for one pass: {last}")
 
 
+def _or_setting(given: int | None, name: str, vault: Path) -> int:
+    """A ceiling the caller passed, else the vault's `settings` value for it."""
+    return setting_value(name, vault) if given is None else given
+
+
 def collect_corpus(
     vault: Path,
     *,
@@ -2676,9 +2698,9 @@ def collect_corpus(
     approved_code_roots: Iterable[str] = APPROVED_CODE_ROOTS,
     include_historical: bool = False,
     as_of: str | date | datetime | None = None,
-    max_files: int = MAX_CORPUS_FILES,
+    max_files: int | None = None,
     max_file_bytes: int = MAX_CORPUS_FILE_BYTES,
-    max_total_bytes: int = MAX_CORPUS_TOTAL_BYTES,
+    max_total_bytes: int | None = None,
     max_entries: int = MAX_CORPUS_INSPECTED_ENTRIES,
     max_directories: int = MAX_CORPUS_DIRECTORIES,
     max_depth: int = MAX_CORPUS_DEPTH,
@@ -2703,9 +2725,9 @@ def collect_corpus(
         approved_code_roots=approved_code_roots,
         include_historical=include_historical,
         as_of=as_of,
-        max_files=max_files,
+        max_files=_or_setting(max_files, "corpus.max_files", root),
         max_file_bytes=max_file_bytes,
-        max_total_bytes=max_total_bytes,
+        max_total_bytes=_or_setting(max_total_bytes, "corpus.max_total_bytes", root),
         max_entries=max_entries,
         max_directories=max_directories,
         max_depth=max_depth,

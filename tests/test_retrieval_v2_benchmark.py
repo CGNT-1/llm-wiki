@@ -4020,6 +4020,19 @@ def test_stale_out_of_band_payloads_with_mutated_enumeration_fail_closed(
     assert not output.exists()
 
 
+def _candidate_worker_payload(runner, selection, specs, attack, requested_index, lexical):
+    """The worker's candidate payload, bound to the spec the attack returns."""
+    returned_spec = _returned_spec(specs, attack, requested_index)
+    report = json.loads(
+        _candidate_report(runner, selection, returned_spec, offset=requested_index)
+    )
+    report["quality_claim"] = False
+    report["methodology"]["lexical_configuration"] = runner.LEXICAL_CONFIGURATIONS[
+        lexical
+    ]
+    return runner._WorkerPayload(report, runner._canonical_report_bytes(report))
+
+
 @pytest.mark.parametrize("attack", ["wrong-candidate", "replay"])
 def test_replaced_worker_wrong_binding_or_replay_cannot_publish(
     tmp_path, monkeypatch, attack
@@ -4032,29 +4045,21 @@ def test_replaced_worker_wrong_binding_or_replay_cannot_publish(
         variant_id="float32-384d",
     )
     specs = runner.required_candidate_specs(selection.matrix)
-    first_payload = None
+    # Payloads by requested spec index; a replay hands back the one for index 0.
+    payloads: dict[int, object] = {}
 
     def replaced_worker(argv, **_kwargs):
-        nonlocal first_payload
         lexical = argv[argv.index("--lexical-config") + 1]
         if "--model-id" not in argv:
             report = _lexical_worker_report(runner, tmp_path, lexical)
             return runner._WorkerPayload(report, runner._canonical_report_bytes(report))
         requested_index = _requested_spec_index(specs, argv)
         if attack == "replay" and requested_index == 1:
-            return first_payload
-        returned_spec = _returned_spec(specs, attack, requested_index)
-        report = json.loads(
-            _candidate_report(runner, selection, returned_spec, offset=requested_index)
+            return payloads.get(0)
+        payloads[requested_index] = _candidate_worker_payload(
+            runner, selection, specs, attack, requested_index, lexical
         )
-        report["quality_claim"] = False
-        report["methodology"]["lexical_configuration"] = runner.LEXICAL_CONFIGURATIONS[
-            lexical
-        ]
-        payload = runner._WorkerPayload(report, runner._canonical_report_bytes(report))
-        if requested_index == 0:
-            first_payload = payload
-        return payload
+        return payloads[requested_index]
 
     monkeypatch.setattr(runner, "_run_bounded_model_worker", replaced_worker)
     monkeypatch.setattr(runner, "_verify_locked_environment", lambda *_args, **_kwargs: {})

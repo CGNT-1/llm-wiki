@@ -22,6 +22,8 @@ import tempfile
 from pathlib import Path
 
 CACHE_RELATIVE_PATH = "cache/evidence-graph/verified-artifacts.json"
+# The verified-artifact cache file; live it is 79.5 KB (2026-09-27). A larger file is treated as
+# empty, which only costs re-verification.
 MAX_CACHE_BYTES = 1024 * 1024
 # Verified-artifact records kept, newest first; the reader cache's `MAX_ENTRIES` bounds open handles.
 MAX_ENTRIES = 512

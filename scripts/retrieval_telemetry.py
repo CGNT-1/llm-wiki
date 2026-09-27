@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from iso_time import utc_text
 from memory_state import STATE_ROOT
 from reliable_memory import (
     begin_immediate,
@@ -17,6 +18,7 @@ from reliable_memory import (
     open_readonly_operational_db,
     validate_runtime_file,
 )
+from settings import setting_value
 
 SCHEMA_VERSION = 1
 EVENT_KINDS = frozenset({
@@ -28,11 +30,14 @@ EVENT_KINDS = frozenset({
     "task_outcome",
 })
 TELEMETRY_DB = STATE_ROOT / "cache" / "evidence-graph" / "telemetry.sqlite3"
-DEFAULT_RETENTION_DAYS = 90
+# Retention is the operator's setting `retention.telemetry_days` (default 90, the
+# archive's hot window); the row and delete bounds below hold per pass.
 DEFAULT_MAX_ROWS = 100_000
 DEFAULT_MAX_DELETE = 1_000
 MAX_READ_EVENTS = 1_000
 MAX_CANDIDATE_IDS = 1_000
+# Event rows one candidate page scans; the cursor resumes after the last candidate returned, so
+# the bound sizes one read and loses nothing.
 MAX_CANDIDATE_SCAN_EVENTS = 100_000
 # The telemetry database on disk; the evidence graph's own bound is 16 GiB.
 MAX_DATABASE_BYTES = 512 * 1024 * 1024
@@ -104,9 +109,7 @@ def _utc_timestamp(value: datetime | str | None) -> str:
     parsed = _parsed_timestamp(value)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must include a UTC offset")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
+    return utc_text(parsed)
 
 
 def hash_query(query: str) -> str:
@@ -638,13 +641,17 @@ def read_events_after(
 
 def compact(
     *,
-    retention_days: int = DEFAULT_RETENTION_DAYS,
+    retention_days: int | None = None,
     max_rows: int = DEFAULT_MAX_ROWS,
     max_delete: int = DEFAULT_MAX_DELETE,
     now: datetime | None = None,
     db_path: Path | None = None,
 ) -> int:
-    """Delete an oldest-first bounded slice of expired or excess telemetry."""
+    """Delete an oldest-first bounded slice of expired or excess telemetry.
+
+    `retention_days` left unset is the operator's `retention.telemetry_days`.
+    """
+    retention_days = setting_value("retention.telemetry_days") if retention_days is None else retention_days
     _require_compact_limits(retention_days, max_rows, max_delete)
     path = Path(db_path or TELEMETRY_DB)
     if not path.exists():

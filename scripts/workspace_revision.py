@@ -26,6 +26,7 @@ try:
 except ImportError:  # pragma: no cover - Windows has no fcntl module
     _fcntl = None
 
+from bounded_io import IO_CHUNK_BYTES
 from corpus_snapshot import always_pruned_directory_name
 from lsp_profiles import navigable_suffixes, profile_configuration_names
 from reliable_memory import canonical_json_bytes
@@ -52,24 +53,57 @@ PYTHON_CONFIG_NAMES = frozenset(
         "uv.lock",
     }
 )
+# The size of a checkout one freshness proof walks and hashes; a larger one is refused
+# with a ValueError and navigation answers from structural evidence instead. Basis
+# unknown: both values predate measurement (introduced with the proof, 2026-07-22).
+# Review when a repository the operator navigates approaches either, or when they
+# move into scripts/settings.py.
 MAX_REVISION_FILES = 100_000
 MAX_REVISION_BYTES = 2 * 1024 * 1024 * 1024
+# Bounded read of `git status --porcelain=v2 -z` (untrusted output). A changed-file
+# record is about 115 bytes plus its path, so 16 MiB holds MAX_REVISION_FILES records
+# with paths averaging about 50 bytes; a larger status is refused, not truncated.
 MAX_GIT_STATUS_BYTES = 16 * 1024 * 1024
+# `git status` when the caller gave no deadline (docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
 GIT_STATUS_TIMEOUT_SECONDS = 5.0
 _GIT_COMMIT_RE = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+# Time to reap a git child after it was stopped; the stop itself is already bounded.
+# A killed process is reaped in milliseconds; basis unknown beyond that.
 _PROCESS_CLEANUP_SECONDS = 0.2
+# The private-index fast path is armed only below these bounds; above them the proof
+# takes the slower full verification, so exceeding one costs time, never an answer.
+# Measured 2026-09-27: this repository's index is 232 KB for 1 981 files, about 117
+# bytes an entry, so 64 MiB covers well over MAX_REVISION_FILES entries. The two
+# unmatched-file bounds (entries the pass did not hash) predate measurement; review
+# if verification is seen falling back on ordinary checkouts.
 _MAX_PRIVATE_INDEX_BYTES = 64 * 1024 * 1024
 _MAX_PRIVATE_UNMATCHED_TRACKED_FILES = 4096
 _MAX_PRIVATE_UNMATCHED_TRACKED_BYTES = 32 * 1024 * 1024
+# Bounded reads of the user's git config, attributes and ignore files, which the proof
+# copies into its private repository (untrusted input). Measured 2026-09-27 on this
+# machine: a user .gitconfig of 181 bytes and a repository config of 916 bytes, so
+# 256 KiB is over 250 times a real file; a larger one is refused, not truncated.
+# Review if a legitimate configuration is ever refused.
 _MAX_PRIVATE_CONFIG_BYTES = 256 * 1024
 _MAX_PRIVATE_ATTRIBUTES_BYTES = 256 * 1024
 _MAX_PRIVATE_IGNORE_BYTES = 256 * 1024
+# `.git/HEAD` holds a 40/64-hex object id or `ref: <path>`; a ref is a file path, so
+# Linux's PATH_MAX (4096 bytes, limits.h) bounds any HEAD git itself could follow.
 _MAX_HEAD_FENCE_BYTES = 4096
+# An index entry path longer than 0xFFF bytes is stored with the 12-bit length field
+# saturated and read to its NUL (gitformat-index(5)); 4096 is that field's range plus
+# the NUL, and PATH_MAX again. A longer name makes the entry unreadable, not cut.
 _MAX_PRIVATE_INDEX_PATH_BYTES = 4096
-_HASH_CHECK_CHUNK_BYTES = 64 * 1024
+# Hashing uses the shared read step (bounded_io.IO_CHUNK_BYTES).
+_HASH_CHECK_CHUNK_BYTES = IO_CHUNK_BYTES
+# One write between stop checks: 1 MiB goes to a local disk in milliseconds, so a
+# cancel is heard within one chunk; the size affects only that latency.
 _PRIVATE_WRITE_CHUNK_BYTES = 1024 * 1024
+# The inventory hint is a cache: a hint over either bound is simply not kept, and
+# the next proof rescans. The bounds cap the cache's memory (4096 paths, 1 MiB of
+# names); basis unknown beyond that — review if proofs rescan large checkouts often.
 _MAX_INVENTORY_HINT_ENTRIES = 4096
 _MAX_INVENTORY_HINT_PATH_BYTES = 1024 * 1024
 _UNSUPPORTED_INDEX_EXTENSIONS = frozenset({b"link", b"sdir", b"UNTR", b"FSMN"})
@@ -975,6 +1009,12 @@ def _git_state_head_identity(output: bytes) -> bytes:
     return identities[0]
 
 
+def _missing_head_state(output: bytes, allow_missing_head: bool) -> tuple[None, bytes]:
+    if allow_missing_head:
+        return None, output
+    raise ValueError("Git state returned a missing HEAD identity")
+
+
 def _parse_git_state_output(
     output: bytes,
     *,
@@ -982,9 +1022,7 @@ def _parse_git_state_output(
 ) -> tuple[str | None, bytes]:
     identity = _git_state_head_identity(output)
     if identity == b"(initial)":
-        if allow_missing_head:
-            return None, output
-        raise ValueError("Git state returned a missing HEAD identity")
+        return _missing_head_state(output, allow_missing_head)
     if _GIT_COMMIT_RE.fullmatch(identity) is None:
         raise ValueError("Git state returned an invalid HEAD identity")
     return identity.decode("ascii"), output
@@ -2166,30 +2204,35 @@ def _named_global_git_config_paths(
     return tuple(path for path in candidates if path is not None)
 
 
-def _global_git_attributes_path() -> Path | None:
+def _xdg_config_root() -> Path | None:
+    """Git's `$XDG_CONFIG_HOME`, falling back to `$HOME/.config`; None when neither is set."""
     xdg_value = os.environ.get("XDG_CONFIG_HOME")
     home_value = os.environ.get("HOME")
     if xdg_value:
-        root = Path(xdg_value)
-    elif home_value:
-        root = Path(home_value) / ".config"
-    else:
+        return Path(xdg_value)
+    if home_value:
+        return Path(home_value) / ".config"
+    return None
+
+
+def _git_config_root() -> Path | None:
+    """The directory Git reads its global `git/attributes` and `git/ignore` from, if absolute."""
+    root = _xdg_config_root()
+    if root is None or not root.is_absolute():
         return None
-    if not root.is_absolute():
+    return root
+
+
+def _global_git_attributes_path() -> Path | None:
+    root = _git_config_root()
+    if root is None:
         return None
     return root / "git/attributes"
 
 
 def _global_git_ignore_path() -> Path | None:
-    xdg_value = os.environ.get("XDG_CONFIG_HOME")
-    home_value = os.environ.get("HOME")
-    if xdg_value:
-        root = Path(xdg_value)
-    elif home_value:
-        root = Path(home_value) / ".config"
-    else:
-        return None
-    if not root.is_absolute():
+    root = _git_config_root()
+    if root is None:
         return None
     return root / "git/ignore"
 
@@ -3009,6 +3052,21 @@ def _accepted_index_extension_end(
     return extension_end
 
 
+def _scan_index_entries(
+    content: bytes | bytearray,
+    header: _GitIndexHeader,
+    scan: _IndexEntryScan,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Parse every entry the header counts; False at the first one this reader refuses."""
+    for _index in range(header.count):
+        _check_stop(deadline, cancelled)
+        if not _parse_index_entry(content, header, scan):
+            return False
+    return True
+
+
 def _parse_git_index(
     content: bytes | bytearray,
     *,
@@ -3023,18 +3081,29 @@ def _parse_git_index(
     )
     if header is None:
         return None
-    scan = _IndexEntryScan(offset=12)
-    for _index in range(header.count):
-        _check_stop(deadline, cancelled)
-        if not _parse_index_entry(content, header, scan):
-            return None
-    if not _skip_index_extensions(
-        content, header, scan.offset, deadline=deadline, cancelled=cancelled
-    ):
+    scan = _scanned_index(content, header, deadline, cancelled)
+    if scan is None:
         return None
     return _ParsedGitIndex(
         content, scan.offset, header.checksum_offset, tuple(scan.entries)
     )
+
+
+def _scanned_index(
+    content: bytes | bytearray,
+    header: _GitIndexHeader,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _IndexEntryScan | None:
+    """Every entry and the extensions after them, or None when the reader refuses one."""
+    scan = _IndexEntryScan(offset=12)
+    if not _scan_index_entries(content, header, scan, deadline, cancelled):
+        return None
+    if not _skip_index_extensions(
+        content, header, scan.offset, deadline=deadline, cancelled=cancelled
+    ):
+        return None
+    return scan
 
 def _index_stat_words(info: os.stat_result) -> tuple[int, ...]:
     return (
@@ -4168,11 +4237,15 @@ def _valid_entry_digest(sha256: object) -> bool:
     return re.fullmatch(r"[0-9a-f]{64}", sha256) is not None
 
 
+def _require_empty_deleted_entry(entry: RevisionEntry) -> None:
+    if entry.sha256 is not None or entry.size != 0:
+        raise ValueError("expected deleted revision entry is invalid")
+
+
 def _require_valid_entry_digest(entry: RevisionEntry) -> None:
     """A deleted entry carries nothing; every other one carries a real digest."""
     if entry.kind == "deleted":
-        if entry.sha256 is not None or entry.size != 0:
-            raise ValueError("expected deleted revision entry is invalid")
+        _require_empty_deleted_entry(entry)
         return
     if not _valid_entry_digest(entry.sha256):
         raise ValueError("expected revision entry digest is invalid")
@@ -4816,6 +4889,31 @@ def _expected_relevant_paths(entries: Mapping[str, RevisionEntry]) -> set[str]:
     }
 
 
+def _snapshots_unchanged(
+    plan: _PrivateIndexPlan,
+    gathered: _HashedEntries,
+    private_state: _PrivateGitState | None,
+    *,
+    root: Path,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Without a private index the pass snapshots must hold (or raise); with one, its tree."""
+    if private_state is None:
+        _validate_pass_snapshots(
+            root,
+            directory_snapshots,
+            gathered.file_snapshots,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        return True
+    return _tree_entries_unchanged(
+        plan, gathered.file_snapshots, deadline=deadline, cancelled=cancelled
+    )
+
+
 def _verified_after_git(
     entries: Mapping[str, RevisionEntry],
     plan: _PrivateIndexPlan,
@@ -4828,16 +4926,14 @@ def _verified_after_git(
     cancelled: Callable[[], bool] | None,
 ) -> bool:
     """Re-check the snapshots, the recorded deletions, and the private proof."""
-    if private_state is None:
-        _validate_pass_snapshots(
-            root,
-            directory_snapshots,
-            gathered.file_snapshots,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-    elif not _tree_entries_unchanged(
-        plan, gathered.file_snapshots, deadline=deadline, cancelled=cancelled
+    if not _snapshots_unchanged(
+        plan,
+        gathered,
+        private_state,
+        root=root,
+        directory_snapshots=directory_snapshots,
+        deadline=deadline,
+        cancelled=cancelled,
     ):
         return False
     if not _deleted_entries_absent(root, entries):
@@ -4845,6 +4941,45 @@ def _verified_after_git(
     _require_private_proof(private_state, root, deadline=deadline, cancelled=cancelled)
     _check_stop(deadline, cancelled)
     return True
+
+
+def _agreed_private_state(
+    repository: RepositoryScope,
+    expected: WorkspaceRevision,
+    entries: Mapping[str, RevisionEntry],
+    plan: _PrivateIndexPlan,
+    gathered: _HashedEntries,
+    worktree_ignore_paths: tuple[Path, ...],
+    *,
+    root: Path,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[bool, _PrivateGitState | None]:
+    """Whether Git agrees with the expected revision, and the private state it was read from.
+
+    Outside a repository there is no private state, and only a revision that names no
+    HEAD can agree.
+    """
+    if repository.git_common_dir is None:
+        return expected.git_head is None, None
+    private_state = _private_git_state(
+        root,
+        expected,
+        plan,
+        gathered.verification_hashes,
+        directory_snapshots,
+        worktree_ignore_paths,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    current_head, git_state = _revision_git_state(
+        root, expected, private_state, deadline=deadline, cancelled=cancelled
+    )
+    matches = _revision_state_matches(
+        current_head, git_state, expected, entries, private_state, root
+    )
+    return matches, private_state
 
 
 def _verified_against_git(
@@ -4861,26 +4996,19 @@ def _verified_against_git(
     cancelled: Callable[[], bool] | None,
 ) -> bool:
     """The second half of a pass: git agreement, then everything after it."""
-    private_state = None
-    if repository.git_common_dir is not None:
-        private_state = _private_git_state(
-            root,
-            expected,
-            plan,
-            gathered.verification_hashes,
-            directory_snapshots,
-            worktree_ignore_paths,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        current_head, git_state = _revision_git_state(
-            root, expected, private_state, deadline=deadline, cancelled=cancelled
-        )
-        if not _revision_state_matches(
-            current_head, git_state, expected, entries, private_state, root
-        ):
-            return False
-    elif expected.git_head is not None:
+    agreed, private_state = _agreed_private_state(
+        repository,
+        expected,
+        entries,
+        plan,
+        gathered,
+        worktree_ignore_paths,
+        root=root,
+        directory_snapshots=directory_snapshots,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if not agreed:
         return False
     return _verified_after_git(
         entries,

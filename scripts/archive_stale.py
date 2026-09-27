@@ -65,6 +65,9 @@ _STATUS_LINE_RE = re.compile(r"^status:\s*.+$", re.MULTILINE)
 _INSERTED_FIELD = "status: archived"
 _INSERTED_BLOCK = f"---\n{_INSERTED_FIELD}\n---"
 
+# The largest page archiving or restore will read whole. Basis unknown: value predates
+# measurement and is twice bounded_io.MAX_KNOWLEDGE_PAGE_BYTES (8 MiB), which a page
+# written by the product cannot exceed; review when the two bounds are reconciled.
 MAX_ARCHIVE_PAGE_BYTES = 16 * 1024 * 1024
 
 # One read-only git question may not hold the weekly pass up: the whole set of

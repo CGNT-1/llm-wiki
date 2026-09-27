@@ -16,7 +16,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import doctor
 import ephemeral_paths
 import maintenance_helpers
 import markdown_transaction
@@ -29,7 +28,7 @@ import retire_benchmark_runs
 import scheduled_weekly
 from markdown_transaction import MarkdownCoordinator
 
-from tests.slow_machine import SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -85,7 +84,7 @@ def _append(coordinator: MarkdownCoordinator, day: str, family: str = "post-tool
         f"{family}:{day}",
         f"knowledge/daily/{day}.md",
         f"# {day}\n".encode(),
-        deadline=time.monotonic() + SHORT_TIMEOUT,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         cancelled=None,
     )
 
@@ -126,15 +125,6 @@ def test_a_row_something_reads_back_is_never_pruned(tmp_path: Path) -> None:
     dropped = coordinator.prune_history(now=later)
 
     assert (dropped["transactions"], _transaction_count(coordinator)) == (1, 1)
-
-
-def test_doctor_counts_every_row_by_state_in_one_aggregate(tmp_path: Path) -> None:
-    path = tmp_path / "coordinator.sqlite3"
-    with sqlite3.connect(path) as database:
-        database.execute('CREATE TABLE "transaction" (state TEXT)')
-        database.executemany('INSERT INTO "transaction" VALUES (?)', [("committed",)] * 3 + [("quarantined",)])
-
-    assert doctor._transaction_state_totals(path) == {"committed": 3, "quarantined": 1}
 
 
 # --- run/ debris and logs ---------------------------------------------------

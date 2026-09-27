@@ -274,6 +274,13 @@ def record_weekly_result(failures: int, error: str | None = None) -> None:
     update_state(_mutate)
 
 
+def record_weekly_start() -> None:
+    """A weekly that starts says so: one killed before its record is then visible
+    (audit 2026-09-27 B-15, docs/research/2026-09-27-a-weekly-that-never-finishes-is-seen.md)."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    update_state(lambda state: state.__setitem__("last_weekly_started_at", now))
+
+
 def record_weekly_skip(reason: str) -> None:
     """A weekly that did not run says so, so a stale weekly names why."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -353,6 +360,7 @@ def main() -> int:
     if fence is None:
         return _skipped("fence held")
     try:
+        record_weekly_start()
         return run_weekly(ownership=fence.lease, registry=fence.registry)
     finally:
         fence.release()

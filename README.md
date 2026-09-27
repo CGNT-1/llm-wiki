@@ -28,7 +28,7 @@ You work with an agent as usual
       ↓  thin hooks send each session event to integration_adapter.py
 Session record  →  knowledge/raw/sessions/<date>/  (redacted, kept for every session)
 Daily log       →  knowledge/daily/<date>.md
-      ↓  compile (at session start when idle, and every night)
+      ↓  compile (closed days at session start when idle; every day each night)
 Knowledge pages →  knowledge/notes/<slug>.md   (every quote checked against its source)
       ↓
 Next session, in any agent: learned rules, open threads, last decision,
@@ -100,7 +100,8 @@ uv run python scripts/doctor.py
 uv run python scripts/search_memory.py "auth"
 ```
 
-`doctor` is read-only and says what is healthy, degraded or broken, and what to run.
+`doctor` changes nothing (its locking probe creates and removes one temporary file) and says
+what is healthy, degraded or broken, and what to run.
 
 ### Dependency profiles
 

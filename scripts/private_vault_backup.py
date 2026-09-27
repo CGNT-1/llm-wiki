@@ -53,6 +53,14 @@ _ACTIVE_DATABASES = (
     "markdown-transactions-v3.sqlite3",
     "queue-v3.sqlite3",
 )
+# Runtime paths the session hooks write outside the backup's owner fence: a hook
+# never waits for a backup. They are copied as a snapshot at read time — each
+# file through one open descriptor, so an atomic replace mid-copy still yields
+# one whole version — and left out of the "nothing changed" check; their lock
+# file is not copied at all (audit 2026-09-27 B-16, owner approved;
+# docs/research/2026-09-27-a-backup-snapshots-what-hooks-write.md).
+_HOOK_WRITTEN_RUNTIME = frozenset({"state.json", "state.json.previous", "capture-intents"})
+_HOOK_LOCK_FILES = frozenset({"state.json.lock"})
 _DATABASE_SIDECARS = frozenset(
     f"{name}{suffix}"
     for name in _ACTIVE_DATABASES
@@ -462,6 +470,45 @@ def _copy_entries(entries: tuple[_Entry, ...], image: Path, deadline: float) -> 
         _copy_entry(entry, image, deadline)
 
 
+def _snapshot_file(source: Path, destination: Path) -> None:
+    """One whole version through one descriptor; a file gone since the listing is skipped."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except FileNotFoundError:
+        return
+    with os.fdopen(descriptor, "rb") as stream, destination.open("xb") as copy:
+        shutil.copyfileobj(stream, copy)
+    _harden_runtime_owner_only(destination, 0o600)
+
+
+def _snapshot_directory(source: Path, destination: Path, deadline: float) -> None:
+    destination.mkdir()
+    _harden_runtime_owner_only(destination, 0o700)
+    for child in _directory_children(source):
+        _deadline(deadline)
+        _snapshot_path(Path(child.path), destination / child.name, deadline)
+
+
+def _snapshot_path(source: Path, destination: Path, deadline: float) -> None:
+    try:
+        mode = source.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(mode):
+        _snapshot_directory(source, destination, deadline)
+        return
+    if not stat.S_ISREG(mode):
+        raise BackupError("unsupported_source_type")
+    _snapshot_file(source, destination)
+
+
+def _copy_hook_snapshot(run_source: Path, run_destination: Path, deadline: float) -> None:
+    for name in sorted(_HOOK_WRITTEN_RUNTIME):
+        _deadline(deadline)
+        _snapshot_path(run_source / name, run_destination / name, deadline)
+
+
 def _sqlite_online_backup(source: Path, destination: Path, deadline: float) -> None:
     source_uri = f"{source.resolve(strict=True).as_uri()}?mode=ro"
     try:
@@ -834,6 +881,7 @@ def _source_entries(
         state_root / "run",
         prefix="state/run",
         deadline=deadline,
+        excluded_top_level=_HOOK_WRITTEN_RUNTIME | _HOOK_LOCK_FILES,
         excluded_files=frozenset(_ACTIVE_DATABASES) | _DATABASE_SIDECARS,
     )
     return _without_empty_directories(vault_entries), runtime_entries
@@ -925,6 +973,7 @@ def _build_image(
     _create_image_structure(image)
     _copy_entries(vault_entries, image, deadline)
     _copy_entries(runtime_entries, image, deadline)
+    _copy_hook_snapshot(state_root / "run", image / "state/run", deadline)
     _copy_active_databases(state_root, image, lease, deadline)
     _confirm_sources_unchanged(
         root=root,

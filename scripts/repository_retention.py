@@ -37,6 +37,7 @@ from pathlib import Path
 import repository_index as index
 
 SCHEMA_VERSION = "repository-retention/v1"
+# The nightly repository-retention step's budget (scheduled_nightly adds its start margin). basis unknown — value predates measurement; review when the step reports its budget spent.
 RETIRE_BUDGET_SECONDS = 5 * 60.0
 DISCARD_ERRORS = (OSError, ValueError, TimeoutError, RuntimeError, PermissionError)
 

@@ -9,20 +9,29 @@ from pathlib import Path
 
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes
 from reliable_memory import canonical_json_bytes, restricted_relative_path, sha256_bytes
+from settings import raise_hint, setting_value
 
-MAX_CLAIM_TREE_PAGES = 10_000
 # Eight megabytes: the same ceiling `project_journal.MAX_JOURNAL_BYTES` allows
 # a journal, so a page the journal accepts is never one the claim tree refuses.
 # Measured 2026-09-09: a 4.2 MB journal failed every compile since 09-07.
 MAX_CLAIM_TREE_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-MAX_CLAIM_TREE_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_CLAIM_TREE_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_GUARDRAIL_SOURCE_FILES = 10_000
 MAX_GUARDRAIL_INSPECTED_ENTRIES = 50_000
+# Directories under knowledge/notes and knowledge/feedback one guard-rail snapshot walks; the live
+# vault has 1 (2026-09-27). Refuses a runaway tree. Basis unknown: value predates measurement;
+# review when a vault organises notes into subdirectories.
 MAX_GUARDRAIL_SOURCE_DIRECTORIES = 5_000
+# Nesting depth of guard-rail sources; notes are flat by convention (CLAUDE.md §5), so 12 only
+# refuses a symlink-free runaway tree.
 MAX_GUARDRAIL_SOURCE_DEPTH = 12
 MAX_GUARDRAIL_SOURCE_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
+# Bytes one guard-rail snapshot holds in memory at once; the live sources are 0.74 MB of it
+# (2026-09-27). A vault-size ceiling like `claims.max_total_bytes`; review when doctor's 80%
+# warning fires for that setting.
 MAX_GUARDRAIL_SOURCE_TOTAL_BYTES = 32 * 1024 * 1024
+# The snapshot manifest names at most MAX_GUARDRAIL_SOURCE_FILES entries; 2 MiB allows about 200
+# bytes per entry at that count, so a manifest the walk accepts is one it can store.
 MAX_GUARDRAIL_SOURCE_MANIFEST_BYTES = 2 * 1024 * 1024
 # The project files a claim can live in. `journal.md` is the append-only event
 # log the project state is projected from: JSON events after a header, no
@@ -160,8 +169,8 @@ def _paths(vault: Path) -> list[Path]:
             continue
         _require_regular_directory(root, "claim tree root must be a regular directory")
         pages.extend(_claim_pages_under(root, project_only))
-    if len(pages) > MAX_CLAIM_TREE_PAGES:
-        raise ValueError("claim tree exceeds the page limit")
+    if len(pages) > setting_value("claims.max_pages", vault):
+        raise ValueError(f"claim tree exceeds the page limit; {raise_hint('claims.max_pages')}")
     return sorted(pages, key=lambda item: item.relative_to(vault).as_posix())
 
 
@@ -174,9 +183,9 @@ def _snapshot_claim_tree(
         vault,
         discovered,
         file_limit=MAX_CLAIM_TREE_FILE_BYTES,
-        total_limit=MAX_CLAIM_TREE_TOTAL_BYTES,
+        total_limit=setting_value("claims.max_total_bytes", vault),
         label="claim tree page",
-        total_message="claim tree exceeds the total byte limit",
+        total_message=f"claim tree exceeds the total byte limit; {raise_hint('claims.max_total_bytes')}",
         relative_of=_claim_relative,
     )
     if _relative_names(vault, discovered) != _relative_names(vault, _paths(vault)):
@@ -234,7 +243,7 @@ def validate_claim_tree_manifest(value: object) -> dict[str, object]:
     )
     entries = value["entries"]
     _require_entry_list(
-        entries, MAX_CLAIM_TREE_PAGES, "claim tree manifest entries are invalid"
+        entries, setting_value("claims.max_pages"), "claim tree manifest entries are invalid"
     )
     paths, normalized_entries = _claim_tree_entries(entries)
     _require_sorted_unique(paths, "claim tree manifest paths are not unique and sorted")

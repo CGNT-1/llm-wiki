@@ -21,11 +21,20 @@ from pathlib import Path
 
 from path_coverage import _current_sha, _freshness, contained_scope
 
-# Definitions a snippet answer names; the protocol reply bound is 10 000.
+# Definitions a snippet answer shows. A display bound, not a data bound: each is a
+# source block of up to MAX_SNIPPET_LINES lines, so five already fill a screen, and
+# the answer states `resolved_nodes`, `nodes_omitted` and `snippets_omitted` so the
+# reader knows more exist and can qualify the name (the protocol reply bound is
+# 10 000). docs/research/2026-09-27-a-cut-says-what-it-left-out.md.
 MAX_LOCATIONS = 5
 # One source file read for a snippet; fresh positions re-read up to 4 MiB.
 MAX_FILE_BYTES = 1024 * 1024
+# Lines of one definition shown; a longer body is cut and the snippet says
+# `truncated: true`. Basis unknown: value predates measurement (about two screens).
 MAX_SNIPPET_LINES = 120
+# Symbols sharing the asked name; past 200 the answer is refused ("too many symbols
+# share this name") so the caller qualifies it instead of reading a partial list.
+# Basis unknown: value predates measurement.
 MAX_NAME_MATCHES = 200
 # `constant` joined on 2026-09-12: a module-level UPPER_CASE name is a
 # definition an operator asks for by name like any other.
@@ -66,10 +75,9 @@ def _still_inside(line: str, indent: int) -> bool:
 
 
 def _definition_lines(lines: list[str], symbol: str) -> list[int]:
+    """Every line defining `symbol`; the answer, not this reader, bounds what it shows."""
     pattern = _definition_pattern(symbol)
-    return [
-        index for index, line in enumerate(lines) if pattern.match(line)
-    ][:MAX_LOCATIONS]
+    return [index for index, line in enumerate(lines) if pattern.match(line)]
 
 
 def _snippet_at(lines: list[str], start: int) -> dict:
@@ -134,7 +142,7 @@ def _matching_nodes(graph, symbol: str, deadline: float) -> list[dict]:
     ]
     if len(matched) > MAX_NAME_MATCHES:
         raise ValueError("too many symbols share this name")
-    return matched[:MAX_LOCATIONS]
+    return matched
 
 
 def _definition_occurrence(graph, node_id: str, deadline: float) -> dict | None:
@@ -252,10 +260,22 @@ def _graph_snippets(graph, directory: Path, symbol: str, deadline: float) -> dic
     _, name = _split_symbol(symbol)
     # One scope per answer: resolving it asks git, so never once per symbol.
     scope = contained_scope(directory, deadline)
+    shown = nodes[:MAX_LOCATIONS]
     snippets: list[dict] = []
-    for node in nodes:
+    for node in shown:
         snippets.extend(_node_snippets(graph, directory, scope, node, name, deadline))
-    return {**answer, "snippets": snippets[:MAX_LOCATIONS], "resolved_nodes": len(nodes)}
+    return {**answer, **_shown_snippets(snippets, len(nodes), len(shown))}
+
+
+def _shown_snippets(snippets: list[dict], resolved: int, visited: int) -> dict:
+    """The snippets an answer shows, and how many it leaves out and why."""
+    kept = snippets[:MAX_LOCATIONS]
+    return {
+        "snippets": kept,
+        "resolved_nodes": resolved,
+        "nodes_omitted": resolved - visited,
+        "snippets_omitted": len(snippets) - len(kept),
+    }
 
 
 def snippet_for_symbol(directory: Path, symbol: str, deadline: float) -> dict:
@@ -284,29 +304,39 @@ def _definition_site(graph, node: dict, deadline: float) -> dict | None:
     }
 
 
-def _graph_definition_sites(graph, symbol: str, deadline: float) -> list[dict]:
+def _graph_definition_report(graph, symbol: str, deadline: float) -> dict:
+    """The first MAX_LOCATIONS definition sites, and how many matching nodes were left out."""
     try:
         nodes = _matching_nodes(graph, symbol, deadline)
     except ValueError:
-        return []
-    sites = [_definition_site(graph, node, deadline) for node in nodes]
-    return [site for site in sites if site is not None]
+        return {"sites": [], "sites_omitted": 0}
+    shown = nodes[:MAX_LOCATIONS]
+    sites = [_definition_site(graph, node, deadline) for node in shown]
+    return {"sites": [site for site in sites if site is not None], "sites_omitted": len(nodes) - len(shown)}
 
 
-def definition_sites(directory: Path, symbol: str, deadline: float) -> list[dict]:
-    """Every definition of the symbol the active generation knows, without source.
+def definition_report(directory: Path, symbol: str, deadline: float) -> dict:
+    """Where the symbol is defined, without source, and how many definitions were left out.
 
     A "where is X defined" question is answered by a path and a line, and the
     generation already stores both as the `definition` occurrence of the node.
     The parity run of 2026-09-12 graded our symbol answer `partial` because it
-    carried call-site lines and not this one.
+    carried call-site lines and not this one. The list is cut at MAX_LOCATIONS
+    like the snippet answer and says so in `sites_omitted`, so a name shared by
+    more definitions is never answered as if five were all
+    (docs/research/2026-09-27-a-cut-says-what-it-left-out.md).
     """
     from code_graph import _active_evidence_graph
 
     graph = _active_evidence_graph(directory)
     if graph is None:
-        return []
+        return {"sites": [], "sites_omitted": 0}
     try:
-        return _graph_definition_sites(graph, symbol, deadline)
+        return _graph_definition_report(graph, symbol, deadline)
     finally:
         graph.close()
+
+
+def definition_sites(directory: Path, symbol: str, deadline: float) -> list[dict]:
+    """The definition sites alone; `definition_report` also says how many were left out."""
+    return definition_report(directory, symbol, deadline)["sites"]

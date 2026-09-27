@@ -21,6 +21,8 @@ from typing import Any
 
 MODEL_FILE = "onnx/model.onnx"
 TOKENIZER_FILE = "tokenizer.json"
+# intfloat/multilingual-e5-small has 512 position embeddings; its model card says long texts are
+# truncated to at most 512 tokens. External contract of the model.
 MAX_TOKENS = 512
 # Texts are sorted by token count and each batch is padded to its own longest
 # member. On four cores 4 was fastest (4.8 s for 402 texts; 8: 5.3 s, 16: 5.4 s,

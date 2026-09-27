@@ -20,6 +20,7 @@ from typing import Literal, cast
 
 import markdown_transaction
 import process_liveness
+from iso_time import utc_text
 from process_liveness import _is_plain_int, _platform_system
 from reliable_memory import (
     DEFAULTS,
@@ -72,6 +73,8 @@ _LONG_LEASE_ROLES = frozenset(
 _MARKER_ROLES = frozenset({"compile", "nightly", "weekly"})
 _COORDINATOR_CONTRACT = OperationalDatabaseContract(application_id=0x4C575433)
 _COORDINATOR_CANDIDATE = "markdown-transactions-v3.candidate.sqlite3"
+# A marker identity is canonical JSON of a file identity and a pid, under 300 bytes; 4 KiB refuses
+# a marker that is not one.
 _MAX_MARKER_BYTES = 4096
 
 
@@ -345,7 +348,7 @@ def _timestamp(value: datetime) -> str:
     `…:00Z` compared greater than `…:00.500000Z`. The reader takes both shapes.
     Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
     """
-    return _as_utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return utc_text(_as_utc(value))
 
 
 def _parse_timestamp(value: object) -> datetime:

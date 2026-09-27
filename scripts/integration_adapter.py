@@ -30,10 +30,11 @@ from project_journal import (
     ProjectStore,
     recover_project_handoff,
 )
-from secret_redact import redact_secrets
+from secret_redact import describe_error, redact_jsonl, redact_secrets
 from session_start_project_state import _compute_slug
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
+# A delegate without its own budget stops here, inside the host hook's budget (see the note below).
 DELEGATE_TIMEOUT_SECONDS = 10
 # Delegates on the host's 5-second hooks stop before the host stops the hook, so
 # a hang is recorded here instead of vanishing with the process (audit B-11,
@@ -48,8 +49,10 @@ DELEGATE_TIMEOUTS = {
     "user_prompt_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
     "post_tool_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
 }
+# The unattended queue drain's ceiling; the nightly step it runs in is bounded separately. basis unknown — value predates measurement; review when the nightly queue step reports this drain timing out.
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 CAPTURE_DRAIN_MAX_TASKS = 20
+# The capture drain stops before MAINTENANCE_DRAIN_TIMEOUT_SECONDS (600) kills it, so it can report. basis unknown — value predates measurement; review when capture drains end unfinished.
 CAPTURE_DRAIN_SECONDS = 450
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
 MAX_CHECKPOINT_ERROR_CHARS = 500
@@ -79,6 +82,10 @@ BACKLOG_STATE_LOCK_SECONDS = 10.0
 # A bound on the recovery itself, so an unattended pass can never hang on it.
 BACKLOG_DRAIN_SECONDS = 120.0
 
+# The transcript evidence one capture carries. It must fit inside the capture intent
+# (memory_state.MAX_CAPTURE_INTENT_BYTES, 1 MiB) with room for the intent's own
+# fields; 900 KiB leaves 124 KiB for them. The split is inferred from the two values,
+# not measured; review if an intent near the cap is refused.
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
 CAPTURE_HANDLER_VERSION = 1
 SOURCES = frozenset({"claude", "opencode", "codex"})
@@ -932,39 +939,40 @@ def _pending_checkpoints(
     chunks = _split_project_delta(delta)
     if len(chunks) == 1:
         return [pending]
-    result: list[dict[str, object]] = []
-    for index, chunk in enumerate(chunks):
-        item = dict(pending)
-        event_id = f"{envelope.event_id}:part:{index + 1}"
-        item["event_id"] = event_id
-        item["has_project_delta"] = True
-        checkpoint = dict(pending["checkpoint_event"])
-        checkpoint["occurrence_id"] = event_id
-        checkpoint["idempotency_key"] = f"{event_id}:pending"
-        checkpoint["delta"] = chunk
-        checkpoint["evidence_event_ids"] = [event_id]
-        item["checkpoint_event"] = checkpoint
-        if index < len(chunks) - 1:
-            item["observation"] = {
-                "type": "coalesced_delta",
-                "event_id": event_id,
-            }
-        else:
-            observation = dict(pending["observation"])
-            observation["event_id"] = event_id
-            item["observation"] = observation
-        result.append(item)
-    return result
+    last = len(chunks) - 1
+    return [
+        _checkpoint_part(pending, f"{envelope.event_id}:part:{index + 1}", chunk, index == last)
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def _checkpoint_part(
+    pending: Mapping[str, Any], event_id: str, chunk: object, last: bool
+) -> dict[str, object]:
+    """One part of a split project delta; only the last carries the observation."""
+    item = dict(pending)
+    item["event_id"] = event_id
+    item["has_project_delta"] = True
+    checkpoint = dict(pending["checkpoint_event"])
+    checkpoint["occurrence_id"] = event_id
+    checkpoint["idempotency_key"] = f"{event_id}:pending"
+    checkpoint["delta"] = chunk
+    checkpoint["evidence_event_ids"] = [event_id]
+    item["checkpoint_event"] = checkpoint
+    item["observation"] = _part_observation(pending, event_id, last)
+    return item
+
+
+def _part_observation(pending: Mapping[str, Any], event_id: str, last: bool) -> dict[str, object]:
+    if not last:
+        return {"type": "coalesced_delta", "event_id": event_id}
+    observation = dict(pending["observation"])
+    observation["event_id"] = event_id
+    return observation
 
 
 def _release_claims(state: dict[str, Any], queue_key: str, owner: str) -> None:
-    pending = state.get("project_checkpoint_pending")
-    if not isinstance(pending, dict):
-        return
-    queue = pending.get(queue_key)
-    if not isinstance(queue, list):
-        return
-    for item in queue:
+    for item in _pending_queue(state, queue_key) or []:
         if item.get("claim_owner") == owner:
             item.pop("claim_owner", None)
             item.pop("claim_until", None)
@@ -1372,7 +1380,8 @@ MAX_PENDING_CHECKPOINT_ITEMS = 40
 # `_bounded_pending_batch_count` never accepts more than 100 evidence ids into
 # one batch: a smaller window would change how many events a batch carries, and
 # a larger one would only claim items no cycle can select.
-# See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
+# See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`. Items past
+# the window stay queued for the next cycle; nothing is dropped.
 PENDING_CLAIM_WINDOW = 100
 
 
@@ -1519,6 +1528,9 @@ def _claims_match(queue: Sequence[Mapping[str, object]], owner: str) -> bool:
     return all(item.get("claim_owner") == owner for item in queue)
 
 
+# Reducer entries kept in hook state, oldest dropped first (9af9bb4c), so the state file stays
+# bounded. Basis unknown: value predates measurement; review when a vault runs more than 128
+# active projects.
 MAX_CHECKPOINT_REDUCERS = 128
 
 
@@ -1927,17 +1939,21 @@ def _checkpoint_log_kind(error: BaseException) -> str:
     return "project checkpoint"
 
 
-def _log_checkpoint_error(error: BaseException) -> None:
-    """Best-effort bounded diagnostics for fail-open lifecycle capture."""
+def _log_hook_error(kind: str, message: str) -> None:
+    """One line in the hook failure log; a hook never fails its host over its diagnostics."""
     try:
-        message = _bounded_checkpoint_error(error)
         log_path = STATE_ROOT / "logs" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"[{timestamp}] {_checkpoint_log_kind(error)}: {message}\n")
-    except Exception:  # noqa: BLE001
+            stream.write(f"[{timestamp}] {kind}: {message}\n")
+    except OSError:
         pass
+
+
+def _log_checkpoint_error(error: BaseException) -> None:
+    """Best-effort bounded diagnostics for fail-open lifecycle capture."""
+    _log_hook_error(_checkpoint_log_kind(error), _bounded_checkpoint_error(error))
 
 
 def _observe_checkpoint_fail_open(envelope: EventEnvelope) -> None:
@@ -2297,28 +2313,32 @@ def _write_transient_transcript(envelope: EventEnvelope, text: str) -> Path:
 
 def _restrict_file_permissions(path: Path) -> None:
     if os.name == "nt":
-        username = os.environ.get("USERNAME")
-        if not username:
-            raise PermissionError("transient permissions unavailable")
-        result = subprocess.run(
-            [
-                "icacls",
-                str(path),
-                "/inheritance:r",
-                "/grant:r",
-                # D: read and write do not include delete, and the transient file
-                # is deleted once it has been read. See
-                # `docs/research/2026-09-17-a-transient-transcript-can-be-deleted-on-windows.md`.
-                f"{username}:(R,W,D)",
-            ],
-            capture_output=True,
-            check=False,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            raise PermissionError("transient permissions unavailable")
+        _restrict_windows_permissions(path)
         return
     path.chmod(0o600)
+
+
+def _restrict_windows_permissions(path: Path) -> None:
+    username = os.environ.get("USERNAME")
+    if not username:
+        raise PermissionError("transient permissions unavailable")
+    result = subprocess.run(
+        [
+            "icacls",
+            str(path),
+            "/inheritance:r",
+            "/grant:r",
+            # D: read and write do not include delete, and the transient file
+            # is deleted once it has been read. See
+            # `docs/research/2026-09-17-a-transient-transcript-can-be-deleted-on-windows.md`.
+            f"{username}:(R,W,D)",
+        ],
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise PermissionError("transient permissions unavailable")
 
 
 def _record_activity(
@@ -2361,8 +2381,14 @@ def _cleanup_runtime_transient(path: Path) -> None:
 
 
 def _run_maintenance_command(script: str, argument: str) -> None:
+    """Run one session-start drain; a failure is logged, never raised into the hook.
+
+    The exit code and a spawn failure were both dropped, so a drain that failed on
+    every session start left nothing to read (audit 2026-09-27 C-3,
+    docs/research/2026-09-27-a-capture-that-fails-says-so.md).
+    """
     try:
-        subprocess.run(
+        completed = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / script), argument],
             cwd=str(ROOT),
             stdin=subprocess.DEVNULL,
@@ -2371,8 +2397,11 @@ def _run_maintenance_command(script: str, argument: str) -> None:
             check=False,
             timeout=MAINTENANCE_DRAIN_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    except (OSError, subprocess.SubprocessError) as error:
+        _log_hook_error("session-start maintenance", f"{script} {argument}: {describe_error(error)}")
+        return
+    if completed.returncode != 0:
+        _log_hook_error("session-start maintenance", f"{script} {argument} exited {completed.returncode}")
 
 
 def _run_session_start_maintenance() -> int:
@@ -2380,9 +2409,10 @@ def _run_session_start_maintenance() -> int:
     _run_maintenance_command("memory_queue.py", "work")
     _catch_up_missed_nightly()
     try:
-        spawn_compile_if_idle()
-    except Exception:  # noqa: BLE001
-        pass
+        # The open day waits for the nightly; see `memory_state.closed_daily_logs`.
+        spawn_compile_if_idle(closed_days_only=True)
+    except Exception as error:  # noqa: BLE001 - session start never fails over a compile spawn
+        _log_hook_error("session-start compile", describe_error(error))
     return 0
 
 
@@ -2710,16 +2740,33 @@ def _turn_lines(lines: Iterable[bytes], side: int) -> list[bytes]:
 
 
 def _turns_head(window: bytes, side: int) -> bytes:
-    """The first turns; the raw window when not one whole turn fits in it."""
+    """The first turns; whole tokens of the raw window when not one whole turn fits in it."""
     kept = _turn_lines(window.split(b"\n")[:-1], side)
-    return b"".join(line + b"\n" for line in kept) or window[:side]
+    return b"".join(line + b"\n" for line in kept) or _whole_tokens_head(window[:side])
 
 
 def _turns_tail(window: bytes, side: int) -> bytes:
-    """The last turns; the raw window when not one whole turn fits in it."""
+    """The last turns; whole tokens of the raw window when not one whole turn fits in it."""
     lines = [line for line in window.split(b"\n")[1:] if line]
     kept = _turn_lines(reversed(lines), side)
-    return b"".join(line + b"\n" for line in reversed(kept)) or window[-side:]
+    return b"".join(line + b"\n" for line in reversed(kept)) or _whole_tokens_tail(window[-side:])
+
+
+# Where a token of a JSON line ends. A raw window cut inside a token would keep a
+# fragment the redactor cannot recognise — a token prefix is not a token — so the
+# fragment at the cut is dropped (audit 2026-09-27 B-4,
+# docs/research/2026-09-27-a-secret-is-redacted-before-it-is-cut.md).
+_TOKEN_BOUNDARY = re.compile(rb"[\s,\"'{}\[\]:=]")
+
+
+def _whole_tokens_head(piece: bytes) -> bytes:
+    ends = [match.end() for match in _TOKEN_BOUNDARY.finditer(piece)]
+    return piece[: ends[-1]] if ends else b""
+
+
+def _whole_tokens_tail(piece: bytes) -> bytes:
+    match = _TOKEN_BOUNDARY.search(piece)
+    return piece[match.start():] if match else b""
 
 
 def _capture_excerpt_marker(dropped: int) -> str:
@@ -2796,7 +2843,7 @@ def _capture_path_evidence(
         path = _validated_capture_transcript_path(value)
     except FileNotFoundError:
         return None
-    redacted = redact_secrets(_capture_transcript_text(path, limit))
+    redacted = redact_jsonl(_capture_transcript_text(path, limit))
     if not redacted:
         return None
     return redacted
@@ -2889,6 +2936,7 @@ def _encoded_capture_record(source: Mapping[str, object]) -> tuple[dict[str, obj
     return record, canonical_json_bytes(record)
 
 
+# Times the capture record is shrunk to fit its byte bound before it is refused. basis unknown — value predates measurement; review when a capture is refused as unfittable.
 CAPTURE_FIT_ATTEMPTS = 4
 
 
@@ -3591,6 +3639,8 @@ def _skip_reason(error: BaseException) -> str:
     return name
 
 
+# A permission refusal printed to stderr when a capture is skipped (issue #23): one line an
+# operator reads. A readability trade-off, not measured.
 MAX_SKIP_REASON_CHARS = 240
 
 

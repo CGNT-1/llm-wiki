@@ -25,6 +25,7 @@ from evidence_resolver import (
     EvidenceResolver,
     daily_entries,
 )
+from iso_time import block_instant, names_block
 from reliable_memory import (
     canonical_json_bytes,
     open_operational_db,
@@ -32,6 +33,7 @@ from reliable_memory import (
     validate_schema,
     validate_state_root,
 )
+from settings import raise_hint, setting_value
 
 SCHEMA_DIR = Path(__file__).with_name("schemas")
 LEDGER_SCHEMA = SCHEMA_DIR / "claim-ledger-v1.json"
@@ -43,6 +45,10 @@ CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
 # `docs/research/2026-09-10-one-ceiling-for-every-reader-of-a-journal.md`.
 MAX_CLAIM_PAGE_BYTES = MAX_CLAIM_TREE_FILE_BYTES
 MAX_ACTIVE_RECORDS = 10_000
+# A claim's number value is model-written text: characters, digits and exponent are bounded so
+# normalising `1e999999` can never expand into a huge integer (a resource bound on untrusted
+# input). Basis unknown: value predates measurement; review when a real measured quantity is
+# refused.
 MAX_DECIMAL_CHARS = 128
 MAX_DECIMAL_DIGITS = 128
 MAX_DECIMAL_EXPONENT = 128
@@ -517,7 +523,7 @@ def _timestamp_block(
         digest,
         daily_id,
         block_id,
-        f"{daily_id}T{block_id}Z",
+        block_instant(daily_id, block_id),
         start,
         end,
         source[start:end],
@@ -719,9 +725,8 @@ def _require_observation(record: Mapping[str, object], ref: EvidenceRef) -> None
         raise ValueError(
             "observed evidence block is not a valid HH:MM:SS timestamp"
         ) from exc
-    if re.fullmatch(r"\d{2}:\d{2}:\d{2}", ref.block_id) is None or observed_at != (
-        f"{ref.daily_id}T{ref.block_id}Z"
-    ):
+    well_formed = re.fullmatch(r"\d{2}:\d{2}:\d{2}", ref.block_id) is not None
+    if not (well_formed and names_block(observed_at, ref.daily_id, ref.block_id)):
         raise ValueError("claim observation does not match its evidence block")
 
 
@@ -1031,8 +1036,8 @@ class ClaimIndex:
         sources: Sequence[Path] | Callable[[], Sequence[Path]] | None,
     ) -> list[Path]:
         pages = self._discovered_pages(sources)
-        if len(pages) > 10_000:
-            raise ValueError("claim rebuild page discovery exceeds 10000 pages")
+        if len(pages) > setting_value("claims.max_pages", self.vault):
+            raise ValueError(f"claim rebuild page discovery exceeds its limit; {raise_hint('claims.max_pages')}")
         if any(not isinstance(page, Path) for page in pages):
             raise TypeError("claim rebuild provider must return Path values")
         return sorted(pages)

@@ -3747,7 +3747,8 @@ def test_diagnostic_aggregate_rejection_preserves_previous_snapshot(
             }
         )
 
-        assert session._diagnostics[uri] is previous
+        kept = session._diagnostics[uri]
+        assert (kept.diagnostics, kept.partial) == (previous.diagnostics, True)
         assert session._diagnostic_bytes == previous.retained_bytes
     finally:
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
@@ -4704,6 +4705,14 @@ def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
         assert process is not None
         request = LspProcess.request
 
+        def record_stage(method: str, deadline: float) -> None:
+            nonlocal second_stage_calls
+            if method == "textDocument/prepareCallHierarchy":
+                _hold_at_barrier(prepare_ready, release_prepare, deadline)
+                return
+            if method == "callHierarchy/incomingCalls":
+                second_stage_calls += 1
+
         def block_completed_prepare(
             current: LspProcess,
             method: str,
@@ -4712,7 +4721,6 @@ def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
             deadline: float,
             cancellation: object = None,
         ) -> object:
-            nonlocal second_stage_calls
             result = request(
                 current,
                 method,
@@ -4722,10 +4730,7 @@ def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
             )
             if current is not process:
                 return result
-            if method == "textDocument/prepareCallHierarchy":
-                _hold_at_barrier(prepare_ready, release_prepare, deadline)
-            elif method == "callHierarchy/incomingCalls":
-                second_stage_calls += 1
+            record_stage(method, deadline)
             return result
 
         monkeypatch.setattr(LspProcess, "request", block_completed_prepare)
@@ -5869,6 +5874,21 @@ def test_synchronize_deadline_recovery_quarantines_partially_mutated_process(
         notify_generation = LspProcess.notify_generation
         restart = LspProcess.restart
 
+        def refuse_after_failure(method: str) -> None:
+            if failure_returned:
+                stale_fresh_calls.append(method)
+                raise AssertionError("fresh work reached quarantined process")
+
+        def partial_delivery(method: str, deliver, generation_nonce: str) -> bool:
+            if method == "textDocument/didChange":
+                assert deliver() is True
+                partial_changes.append(generation_nonce)
+                return True
+            if method == "workspace/didChangeWatchedFiles":
+                assert partial_changes == [generation]
+                return False
+            return deliver()
+
         def fail_after_partial_change(
             current: LspProcess,
             method: str,
@@ -5888,17 +5908,8 @@ def test_synchronize_deadline_recovery_quarantines_partially_mutated_process(
 
             if current is not process:
                 return deliver()
-            if failure_returned:
-                stale_fresh_calls.append(method)
-                raise AssertionError("fresh work reached quarantined process")
-            if method == "textDocument/didChange":
-                assert deliver() is True
-                partial_changes.append(generation_nonce)
-                return True
-            if method == "workspace/didChangeWatchedFiles":
-                assert partial_changes == [generation]
-                return False
-            return deliver()
+            refuse_after_failure(method)
+            return partial_delivery(method, deliver, generation_nonce)
 
         def expire_recovery(current: LspProcess, deadline: float) -> None:
             if current is process:
@@ -7502,22 +7513,23 @@ def test_manager_key_lock_lives_through_waiters_and_releases_after_last_get(
     results: list[PyrightSession] = []
     errors: list[BaseException] = []
 
+    # By call number: the event set before waiting for the lock, and the pair
+    # (set once held, wait for release) after acquiring it.
+    waiting_by_call = {2: second_waiting, 3: third_waiting}
+    held_by_call = {1: (first_acquired, release_first), 2: (second_acquired, release_second)}
+
     def controlled_acquire(lock: threading.Lock, deadline: float) -> None:
         nonlocal acquire_calls
         with calls_lock:
             acquire_calls += 1
             call = acquire_calls
-        if call == 2:
-            second_waiting.set()
-        elif call == 3:
-            third_waiting.set()
+        if call in waiting_by_call:
+            waiting_by_call[call].set()
         acquire_key_lock(lock, deadline)
-        if call == 1:
-            first_acquired.set()
-            assert release_first.wait(SHORT_TIMEOUT)
-        elif call == 2:
-            second_acquired.set()
-            assert release_second.wait(SHORT_TIMEOUT)
+        if call in held_by_call:
+            acquired, release = held_by_call[call]
+            acquired.set()
+            assert release.wait(SHORT_TIMEOUT)
 
     def get_session(*, third: bool = False) -> None:
         try:

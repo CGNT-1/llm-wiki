@@ -513,18 +513,12 @@ def _assert_degraded_trace(row, trace) -> None:
 
 
 def _assert_context_package_keys(package) -> None:
-    assert set(package) >= {
-        "text", "packed_tokens", "token_budget", "repo_map", "pages",
-        "symbols", "decisions", "incidents", "active_task", "evidence",
-        "retrieval_trace", "materialization_trace",
-    }
+    assert set(package) >= {"text", "packed_tokens", "token_budget", "repo_map", "items", "dropped"}
 
 
 def _assert_context_package_contents(package) -> None:
     assert package["packed_tokens"] <= package["token_budget"] == 1200
-    assert package["decisions"]
-    assert package["incidents"]
-    assert package["active_task"]
+    assert {item["type"] for item in package["items"]} >= {"decision", "debugging", "project-state"}
 
 
 def _assert_recall_search_call(call) -> None:
@@ -1187,7 +1181,9 @@ class TestHelperFunctions:
             )
         monkeypatch.setattr(memory_state, "ROOT", tmp_path)
 
-        package = mcp_server._get_context(["alpha", "beta"], token_budget=256)
+        # 512 holds the bytes 256 did under the earlier 4-bytes estimate; at the
+        # measured 2 bytes per token, 256 cannot hold this answer's item list.
+        package = mcp_server._get_context(["alpha", "beta"], token_budget=512)
 
         assert package["repo_map"] == [
             "knowledge/notes/alpha.md",
@@ -1369,7 +1365,7 @@ class TestHelperFunctions:
         monkeypatch.setattr(
             maybe_compile,
             "spawn_compile_if_idle",
-            lambda: pytest.fail("MCP compile must not detach unbounded work"),
+            lambda **_kwargs: pytest.fail("MCP compile must not detach unbounded work"),
         )
         deadline = time.monotonic() + 5
 
@@ -1930,7 +1926,10 @@ class TestHandleToolCall:
         envelope = json.loads(self._run(tool_name, VALID_TOOL_CALLS[tool_name]))
 
         assert "error" not in envelope["data"]
-        assert seen == [100.0 + mcp_server.MCP_OPERATION_SECONDS]
+        # The tool's own budget: 10 s, or `mcp.retrieval_seconds` for recall and
+        # get_decisions, whose answer waits for the reranker (B-9).
+        budget = mcp_server._tool_operation_seconds(tool_name, VALID_TOOL_CALLS[tool_name])
+        assert seen == [100.0 + budget]
 
     def test_get_context_does_not_replace_the_handler_deadline(self, monkeypatch):
         import corpus_snapshot
@@ -4091,9 +4090,10 @@ def test_navigation_deadline_is_10s_for_existing_modes() -> None:
         )
         == mcp_server.MCP_OPERATION_SECONDS
     )
+    # recall waits for its reranker on `mcp.retrieval_seconds` (B-9), not the 10 s default.
     assert (
         mcp_server._tool_operation_seconds("recall", {"query": "x"})
-        == mcp_server.MCP_OPERATION_SECONDS
+        == mcp_server._retrieval_operation_seconds()
     )
 
 
@@ -5109,9 +5109,13 @@ def test_real_navigation_adapters_return_only_contained_exact_graph_evidence(
                     }
                 ]
 
-        def edges(self, *, edge_types, max_rows, deadline):
-            assert edge_types == ("CALLS",)
-            assert max_rows == 10_000
+        def edges(self, *, edge_types, max_rows, deadline, source_node_ids=None, target_node_ids=None):
+            # As EvidenceGraph.edges: the read is anchored on the symbol's nodes, and an
+            # anchor that names no node selects nothing.
+            assert (edge_types, max_rows) == (("CALLS",), 10_000)
+            anchored = {*(source_node_ids or ()), *(target_node_ids or ())}
+            if not anchored & {"caller-node", "callee-node"}:
+                return []
             return [
                 {
                     "assertion_id": "call-edge",
@@ -5428,13 +5432,14 @@ def test_structural_callback_reuses_anchor_source_for_graph_spans(
     assert reads == 1
 
 
-def _assert_cache_rejection_is_remembered(cache, reads: int) -> None:
-    assert reads == 1
-    assert cache._bytes == 0
-    assert len(cache._values) == 1
+def _assert_the_cache_holds_the_newest_source(cache, reads: int) -> None:
+    """The source past the cap evicted the older one instead of being refused."""
+    assert reads == 2
+    assert cache._bytes == 5
+    assert list(key[2] for key in cache._values) == ["large.py"]
 
 
-def test_navigation_source_cache_remembers_byte_cap_rejections(
+def test_navigation_source_cache_evicts_instead_of_refusing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5453,9 +5458,11 @@ def test_navigation_source_cache_remembers_byte_cap_rejections(
     monkeypatch.setattr(mcp_server, "_navigation_source_bytes", read_source)
     cache = mcp_server._NavigationSourceCache()
 
-    assert cache.read(scope, "large.py", deadline=time.monotonic() + SHORT_TIMEOUT) is None
-    assert cache.read(scope, "large.py", deadline=time.monotonic() + SHORT_TIMEOUT) is None
-    _assert_cache_rejection_is_remembered(cache, reads)
+    deadline = time.monotonic() + SHORT_TIMEOUT
+    assert cache.read(scope, "small.py", deadline=deadline)[0] == b"12345"
+    assert cache.read(scope, "large.py", deadline=deadline)[0] == b"12345"
+    assert cache.read(scope, "large.py", deadline=deadline)[0] == b"12345"
+    _assert_the_cache_holds_the_newest_source(cache, reads)
 
 
 def test_navigation_calls_use_lightweight_evidence_spans(

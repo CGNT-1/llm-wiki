@@ -23,6 +23,8 @@ if str(ROOT / "scripts") not in sys.path:
 import install_control  # noqa: E402
 from reliable_memory import canonical_json_bytes  # noqa: E402
 
+from tests.powershell_literal import ps_literal  # noqa: E402
+
 SCRIPT = ROOT / "scripts" / "install-scheduled-tasks.ps1"
 RELEASE = {
     "commit_oid": "a" * 40,
@@ -155,7 +157,7 @@ def test_the_two_contracts_never_both_claim_the_same_task() -> None:
         f"""
         $tokens = $null; $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {json.dumps(str(SCRIPT))}, [ref]$tokens, [ref]$errors)
+            {ps_literal(str(SCRIPT))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -221,8 +223,8 @@ def test_a_registration_carries_the_marker_and_the_limits(tmp_path) -> None:
     (tmp_path / "uv.exe").write_text("", encoding="utf-8")
     command = STUBS + textwrap.dedent(
         f"""
-        . {json.dumps(str(SCRIPT))} -VaultRoot {json.dumps(str(tmp_path))} `
-            -StateRoot {json.dumps(str(tmp_path))} -UvPath {json.dumps(str(tmp_path / "uv.exe"))} 6>$null
+        . {ps_literal(str(SCRIPT))} -VaultRoot {ps_literal(str(tmp_path))} `
+            -StateRoot {ps_literal(str(tmp_path))} -UvPath {ps_literal(str(tmp_path / "uv.exe"))} 6>$null
         ConvertTo-Json -Compress $script:registered
         """
     )

@@ -474,18 +474,26 @@ _SCANNER_TOKEN_SHAPES = (
 )
 
 
+# One token text per shape, given (index, native root, URI root).
+_SCANNER_TOKEN_TEXT = {
+    "native": lambda index, native_root, uri_root: (
+        f"path={native_root}/pkg/module-{index}.py:12:34"
+    ),
+    "uri": lambda index, native_root, uri_root: f"uri={uri_root}/pkg/module-{index}.py:56:78",
+    "dotted": lambda index, native_root, uri_root: (
+        f"/srv/scratch/../Program Files/linear-repository/pkg/module-{index}.py"
+    ),
+    "sibling": lambda index, native_root, uri_root: (
+        f"path={native_root}-sibling/module-{index}.py"
+    ),
+    "outside": lambda index, native_root, uri_root: f"path=/outside/module-{index}.py",
+}
+
+
 def _scanner_token(index: int, native_root: str, uri_root: str) -> str:
     """One token of each shape the scanner must classify, by position."""
     shape = _SCANNER_TOKEN_SHAPES[index % len(_SCANNER_TOKEN_SHAPES)]
-    if shape == "native":
-        return f"path={native_root}/pkg/module-{index}.py:12:34"
-    if shape == "uri":
-        return f"uri={uri_root}/pkg/module-{index}.py:56:78"
-    if shape == "dotted":
-        return f"/srv/scratch/../Program Files/linear-repository/pkg/module-{index}.py"
-    if shape == "sibling":
-        return f"path={native_root}-sibling/module-{index}.py"
-    return f"path=/outside/module-{index}.py"
+    return _SCANNER_TOKEN_TEXT[shape](index, native_root, uri_root)
 
 
 def _joined_tokens(tokens: list[str]) -> str:
@@ -525,21 +533,29 @@ def _measurement_columns(measurements):
     )
 
 
+# One Windows token text per shape, given (index, root text, URI root).
+_WINDOWS_SCANNER_TOKEN_TEXT = {
+    "native": lambda index, root_text, uri_root: (
+        f"path={root_text}\\pkg\\module-{index}.py:12:34).,;]}}"
+    ),
+    "uri": lambda index, root_text, uri_root: (
+        f"uri={uri_root}/pkg/module-{index}.py:56:78).,;]}}"
+    ),
+    "dotted": lambda index, root_text, uri_root: (
+        f"path={root_text}-sibling\\module-{index}.py:90:12).,;]}}"
+    ),
+    "sibling": lambda index, root_text, uri_root: f"path=D:\\outside\\module-{index}.py",
+    "outside": lambda index, root_text, uri_root: (
+        "path=D:\\scratch\\..\\Program Files\\linear-repository\\"
+        f"pkg\\module-{index}.py"
+    ),
+}
+
+
 def _windows_scanner_token(index: int, root_text: str, uri_root: str) -> str:
     """One token of each shape the Windows scanner must classify, by position."""
     shape = _SCANNER_TOKEN_SHAPES[index % len(_SCANNER_TOKEN_SHAPES)]
-    if shape == "native":
-        return f"path={root_text}\\pkg\\module-{index}.py:12:34).,;]}}"
-    if shape == "uri":
-        return f"uri={uri_root}/pkg/module-{index}.py:56:78).,;]}}"
-    if shape == "dotted":
-        return f"path={root_text}-sibling\\module-{index}.py:90:12).,;]}}"
-    if shape == "sibling":
-        return f"path=D:\\outside\\module-{index}.py"
-    return (
-        "path=D:\\scratch\\..\\Program Files\\linear-repository\\"
-        f"pkg\\module-{index}.py"
-    )
+    return _WINDOWS_SCANNER_TOKEN_TEXT[shape](index, root_text, uri_root)
 
 
 def _assert_bounded_semantic_scan(value, root, expected, inspected_components) -> None:
@@ -686,6 +702,16 @@ def test_posix_checkout_walk_opens_only_root_or_handle_relative_components(
     assert scope.checkout_root not in {path for path, _directory in calls}
 
 
+def _require_junction_created(created: subprocess.CompletedProcess) -> None:
+    """Skip when junctions need a privilege this account lacks; fail on anything else."""
+    if created.returncode == 0:
+        return
+    output = (created.stdout + created.stderr).decode(errors="replace")
+    if "privilege" in output.casefold():
+        pytest.skip("junction creation privilege unavailable")
+    pytest.fail(f"junction creation failed: {output}")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction")
 def test_windows_junction_parent_is_rejected(
     repository: Path, scope: RepositoryScope
@@ -704,11 +730,7 @@ def test_windows_junction_parent_is_rejected(
         check=False,
         timeout=10,
     )
-    if created.returncode != 0:
-        output = (created.stdout + created.stderr).decode(errors="replace")
-        if "privilege" in output.casefold():
-            pytest.skip("junction creation privilege unavailable")
-        pytest.fail(f"junction creation failed: {output}")
+    _require_junction_created(created)
     assert junction.exists()
     assert os.lstat(junction).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
 

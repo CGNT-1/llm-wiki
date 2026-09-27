@@ -53,6 +53,11 @@ def _linux_pid_is_reaped(pid: int) -> bool:
     payload = _proc_stat(pid)
     if payload is None:
         return True
+    return _stat_says_reaped(payload)
+
+
+def _stat_says_reaped(payload: str) -> bool:
+    """The state field after the parenthesised command name is zombie or dead."""
     closing = payload.rfind(")")
     if closing < 0:
         return False
@@ -192,13 +197,17 @@ def _terminate_and_close(tree: ProcessTree) -> None:
 
 def _force_cleanup(tree: ProcessTree, descendant_pid: int) -> None:
     """Whatever the test did not reach, done bluntly, so nothing outlives it."""
-    if tree.process.poll() is None:
-        _ask_fixture_to_clean(tree)
-        _wait_or_kill(tree)
+    _stop_live_fixture(tree)
     if _pid_alive(descendant_pid):
         os.kill(descendant_pid, signal.SIGKILL)
     if tree.process_group is not None:
         tree.close()
+
+
+def _stop_live_fixture(tree: ProcessTree) -> None:
+    if tree.process.poll() is None:
+        _ask_fixture_to_clean(tree)
+        _wait_or_kill(tree)
 
 
 def _ask_fixture_to_clean(tree: ProcessTree) -> None:

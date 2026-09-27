@@ -10,6 +10,74 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- On Windows only a pipe is left for its owner thread to close; a socket-backed stream is closed as before, since a Winsock shutdown does not wake a receive already in progress (every socket-backed LSP close timed out on Windows CI).
+- A compile's proposed slug that differs from an existing page's by a regular plural also updates that page, and a key that names a live page and its retired duplicate leads to the live one; the one plural near-duplicate the live vault held was superseded by its original.
+- Closing an LSP protocol whose Windows owner already closed its stream no longer raises ValueError from fileno() (it failed every LSP close on Windows CI and exhausted the cleanup registry); every protocol test now runs through both the POSIX and the Windows close path on every platform.
+- MCP recall and get_decisions get mcp.retrieval_seconds (14 s) instead of the 10 s default, so the reranker's measured warm p95 (5.68 s on four idle cores) fits its window; it was offered about 3.5 s and ran on about half the answers, while it raises cross-language MRR@10 from 0.51 to 0.81 on the benchmark gold set (audit 2026-09-27 B-9).
+- The installed-vault check (backup and run/ deletion) streams every operational row through one reliable_memory.streamed_rows helper, which doctor now shares, instead of refusing past 10 000 rows as transaction_state_unreadable; a table that only has to be empty is asked for one row. The live undo window held 6 095 rows (68 % of the old cap on the busiest two days on record).
+- Four more cuts say what they left out: an oversized Pyright diagnostics publication keeps the stored snapshot marked partial instead of vanishing, a deep install error says further causes were not shown, positions past the refresh limit are marked not refreshed, and the navigation source cache evicts the oldest source instead of dropping the next one.
+- The installer tests' survivor checks count a killed but unreaped (zombie) process as dead: kill -0 answers for a zombie too, and under load the reaping lagged behind the check.
+- doctor reads every transaction and operation row in bounded batches inside one read snapshot instead of the first 10 000 (the live vault holds 29 369), and a quarantine that never reached planning is no longer reported as corrupt metadata.
+- Every module-level limit in scripts/ states its basis in its own comment block (a lint pragma, a section rule or a neighbour's comment no longer counts), or is a setting; bases that could not be found say so with a review condition, duplicated chunk sizes use bounded_io.IO_CHUNK_BYTES, and unread constants are gone (law 9).
+- A symbol's definition list and a cross-service walk say what they left out: get_architecture's symbol answer carries definition_omitted when more than five definitions share the name, and find_service_paths reports hop_count and hops_truncated instead of silently cutting its rows and frontier at 1 000.
+- A compile's proposed page whose slug differs from an existing page's only by an article (the, a, an) updates that page instead of creating a near-duplicate; a match with two pages keeps the create and says so.
+- A limit that dropped results no longer does it silently: four caps that lost stored data are gone (lessons per day, ledger records per turn, notes scanned for provenance, worktrees per repository), and answers that cut a list for display carry how much they left out; navigation reads only the call edges anchored to the asked symbol instead of the first 10 000.
+- Limits an operator may set live in one registry, scripts/settings.py, with a default, unit, lower bound and reason each; an optional gitignored llm-wiki.toml at the vault root or LLM_WIKI_<SECTION>_<KEY> overrides them, an invalid value stops the run naming the key, and doctor lists changed values and warns at 80% of a vault-size ceiling. The twelve vault-size ceilings, six retention periods and the compile's provider ceiling (now 600 s, from calls measured at 99–418 s) moved there; every other module-level limit states its basis above it or is on a visible debt list a guard keeps from growing (law 9).
+- Every function in tests/ and benchmark/ holds at most two if statements (36 split, assertions unchanged), and the two-if guard now walks scripts/, tests/ and benchmark/.
+- LspProtocol.close repeats a lost CancelSynchronousIo until the reader leaves and never closes a Windows stream under its own reader, which could hang a CI job for its whole hour; pytest's faulthandler_timeout (600 s, 1.5 times the slowest test of the last green main run) now prints every thread's stack on a hang, and the fake server sends with one sendall so its close no longer re-raises a broken pipe.
+- Every function in scripts/ holds at most two if statements (law 5): 89 functions were split into helpers without changing messages, exceptions or the order of effects, and four duplicated bodies became one; two functions in private_vault_backup.py remain because the machine's rule-8 gate refuses every edit of that file, and the guard names them.
+- A PowerShell command a test builds quotes its values as single-quoted literals through one helper instead of JSON, which doubled every backslash of a Windows path; a guard test refuses the JSON form.
+- The impact byte diff passes core.autocrlf=false to git diff --no-index: with the Windows default core.autocrlf=true a change of line endings alone produced no hunk; its test now runs under that setting on every platform.
+- The setsid process-tree fixture reports the group signal with one unbuffered write: printing from its SIGTERM handler re-entered stdout's buffer under load and killed the fixture (150 of 300 stressed runs); a test refuses any signal handler that prints or writes through sys.stdout/sys.stderr.
+- A fresh install is graded by what is wrong, not by what has not happened yet: before its first due time (the install instant from run/install/manifest.json plus one day and the nightly's run limit; plus the two-day freshness bound for the snapshot) a nightly that never ran and a missing first snapshot are pending, after it they are findings (a never-run nightly used to stay 'unknown' forever); a Pyright never installed is an optional feature not taken, while one present but wrong still degrades (audit 2026-09-27, doctor on a fresh install).
+- Ollama is called through its native /api/chat with a context window sized to hold the prompt and the answer (capped by the model's trained length and by MEMORY_OLLAMA_MAX_CONTEXT), instead of the OpenAI-compatible endpoint, which cannot set one and let Ollama silently cut a long compile prompt; a prompt that still fills the window fails as context_overflow (audit 2026-09-27, Ollama window).
+- An answer's token estimate is 2 UTF-8 bytes per token, measured on this vault's Markdown (2.3-4.0 on the provider it uses), so an answer fits the budget it was asked for; the session start compiles closed days only and the day still being appended to waits for the nightly (audit 2026-09-27 C-6).
+- The daily log keeps one clock: every heading and the file's day come from the machine's local wall clock through one helper (the deferred flush wrote UTC into a local-day file), and a claim's `observed_at` is now that reading converted to UTC instead of the local time labelled `Z`; ledgers written before still validate (audit 2026-09-27 C-5).
+- Both installers fetch the pinned model weights before the runtime sync, so its final doctor check runs after every step that changes what it checks and the first generation is built with the weights present (audit 2026-09-27, installer order).
+- A redriven capture reuses the semantic decision its dead ancestor already indexed, and a block that ancestor committed is recognised as its own, instead of failing its one second chance with semantic_decision_conflict; a decision sealed outside the redrive chain is still refused (audit 2026-09-27 B-14).
+- A quarantined transaction the rows show resolved (its retry committed, or a commit created its files) gives up its before/after images and keeps its row; the rule is one module shared by the prune, doctor and the refused-append repair (audit 2026-09-27 B-2).
+- A backup copies what the session hooks write (run/state.json, run/capture-intents/) as a snapshot at read time instead of refusing while any agent runs, and leaves their lock file out; every other file still must not change during the copy (audit 2026-09-27 B-16, owner approved).
+- The coordinator's checkpoint tables index their transaction keys, created by the history prune when missing; a database without them stays valid, and deleting settled history no longer scans both tables per row: 400 deletes went from 2.78 s to 0.02 s on a copy of this vault's database (audit 2026-09-27 B-1, owner approved).
+- A failed code-navigation ownership probe names its step, message, duration and the clock's resolution, and a failed reset is reported, not swallowed (audit 2026-09-27 B-8).
+- The code graph follows star imports (with `__all__`), imports chosen in `try/except`, and a name imported twice; extractor v17 rebuilds stored generations (audit 2026-09-27 C-7).
+- The installers name the branch the nightly update follows and the checks behind a warning, and the smoke-test timeout variable extends the smoke (audit 2026-09-27 C-12).
+- Both installers read `~/.claude.json` through one helper and print the registration command when it cannot be read (audit 2026-09-27 C-11).
+- A configuration request without a section is answered with the asking server's own settings (audit 2026-09-27 C-8).
+- anyio 4.15.1 and cryptography 50.0.1 carry no known advisories, and CI audits the whole lock with pip-audit (audit 2026-09-27 B-19).
+- Every shell function is measured with tree-sitter-bash and stays within the complexity limit; five installer functions were split (audit 2026-09-27, law 5).
+- The Pyright download retries a dropped connection like the other language servers (audit 2026-09-27 C-10).
+- Every child process a script waits for has a deadline, and a test refuses a call without one (audit 2026-09-27 C-9).
+- A failed nightly merge returns every set-aside copy, and the update's time limit counts one fetch (audit 2026-09-27 C-13).
+- The documents state the server retry budget, the nightly snapshot commit and the v3 layout as they are, and a test catches the old wording (audit 2026-09-27 C-17).
+- Hang bounds that were longer than SHORT_TIMEOUT use LONG_TIMEOUT again, and the guard requires it (audit 2026-09-27 B-7).
+- get_context fits its whole answer into `token_budget`, names each item once, and every answer uses one token estimate (UTF-8 bytes / 4) (audit 2026-09-27 B-12).
+- A recall row no longer repeats a cut of its own content in its summary (audit 2026-09-27 C-16).
+- An answer is fresh or stale by its own sources; another project's rewritten `state.md` no longer marks every answer stale (audit 2026-09-27 B-10).
+- An `unsupported` navigation answer is not reported fresh (audit 2026-09-27 C-19).
+- A retrieval stage that was never admitted is reported as not admitted, not as a timeout (audit 2026-09-27 B-9, first half).
+- A note that states no source authority ranks as inferred, as the contract says (audit 2026-09-27 C-15).
+- The HTTP guard passes lifespan events, closes websockets with 1008 and compares bearer tokens as bytes, so a non-ASCII token is a 401, not a 500 (audit 2026-09-27 C-14).
+- Doctor names a writer that holds the writer gate past its lease while its process lives, the state a given-up release leaves behind (audit 2026-09-27 C-3).
+- A day archive split into parts is checked against the part table it recorded, so changing the split rule no longer orphans old archives (audit 2026-09-27 B-17).
+- The documents say that doctor without `--repair` creates and removes one temporary file for its locking probe, and a test requires every other entry unchanged (audit 2026-09-27 C-1).
+- Doctor names a weekly pass that never ran since it became due, or that started and left no result past its scheduler limit (audit 2026-09-27 B-15).
+- Doctor counts every dead queue task until it is redriven or exported, and shows the oldest age (audit 2026-09-27 B-13).
+- Every stored instant is written by one function, `iso_time.utc_text`, and a test refuses another copy (audit 2026-09-27 C-18).
+- An unchanged state is neither linked nor rewritten, so `state.json.previous` is always a separate copy of the version before the last change (audit 2026-09-27 C-20).
+- A reclaim sweep names a file it could not remove and stops its knowledge walk at the step's deadline instead of a count with no basis (audit 2026-09-27 C-2, C-3).
+- No function in the adapter or the contradiction pipeline holds more than two `if` statements (audit 2026-09-27, law 5).
+- A hook input that cannot be read, a failed prompt counter and a failed maintenance or compile start are recorded instead of lost (audit 2026-09-27 C-3).
+- Both capture recovery passes look past records they cannot finish, and compare stored times at one width (audit 2026-09-27 C-4).
+- A capture decision has one size limit for its writer and every reader (audit 2026-09-27 B-3).
+- The redactor catches Google, Telegram, Slack-webhook and URL-parameter secrets, `sshpass -p` and `docker login -p`, and a PEM key without its END line, and no rule is quadratic (audit 2026-09-27 B-4, B-6).
+- Secrets are redacted before any text is cut, so a cut can no longer leave half a token visible (audit 2026-09-27 B-4).
+- A text block written to a daily log opens exactly one entry; a forged heading inside a captured path or preview is escaped (audit 2026-09-27 B-5).
+- Structured data is redacted as structure: a session transcript line stays JSON and loses its secret instead of being broken and dropped, a value under a secret-named key is blanked in event payloads too, and one walker serves the queue, the blackboard, events and transcripts (audit 2026-09-27 A-4).
+- Impact analysis splits a changed file into its edits with Git's own diff in a child that a deadline or a cancel stops, not an in-process quadratic match: a reformatted 7 000-line file takes 0.02 s instead of running past 110 s (audit 2026-09-27 A-5, my regression from B-8).
+- The 90-day history prune keeps every row that shows a quarantine was resolved (a retry of the same request, the parent chain, a commit of the same created file), so it no longer turns doctor permanently red; it deletes in short committed slices until the step's deadline and says when it is unfinished (audit 2026-09-27 A-6, B-1).
+- Five released changelog sections no longer carry a 2026-09-26 line copied into them by mistake, and a test refuses any entry that appears in two sections (audit 2026-09-27 B-18).
+- One compile batch that fails no longer stops the run: its failure is recorded against its sources, the later batches still run, and the run exits 1 at the end (audit 2026-09-27 A-3).
+- A compile plan whose evidence names a project validates and publishes again: validation drops the derived `project` field and derives it from the quoted blocks, so validating twice gives the same operation and a model cannot set it (audit 2026-09-27 A-2, my regression from B-14).
 - The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 - The CI installer job checks the installed vault in the `.venv` the install built, as the scheduler does, and a test refuses an installing job that points uv elsewhere; the Windows task check reads its hour limits through a function, so it works for any caller.
 - No test gives work it expects to finish a literal few-second deadline: 572 of them name the shared scaled timeout, and a guard refuses a new one outside a test about time running out; a full run had failed on one under load.
@@ -773,7 +841,6 @@ the legacy index files are no longer read (see Removed).
   unaffected — any agent that speaks MCP can still use the vault.
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 
 - **The health and context resources are readable.** The server's read handler
   returned the protocol model `TextResourceContents` where the MCP SDK 1.29
@@ -1558,7 +1625,6 @@ state, including everything found and fixed during the audit week.
   deterministic rendering, and precise MCP routing.
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 
 - Bound untrusted LSP runtime JSON nesting before decoding, independently of the
   process-wide Python recursion limit changed by optional dependencies.
@@ -1777,7 +1843,6 @@ open findings as of the final audit pass.
 ## [3.3.3] — 2026-07-10
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 - **GitHub Actions Gitleaks** — upgraded to the Node 24 `v3.0.0` action pinned by immutable commit SHA. The previous action attempted to download the removed Gitleaks 8.24.3 Windows archive and failed before tests ran.
 
 ### Tests
@@ -1789,7 +1854,6 @@ open findings as of the final audit pass.
 ## [3.3.2] — 2026-07-09
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 - **Three-zone layout hardening** — removed machine-local `D:\projects\` / `D:\tools-agent\` paths from public `AGENTS.md` + `CLAUDE.md` (they leaked the author's disk layout into a public repo)
 - **maybe_compile PID race** — placeholder PID-0 lock is now treated as "alive", preventing a concurrent-spawn race during the detached-spawn window
 - **agent_timeline breadcrumb regex** — now matches the real writer format (`tool | sid | slug | tool\` target`); tool-event attribution was silently dead
@@ -1845,7 +1909,6 @@ open findings as of the final audit pass.
 - Benchmark scans flat notes (reproducible on public tree)
 
 ### Fixed
-- The code-navigation benchmark names why an ownership scenario measured nothing (`raced`, or the exception and its cause) in its report, so an intermittent gate failure on Windows CI can be diagnosed; the cause of the 2026-09-26 failure is not yet known.
 - Path traversal via LLM `category`; Codex wrapper `exit` killing shell; flush `--event` mapping
 - OpenCode timestamp format (`[HH:MM:SS]`); broken QA dir; lint double-scan / wrong index path
 - Doc falsehoods (test counts, install URLs); tracked wikilinks (0 missing)

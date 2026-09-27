@@ -65,7 +65,7 @@ def test_the_spawner_keeps_the_token_when_it_records_the_child(lock_file) -> Non
 
 def test_the_spawn_command_names_the_lock_token(lock_file, monkeypatch) -> None:
     commands: list[list[str]] = []
-    monkeypatch.setattr(maybe_compile, "_has_pending_work", lambda: True)
+    monkeypatch.setattr(maybe_compile, "_has_pending_work", lambda *_args: True)
     monkeypatch.setattr(
         maybe_compile,
         "spawn_detached",

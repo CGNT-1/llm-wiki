@@ -5,6 +5,7 @@ Research: `docs/research/2026-09-17-the-installer-says-what-it-needs-and-what-it
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ TESTS = Path(__file__).resolve().parent
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
+from powershell_literal import ps_literal  # noqa: E402
 from test_installer_bootstrap import (  # noqa: E402
     _bash,
     _powershell_functions,
@@ -29,10 +31,35 @@ needs_bash = pytest.mark.skipif(_bash() is None, reason="bash is not installed")
 needs_pwsh = pytest.mark.skipif(_pwsh() is None, reason="PowerShell is not installed")
 
 
+# The helpers a function under test calls, loaded with it.
+_HELPERS = {"fetch_pinned_checkout": ("pinned_fetch", "pinned_branch")}
+
+
+# `uv run ... python <vault>/scripts/<helper> <args>` becomes this Python running the
+# repository's own helper: the checkouts under test are bare git trees, not vaults.
+UV_STUB_SH = (
+    "uv() {\n"
+    "  while [[ $# -gt 0 && $1 != python ]]; do shift; done\n"
+    '  local helper="$TEST_SCRIPTS/${2##*/}"\n'
+    "  shift 2\n"
+    '  command "$TEST_PYTHON" "$helper" "$@"\n'
+    "}\n"
+)
+UV_STUB_PS1 = (
+    "function uv {\n"
+    "    $at = [array]::IndexOf($args, 'python')\n"
+    "    $helper = Join-Path $env:TEST_SCRIPTS (Split-Path -Leaf $args[$at + 1])\n"
+    "    & $env:TEST_PYTHON $helper @($args | Select-Object -Skip ($at + 2))\n"
+    "}\n"
+)
+STUB_ENV = {**os.environ, "TEST_PYTHON": sys.executable, "TEST_SCRIPTS": str(TESTS.parent / "scripts")}
+
+
 def _call(name: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    script = f"set -euo pipefail\n{_shell_function(INSTALL_SH, name)}\n{name} \"$@\"\n"
+    functions = "\n".join(_shell_function(INSTALL_SH, part) for part in (*_HELPERS.get(name, ()), name))
+    script = f"set -euo pipefail\n{UV_STUB_SH}{functions}\n{name} \"$@\"\n"
     return subprocess.run(
-        [_bash(), "-c", script, name, *arguments], capture_output=True, text=True, check=False
+        [_bash(), "-c", script, name, *arguments], capture_output=True, text=True, check=False, env=STUB_ENV
     )
 
 
@@ -92,37 +119,8 @@ def test_an_existing_checkout_is_named_with_the_way_forward(tmp_path: Path) -> N
     assert (f'bash "{tmp_path}/install.sh"' in advice[0], "move it away" in advice[1]) == (True, True)
 
 
-def _claude_config(tmp_path: Path, servers: dict[str, object] | None) -> Path:
-    path = tmp_path / "claude.json"
-    if servers is not None:
-        path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
-    return path
-
-
-@needs_bash
-@pytest.mark.parametrize(
-    ("servers", "expected"),
-    [
-        (None, "missing"),
-        ({}, "absent"),
-        ({"llm-wiki": {"args": ["run", "--directory", "/vault", "python"]}}, "current"),
-        ({"llm-wiki": {"args": ["run", "--directory", "/old-vault", "python"]}}, "elsewhere"),
-    ],
-)
-def test_the_claude_entry_is_read_not_assumed(tmp_path, servers, expected) -> None:
-    result = _call("claude_mcp_state", str(_claude_config(tmp_path, servers)), "/vault")
-
-    assert result.stdout.strip() == expected
-
-
-@needs_bash
-def test_an_unreadable_claude_file_is_not_called_active(tmp_path: Path) -> None:
-    broken = tmp_path / "claude.json"
-    broken.write_text("{not json", encoding="utf-8")
-
-    state = _call("claude_mcp_state", str(broken), "/vault").stdout.strip()
-
-    assert (state, "active automatic" in _call("claude_status_line", state).stdout) == ("unreadable", False)
+# What the Claude entry reads as, in both installers, is asked of
+# tests/test_both_installers_read_the_claude_file_alike.py.
 
 
 def _git(directory: Path, *arguments: str) -> None:
@@ -151,17 +149,17 @@ def test_a_pinned_checkout_is_told_it_will_not_update(checkout: Path) -> None:
 def test_the_windows_installer_says_the_same(checkout: Path, tmp_path: Path) -> None:
     names = ("Get-PinnedCheckout", "Get-ExistingTargetAdvice", "Get-CodeUpdateNote")
     target = tmp_path / "LLM-wiki"
-    command = _powershell_functions(ROOT / "install.ps1", names) + (
-        f"$fetched = Get-PinnedCheckout -Target {json.dumps(str(target))} "
-        f"-Url {json.dumps(str(tmp_path / 'no-such-repository'))} -Commit {'a' * 40} 6>$null 2>$null\n"
-        f"$note = Get-CodeUpdateNote {json.dumps(str(checkout))}\n"
-        f"$advice = Get-ExistingTargetAdvice {json.dumps(str(checkout))}\n"
+    command = UV_STUB_PS1 + _powershell_functions(ROOT / "install.ps1", names) + (
+        f"$fetched = Get-PinnedCheckout -Target {ps_literal(str(target))} "
+        f"-Url {ps_literal(str(tmp_path / 'no-such-repository'))} -Commit {'a' * 40} 6>$null 2>$null\n"
+        f"$note = Get-CodeUpdateNote {ps_literal(str(checkout))}\n"
+        f"$advice = Get-ExistingTargetAdvice {ps_literal(str(checkout))}\n"
         "ConvertTo-Json -Compress @([bool]$fetched, $note.Contains('pinned'), $advice.Contains('move it away'))\n"
     )
 
     result = subprocess.run(
         [_pwsh(), "-NoProfile", "-NonInteractive", "-Command", command],
-        capture_output=True, text=True, timeout=120, check=False,
+        capture_output=True, text=True, timeout=120, check=False, env=STUB_ENV,
     )
 
     assert result.returncode == 0, result.stderr

@@ -241,31 +241,33 @@ def test_the_refusal_evidence_keeps_its_identifiers(monkeypatch):
 
 def test_a_budget_trims_rows_and_says_how_many_it_dropped(monkeypatch):
     _architecture(monkeypatch, _query_answer(rows=40))
-    data = _call("get_architecture", {**_QUERY_ARGUMENTS, "budget_tokens": 120})
+    data = _call("get_architecture", {**_QUERY_ARGUMENTS, "budget_tokens": 240})
     report = data["answer_budget"]
     assert report["truncated"] is True
     assert len(data["nodes"]) + report["rows_omitted"] == 40
-    assert report["body_tokens"] <= 120 - answer_budget.REPORT_TOKEN_ALLOWANCE
+    assert report["body_tokens"] <= 240 - answer_budget.REPORT_TOKEN_ALLOWANCE
 
 
 def test_a_trimmed_answer_actually_fits_the_budget_it_was_given(monkeypatch):
     """The budget block is part of the answer, so it is part of the promise."""
     _architecture(monkeypatch, _query_answer(rows=40))
-    data = _call("get_architecture", {**_QUERY_ARGUMENTS, "budget_tokens": 120})
-    assert answer_budget.estimate_tokens(data) <= 120
+    data = _call("get_architecture", {**_QUERY_ARGUMENTS, "budget_tokens": 240})
+    assert answer_budget.estimate_tokens(data) <= 240
 
 
 def test_the_budget_drops_the_derivable_field_before_a_row(monkeypatch):
     """`owner` is recoverable from `path`; a row is not recoverable at all.
 
-    260 is measured, not chosen: this fixture costs 249 tokens once the hashes
-    and the constant `kind` column are out and 191 once `owner` goes too, so a
-    budget in [239, 297) is exactly the window where dropping the derivable
-    field is both necessary and sufficient. The old 300 sat above the window,
-    which is why this test stopped exercising the step it names.
+    520 is measured, not chosen: at the measured 2 bytes per token this fixture
+    costs ~498 tokens once the hashes and the constant `kind` column are out and
+    ~382 once `owner` goes too, so with the 96-token report allowance a budget in
+    [478, 594) is exactly the window where dropping the derivable field is both
+    necessary and sufficient (swept 2026-09-27; it was [239, 297) and 260 under
+    the earlier 4-bytes estimate). The old 300 sat above that window, which is
+    why this test once stopped exercising the step it names.
     """
     _architecture(monkeypatch, _query_answer(rows=8))
-    data = _call("get_architecture", {**_QUERY_ARGUMENTS, "budget_tokens": 260})
+    data = _call("get_architecture", {**_QUERY_ARGUMENTS, "budget_tokens": 520})
     report = data["answer_budget"]
     assert report["omitted_fields"] == ["node_id", "owner"]
     assert len(data["nodes"]) == 8

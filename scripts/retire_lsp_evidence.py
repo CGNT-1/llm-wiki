@@ -19,7 +19,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 KEEP_NEWEST = 20
+# The 14 days of the LSP evidence contract (CLAUDE.md: the nightly retires failure roots older than 14 days).
 MAX_AGE_DAYS = 14.0
+# One retirement scan's budget, shared by retire_own_call_transcripts. basis unknown — value predates measurement; review when a scan ends unfinished.
 SCAN_BUDGET_SECONDS = 20.0
 
 

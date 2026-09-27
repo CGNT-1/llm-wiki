@@ -22,6 +22,9 @@ SCHEMA_VERSION = "repository-scope/v1"
 # written for, not the machine's speed. Research:
 # `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
 GIT_TIMEOUT_SECONDS = 10.0
+# The scope probe's git output is a handful of paths and object ids from `rev-parse`;
+# each path is bounded by PATH_MAX (4 096 bytes on Linux, limits.h), so 8 KiB holds
+# the answer and anything larger is refused as not git's answer.
 MAX_GIT_OUTPUT_BYTES = 8192
 MAX_PATH_LENGTH = 4096
 
@@ -81,6 +84,13 @@ _LOCAL_GIT_ENVIRONMENT_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 # every index refresh (`status`, `ls-files`, `worktree remove`). See
 # `docs/research/2026-09-14-a-repository-read-runs-no-config-command.md`.
 GIT_NO_CONFIG_COMMANDS = ("-c", "core.fsmonitor=false")
+
+# One local git call a script waits for. Measured 2026-09-27: `git archive` of this
+# whole repository, the slowest local call the scripts make, took 0.93 s (7.6 MB);
+# 60 s is the bound the nightly update already gives one git call. A hung git (a
+# lock, a filesystem that stopped answering) now ends instead of holding its caller
+# (audit 2026-09-27 C-9, docs/research/2026-09-27-every-child-a-script-waits-for-has-a-deadline.md).
+LOCAL_GIT_TIMEOUT_SECONDS = 60.0
 
 
 def sanitized_git_environment() -> dict[str, str]:

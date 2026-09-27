@@ -32,7 +32,7 @@ class _Empty:
 
 
 def test_the_lists_name_the_items_without_repeating_their_text() -> None:
-    trace = SimpleNamespace(retrieval=_Empty(), materializations=(), packing=_Empty())
+    trace = SimpleNamespace(retrieval=_Empty(), materializations=(), packing=SimpleNamespace(dropped=()))
     page = CompiledItem(
         item_id="a" * 8, text="text of " + "a" * 8, source="knowledge/notes/a.md", parent_id="p", representation="l2",
         heading_path=(), byte_start=0, byte_end=1, source_sha256="0" * 64, project=None, type="concept",
@@ -44,4 +44,4 @@ def test_the_lists_name_the_items_without_repeating_their_text() -> None:
 
     result = mcp_server._context_result(compiled, snapshot, selection, 100, None)
 
-    assert ("text" in result["pages"][0], result["text"]) == (False, "text of " + "a" * 8)
+    assert ("text" in result["items"][0], result["text"]) == (False, "text of " + "a" * 8)

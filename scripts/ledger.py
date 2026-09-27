@@ -58,7 +58,6 @@ MAX_KIND_CHARS = 40
 MAX_THING_CHARS = 120
 # One ledger event's text; a temporal anchor keeps up to 220 characters.
 MAX_EVENT_CHARS = 120
-MAX_RECORDS_PER_TURN = 8
 MAX_PAGES_PER_RUN = 20
 CONFIRMED = "confirmed"
 PROBABLE = "probable"
@@ -299,10 +298,13 @@ def _record_items(value: object) -> list[object]:
     """The `records` list of one turn's reply value; a list-shaped reply carries none."""
     if not isinstance(value, Mapping):
         return []
+    # Every record is kept: the ledger exists so code counts things, and a cap of
+    # eight per turn made a count come out low. The reply is bounded by the call's
+    # max_tokens. docs/research/2026-09-27-a-cut-says-what-it-left-out.md
     items = value.get("records")
     if not isinstance(items, list):
         return []
-    return items[:MAX_RECORDS_PER_TURN]
+    return items
 
 
 def _posted_once(records: Iterable[Record | None]) -> list[Record]:

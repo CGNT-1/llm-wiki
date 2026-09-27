@@ -97,6 +97,9 @@ PROTECTED_FIELDS = frozenset(
     }
 )
 
+# How deep identity stripping walks an answer; below it values stay as they are, which costs
+# tokens, never correctness. Basis unknown: value predates measurement; review when an answer
+# nests deeper than six levels.
 _MAX_DEPTH = 6
 
 # The budget block has to fit inside the budget too, or the answer would
@@ -104,8 +107,10 @@ _MAX_DEPTH = 6
 # the body's budget rather than measured after the fact, because measuring it
 # after the fact is circular - its own size changes when the size it reports
 # changes. Worst observed block is ~150 characters; the allowance is generous
-# on purpose and `tests/test_answer_budget.py` holds it to the promise.
-REPORT_TOKEN_ALLOWANCE = 48
+# on purpose and `tests/test_answer_budget.py` holds it to the promise. It keeps
+# the 192 bytes it held under the earlier 4-bytes estimate (48 tokens then): at
+# the measured 2 bytes per token 48 would no longer cover a 150-byte block.
+REPORT_TOKEN_ALLOWANCE = 96
 
 _TOO_SMALL_NOTE = (
     "the reduced answer still exceeds the budget; nothing was returned rather "
@@ -113,13 +118,28 @@ _TOO_SMALL_NOTE = (
 )
 
 
-def estimate_tokens(data) -> int:
-    """`len // 4`, the same approximation `benchmark/run_code_parity.py` uses.
+# A token of this vault's Markdown costs 2.3-4.0 UTF-8 bytes on the provider it uses
+# (median 2.6 English, 3.1 Russian), measured 2026-09-27 from provider-reported usage;
+# tiktoken's "about 4 bytes" is an English average and undercounted these answers
+# 1.3-1.7x. A budget is a ceiling, so the estimate takes the side that never
+# undercounted a measured sample. Bytes, not characters: a Cyrillic character is two
+# bytes. Rerun the measurement when the provider's tokenizer changes. See
+# docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md.
+BYTES_PER_TOKEN = 2
+
+
+def estimate_text_tokens(text: str) -> int:
+    """The one estimate of what a text costs a model: UTF-8 bytes / BYTES_PER_TOKEN, rounded up.
 
     Not a tokenizer. A real count needs a network round trip and an API key,
     which do not belong on a local, offline answer path.
     """
-    return len(_serialized(data)) // 4
+    return -(-len(text.encode("utf-8")) // BYTES_PER_TOKEN)
+
+
+def estimate_tokens(data) -> int:
+    """The estimate of an answer: `estimate_text_tokens` of its serialized form."""
+    return estimate_text_tokens(_serialized(data))
 
 
 def _serialized(data) -> str:

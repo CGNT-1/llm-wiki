@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
+from bounded_io import IO_CHUNK_BYTES
 from interruption import (
     exception_reaches as _exception_reaches,
 )
@@ -49,21 +50,35 @@ if os.name == "nt":
     _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _KERNEL32.CloseHandle.restype = wintypes.BOOL
 
+# One JSON-RPC frame: a project constraint of the 2026-07-22 Pyright plan
+# (docs/superpowers/plans/2026-07-22-python-pyright-navigation.md, "8 MiB frames"). An oversized
+# reply fails its request, not the server. Not measured against real replies.
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 # A frame over MAX_FRAME_BYTES and up to this is consumed and refused, not fatal
 # (audit C-38, docs/research/2026-09-25-an-oversized-reply-fails-its-request-not-its-server.md).
 MAX_SKIPPED_FRAME_BYTES = 256 * 1024 * 1024
-_SKIP_CHUNK_BYTES = 64 * 1024
+# One read while draining an oversized frame; the shared I/O step size (bounded_io).
+_SKIP_CHUNK_BYTES = IO_CHUNK_BYTES
+# The bytes kept from each end of a refused oversized frame, enough for the
+# `"jsonrpc":"2.0","id":…` of either field order (`_oversized_response_id`); the frame
+# itself is refused whole, so nothing is cut from an answer.
 _FRAME_EDGE_BYTES = 256
 _HEAD_RESPONSE_ID = re.compile(rb'\A\s*\{\s*(?:"jsonrpc"\s*:\s*"2\.0"\s*,\s*)?"id"\s*:\s*(\d{1,15})\s*,')
 _TAIL_RESPONSE_ID = re.compile(rb'[,{]\s*"id"\s*:\s*(\d{1,15})\s*\}\s*\Z')
+# LSP headers are two short lines (Content-Length, Content-Type); 8 KiB refuses a
+# peer that never ends its header block. Security bound on untrusted input.
 MAX_HEADER_BYTES = 8 * 1024
+# Requests in flight to one server: 32, from the 2026-07-22 Pyright plan ("32 outstanding
+# requests"); the write queue and tombstones are sized from it.
 MAX_PENDING_REQUESTS = 32
 # Locations one LSP reply may carry before it is refused as unbounded; the answer joiners keep 5.
 MAX_LOCATIONS = 10_000
+# Plan constraints of 2026-07-22: 10 000 diagnostics per publication, 256 KiB of hover text and
+# JSON nesting 64. A reply past them is refused, not cut. Not measured against real replies.
 MAX_DIAGNOSTICS = 10_000
 MAX_HOVER_BYTES = 256 * 1024
 MAX_JSON_DEPTH = 64
+# A cancelled request's late answer is drained for 2 s (docs/superpowers/plans/2026-07-23-lsp-cancellation-token.md).
 CANCEL_DRAIN_GRACE_SECONDS = 2.0
 METHOD_NOT_FOUND = -32601
 
@@ -96,16 +111,30 @@ _FLAT_SEMANTIC_RESULT_METHODS = frozenset(
         "workspace/symbol",
     }
 )
+# LSP 3.17 base type `integer`: "a signed integer number in the range of -2^31 to 2^31 - 1".
 _JSON_RPC_INTEGER_MIN = -(2**31)
 _JSON_RPC_INTEGER_MAX = 2**31 - 1
 _TOMBSTONE_LIMIT = MAX_PENDING_REQUESTS * 4
+# How often a repeated CancelSynchronousIo checks its owner left (docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md).
 _CANCELLATION_POLL_SECONDS = 0.01
 _UNKNOWN_NOTIFICATION_WARNING = "dropped unknown server notification"
 _MAX_JSON_VALUES = MAX_FRAME_BYTES // 2
 _MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
 _MAX_ORDINARY_WRITES = _MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
+# Deadline for a write the protocol sends on its own ($/cancelRequest, error replies). basis unknown — value predates measurement; review when internal writes time out on a healthy server.
 _INTERNAL_WRITE_SECONDS = 1.0
+# close() waits this long for its reader and writer threads, then raises TimeoutError instead of hanging
+# (docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md).
 _OWNER_JOIN_SECONDS = 1.0
+# On Windows a pipe stream is a C-runtime descriptor: the UCRT's `_read` holds the
+# descriptor's lock for the whole blocking `ReadFile`, and `_close` takes the same lock,
+# so closing a stream its owner is still reading waits for that read forever. A cancel
+# issued before the read began finds nothing (ERROR_NOT_FOUND) and is lost. See
+# docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md.
+_CLOSE_WAITS_FOR_A_READ = os.name == "nt"
+# Windows `select()` accepts only sockets, so the reader waits on a pipe in one blocking
+# read instead of polling it; that read is what `_CLOSE_WAITS_FOR_A_READ` waits on.
+_PIPES_HAVE_NO_SELECT = os.name == "nt"
 
 
 class ProtocolViolation(RuntimeError):
@@ -249,9 +278,16 @@ class _WriteTask:
 
 
 def _descriptor_of(stream: BinaryIO) -> int | None:
+    """The stream's descriptor, or None when it has none or is already closed.
+
+    A closed stream raises ValueError, not OSError ("Once the file is closed, any
+    operation on the file ... will raise a ValueError", io docs). On Windows the owner
+    thread closes its own stream, so close() met one already closed and every LSP
+    close on Windows CI failed (run 36327902173).
+    """
     try:
         return stream.fileno()
-    except (AttributeError, OSError):
+    except (AttributeError, OSError, ValueError):
         return None
 
 
@@ -277,7 +313,7 @@ class _OwnedReader:
         self._stopped = stopped
 
     def read(self, size: int = -1) -> bytes:
-        if os.name == "nt":
+        if _PIPES_HAVE_NO_SELECT:
             return self._stream.read(size)
         descriptor = _descriptor_of(self._stream)
         if descriptor is None:
@@ -811,9 +847,20 @@ def _startup_interruption_source(startup_error, cleanup_interruption, cleanup_er
         return startup_error
     if cleanup_interruption is not None:
         return cleanup_interruption
-    for error in cleanup_errors:
-        if _interruption_in_chain(error) is not None:
-            return error
+    return _first_interrupted(cleanup_errors)
+
+
+def _first_interrupted(errors):
+    """The first error whose chain carries an interruption, or None."""
+    return next((error for error in errors if _interruption_in_chain(error) is not None), None)
+
+
+def _server_request_result(handler, method: str, message: dict[str, Any]):
+    """A registered handler's answer; an unhandled configuration request gets `[]`, any other None."""
+    if handler is not None:
+        return handler(message.get("params"))
+    if method == "workspace/configuration":
+        return []
     return None
 
 
@@ -984,6 +1031,27 @@ def _owner_never_started(owner: threading.Thread) -> bool:
     return owner.ident is None and owner not in threading.enumerate()
 
 
+def _socket_backed(stream: BinaryIO) -> bool:
+    """A socket under the stream: its read waits on no C-runtime descriptor lock.
+
+    A Winsock `shutdown` only disallows *subsequent* receives (Microsoft,
+    shutdown function), and a socket with an open `makefile` is not really
+    closed until that file is; so the only way to wake a blocked socket read is
+    to close the stream, as before the Windows owner rule (CI run 36334525135).
+    """
+    return any(getattr(layer, "_sock", None) is not None for layer in LspProtocol._stream_layers(stream))
+
+
+def _fd_stream_held(stream: BinaryIO) -> bool:
+    """On Windows a descriptor-backed pipe read holds the CRT lock that close() waits on."""
+    return _CLOSE_WAITS_FOR_A_READ and _descriptor_of(stream) is not None and not _socket_backed(stream)
+
+
+def _owner_holds_stream(owner: threading.Thread, stream: BinaryIO) -> bool:
+    """A live owner is inside the pipe's read or write; only it may close it."""
+    return _fd_stream_held(stream) and owner is not threading.current_thread() and owner.is_alive()
+
+
 def _owner_present(owner: threading.Thread) -> bool:
     return owner.ident is not None or owner in threading.enumerate()
 
@@ -1123,8 +1191,8 @@ class LspProtocol:
         self._io_stopped.set()
         self._put_stop_sentinel()
         self._cancel_started_owners_io()
-        self._interrupt_stream(self._reader)
-        self._interrupt_stream(self._writer)
+        self._interrupt_unowned_streams()
+        self._cancel_until_owners_stop(startup_deadline)
         cleanup_errors, cleanup_interruption = self._join_owners_after_failed_start(startup_deadline)
         if not cleanup_errors:
             _raise_collected_errors((startup_error,))
@@ -1295,9 +1363,34 @@ class LspProtocol:
         self._io_stopped.set()
         self._cancel_owner_io(self.reader_thread)
         self._cancel_owner_io(self.writer_thread)
-        self._interrupt_stream(self._reader)
-        self._interrupt_stream(self._writer)
+        self._interrupt_unowned_streams()
         self._put_stop_sentinel()
+
+    def _interrupt_unowned_streams(self) -> None:
+        self._interrupt_unowned(self._reader, self.reader_thread)
+        self._interrupt_unowned(self._writer, self.writer_thread)
+
+    def _interrupt_unowned(self, stream: BinaryIO, owner: threading.Thread) -> None:
+        """Close a stream nobody is inside; a live Windows owner closes its own on exit."""
+        if _owner_holds_stream(owner, stream):
+            self._shutdown_stream_sockets(stream)
+            return
+        self._interrupt_stream(stream)
+
+    def _cancel_until_owners_stop(self, deadline: float) -> None:
+        self._cancel_until_stopped(self.reader_thread, self._reader, deadline)
+        self._cancel_until_stopped(self.writer_thread, self._writer, deadline)
+
+    def _cancel_until_stopped(self, owner: threading.Thread, stream: BinaryIO, deadline: float) -> None:
+        """Re-issue the cancel until the owner leaves its call, never past the deadline.
+
+        One cancel sent before the owner's `ReadFile` or `WriteFile` began finds nothing
+        and is lost; the owner then blocks until the peer writes, which for a closed
+        conversation is never. Each retry waits on the owner's exit, not on a clock.
+        """
+        while _owner_holds_stream(owner, stream) and time.monotonic() < deadline:
+            self._cancel_owner_io(owner)
+            owner.join(_CANCELLATION_POLL_SECONDS)
 
     def _reset_write_accounting(self) -> None:
         with self._state_lock:
@@ -1316,6 +1409,7 @@ class LspProtocol:
         deadline = _close_deadline(deadline)
         self._close_logically()
         self._stop_io()
+        self._cancel_until_owners_stop(deadline)
         self._join_owners(deadline)
         self._reset_write_accounting()
         self._drain_write_queue()
@@ -1580,12 +1674,16 @@ class LspProtocol:
         if generation_nonce != self.generation_nonce:
             return
         if "method" in message:
-            if "id" in message:
-                self._handle_server_request(message)
-            else:
-                self._handle_server_notification(message)
+            self._handle_server_message(message)
             return
         self._handle_response(message, generation_nonce)
+
+    def _handle_server_message(self, message: dict[str, Any]) -> None:
+        """A message the server started: a request carries an id, a notification does not."""
+        if "id" in message:
+            self._handle_server_request(message)
+            return
+        self._handle_server_notification(message)
 
     def _store_response_locked(
         self, pending: PendingRequest, message: dict[str, Any]
@@ -1655,12 +1753,16 @@ class LspProtocol:
             self._become_fatal(str(violation), cause=violation)
 
     def _validate_result(self, method: str, result: object) -> None:
-        if method in _FLAT_SEMANTIC_RESULT_METHODS:
-            _require_location_count(result)
-        elif method == "textDocument/documentSymbol":
-            self._validate_document_symbol_count(result)
+        self._validate_result_count(method, result)
         if method == "textDocument/hover":
             _require_hover_size(result)
+
+    def _validate_result_count(self, method: str, result: object) -> None:
+        if method in _FLAT_SEMANTIC_RESULT_METHODS:
+            _require_location_count(result)
+            return
+        if method == "textDocument/documentSymbol":
+            self._validate_document_symbol_count(result)
 
     @staticmethod
     def _validate_document_symbol_count(result: object) -> None:
@@ -1684,12 +1786,7 @@ class LspProtocol:
             return
         handler = self._server_request_handlers.get(method)
         try:
-            if handler is not None:
-                result = handler(message.get("params"))
-            elif method == "workspace/configuration":
-                result = []
-            else:
-                result = None
+            result = _server_request_result(handler, method, message)
             self._write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
         except BaseException:
             self._write_message(
@@ -1796,12 +1893,16 @@ class LspProtocol:
             self._pending.pop(key, None)
             self._remember_key(key, self._cancelled_keys, self._cancelled_order)
         else:
-            pending.drain_deadline = terminal_at + CANCEL_DRAIN_GRACE_SECONDS
-            if self._drain_wake is not None:
-                self._drain_wake.set()
-            if pending.write_phase == "sent":
-                self._enqueue_cancel_locked(pending)
+            self._schedule_drain_locked(pending, terminal_at)
         pending.completed.set()
+
+    def _schedule_drain_locked(self, pending: PendingRequest, terminal_at: float) -> None:
+        """A request already written drains until its grace ends; a sent one is cancelled."""
+        pending.drain_deadline = terminal_at + CANCEL_DRAIN_GRACE_SECONDS
+        if self._drain_wake is not None:
+            self._drain_wake.set()
+        if pending.write_phase == "sent":
+            self._enqueue_cancel_locked(pending)
 
     def _enqueue_cancel_locked(self, pending: PendingRequest) -> None:
         if pending.cancel_enqueued:
@@ -1993,6 +2094,11 @@ class LspProtocol:
         return tuple(layers)
 
     @classmethod
+    def _shutdown_stream_sockets(cls, stream: BinaryIO) -> None:
+        for layer in cls._stream_layers(stream):
+            _shutdown_socket(getattr(layer, "_sock", None))
+
+    @classmethod
     def _interrupt_stream(cls, stream: BinaryIO) -> None:
         for layer in reversed(cls._stream_layers(stream)):
             _shutdown_socket(getattr(layer, "_sock", None))
@@ -2155,14 +2261,17 @@ class LspProtocol:
         if os.name != "nt":
             return
         with self._owner_handle_lock:
-            handle = self._os_handle_locked(name)
-            if handle is None:
-                return
-            if not _KERNEL32.CloseHandle(handle):
-                self._owner_release_errors[name] = ctypes.WinError(ctypes.get_last_error())
-                return
-            self._owner_release_errors.pop(name, None)
-            self._clear_os_handle_locked(name)
+            self._release_owner_locked(name)
+
+    def _release_owner_locked(self, name: str) -> None:
+        handle = self._os_handle_locked(name)
+        if handle is None:
+            return
+        if not _KERNEL32.CloseHandle(handle):
+            self._owner_release_errors[name] = ctypes.WinError(ctypes.get_last_error())
+            return
+        self._owner_release_errors.pop(name, None)
+        self._clear_os_handle_locked(name)
 
     def _record_cancel_outcome_locked(self, name: str, cancelled: object) -> None:
         if cancelled:

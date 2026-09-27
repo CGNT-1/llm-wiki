@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 from reliable_memory import (
     DEFAULTS,
+    MAX_CAPTURE_DECISION_BYTES,
     MigrationStatement,
     OperationalDatabaseContract,
     OperationalDatabaseContractError,
@@ -51,7 +52,7 @@ from reliable_memory import (
     sha256_bytes,
     validate_schema,
 )
-from secret_redact import redact_secrets
+from secret_redact import redact_secrets, redact_structure
 
 # A task fence's own length; a holder doing slow work renews it
 # (`heartbeat_task_fence`).
@@ -59,9 +60,12 @@ TASK_FENCE_SECONDS = 120
 _STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
+# A provider's retry-after is honoured up to a week, the one bound on that reading
+# (docs/research/2026-09-17-the-adopted-queue-waits-as-long-as-it-was-told.md).
 _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
 _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
+# Ceiling on a task's configured attempts and on its attempt history. basis unknown — value predates measurement; review when a task reaches it in normal operation.
 _MAX_RUNTIME_ATTEMPTS = 100
 _MAX_QUEUE_PAYLOAD_BYTES = 1024 * 1024
 _MAX_QUEUE_DEPTH = 32
@@ -72,22 +76,6 @@ _MAX_CLI_DETAIL_CHARS = 240
 _MAX_QUEUE_STRING_BYTES = 256 * 1024
 _MAX_QUEUE_CONTAINER_MEMBERS = 1024
 _QUEUE_V3_CONTRACT = OperationalDatabaseContract(application_id=0x4C575133)
-_SECRET_KEYS = {
-    "api_key",
-    "apikey",
-    "authorization",
-    "cookie",
-    "credential",
-    "credentials",
-    "pass",
-    "passwd",
-    "passphrase",
-    "password",
-    "private_key",
-    "secret",
-    "set_cookie",
-    "token",
-}
 _CAPTURE_TERMINAL_DISPOSITION_FIELDS = {
     "markdown_committed": {
         "kind",
@@ -2655,6 +2643,92 @@ def _require_indexed_capture_decision(
         raise QueueOperationError("semantic_decision_conflict")
 
 
+def _decision_sealer(
+    database: sqlite3.Connection, row: sqlite3.Row, intent_id: str, stage: str
+) -> sqlite3.Row:
+    """The seal of the task that published this decision, proven by its own digest."""
+    seal = database.execute(
+        """SELECT * FROM capture_task_link_seals
+           WHERE consumer_kind='semantic-decision' AND consumer_id=? AND active_digest=?""",
+        (f"{intent_id}:{stage}", row["active_link_digest"]),
+    ).fetchone()
+    if seal is None:
+        raise QueueOperationError("semantic_decision_conflict")
+    expected = _capture_semantic_seal_digest(
+        str(seal["task_id"]), intent_id, stage, str(row["active_link_digest"])
+    )
+    if seal["seal_digest"] != expected:
+        raise QueueOperationError("semantic_decision_conflict")
+    return seal
+
+
+def _redrive_ancestors(database: sqlite3.Connection, task_id: str) -> set[str]:
+    """Every task this one was redriven from, however deep the chain."""
+    ancestors: set[str] = set()
+    parent = _redrive_parent(database, task_id)
+    while parent is not None and parent not in ancestors:
+        ancestors.add(parent)
+        parent = _redrive_parent(database, parent)
+    return ancestors
+
+
+def _redrive_parent(database: sqlite3.Connection, task_id: str) -> str | None:
+    row = database.execute("SELECT redrive_of FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None or row["redrive_of"] is None:
+        return None
+    return str(row["redrive_of"])
+
+
+def _decision_seal_of(
+    database: sqlite3.Connection, task_id: str, intent_id: str, stage: str
+) -> sqlite3.Row | None:
+    """This task's seal to the decision, when its digest proves it."""
+    seal = database.execute(
+        """SELECT * FROM capture_task_link_seals WHERE task_id=?
+           AND consumer_kind='semantic-decision' AND consumer_id=?""",
+        (task_id, f"{intent_id}:{stage}"),
+    ).fetchone()
+    if seal is None:
+        return None
+    expected = _capture_semantic_seal_digest(task_id, intent_id, stage, str(seal["active_digest"]))
+    return seal if seal["seal_digest"] == expected else None
+
+
+def _sealed_binding(seal: sqlite3.Row, intent_id: str) -> dict[str, str]:
+    """The capture binding a Markdown transaction records for this seal."""
+    return {
+        "intent_id": intent_id,
+        "task_id": str(seal["task_id"]),
+        "active_link_digest": str(seal["active_digest"]),
+        "seal_digest": str(seal["seal_digest"]),
+    }
+
+
+def _require_inherited_capture_decision(
+    database: sqlite3.Connection,
+    sealer: sqlite3.Row,
+    active: CaptureTaskBinding,
+    *,
+    intent_id: str,
+    stage: str,
+    active_link_digest: str,
+) -> None:
+    """A decision an ancestor of this redrive sealed for the same intent.
+
+    The decision is one per intent and stage, but its seal and link belong to the
+    task that made it; a redrive re-signs the link for the child, so the child
+    could never match its parent's seal (audit 2026-09-27 B-14). A redrive keeps
+    what its ancestor already decided, as a workflow redrive keeps completed steps
+    (docs/research/2026-09-27-a-redrive-keeps-the-decision-its-parent-sealed.md).
+    """
+    own_seal = _capture_semantic_seal_digest(active.task_id, intent_id, stage, active_link_digest)
+    actual = (active.intent_id, active.active_digest, active.seal_digest in (None, own_seal))
+    if actual != (intent_id, active_link_digest, True):
+        raise QueueOperationError("semantic_decision_conflict")
+    if str(sealer["task_id"]) not in _redrive_ancestors(database, active.task_id):
+        raise QueueOperationError("semantic_decision_conflict")
+
+
 def _indexed_capture_decision_published_at(row: sqlite3.Row) -> datetime:
     published_at = _parse_timestamp(str(row["published_at"]))
     if published_at is None:
@@ -2671,7 +2745,7 @@ def _read_indexed_capture_decision(
     data = read_runtime_bytes(
         state_root / decision_path,
         state_root,
-        max_bytes=1024 * 1024,
+        max_bytes=MAX_CAPTURE_DECISION_BYTES,
         owner_only=True,
     )
     if sha256_bytes(data) != decision_sha256:
@@ -2872,22 +2946,6 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return _as_utc(datetime.fromisoformat(value)) if value is not None else None
 
 
-def _is_secret_key(key: object) -> bool:
-    """Whether this payload key names a secret; a non-string key names none.
-
-    JSON turns the other basic key types into "1", "true" and "null", so none of
-    them can spell a secret, and refusing to walk such a payload would have been
-    an `AttributeError` out of `enqueue`. See
-    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
-    """
-    if not isinstance(key, str):
-        return False
-    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
-    return normalized in _SECRET_KEYS or normalized.endswith(
-        ("_api_key", "_authorization", "_cookie", "_credential", "_password", "_secret", "_token")
-    )
-
-
 def _require_task_kind(kind: object) -> None:
     if not isinstance(kind, str) or not kind:
         raise ValueError("kind must be a non-empty bounded string")
@@ -2975,7 +3033,7 @@ def _require_enqueue_arguments(
 
 
 def _validated_payload_bytes(payload: Mapping[str, object]) -> tuple[bytes, str]:
-    payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+    payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
     input_hash = sha256_bytes(payload_bytes)
     validation = validate_payload_blob(payload_bytes, input_hash, parse=True)
     if validation.code is not None:
@@ -3118,7 +3176,7 @@ def _matching_capture_intent(
 
 
 def _validated_capture_payload(payload: Mapping[str, object]) -> tuple[bytes, str]:
-    payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+    payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
     input_hash = sha256_bytes(payload_bytes)
     if validate_payload_blob(payload_bytes, input_hash, parse=True).code is not None:
         raise ValueError("payload_hash_mismatch")
@@ -3195,21 +3253,6 @@ def _require_matching_decision_owner(
         raise ValueError("semantic decision owner does not match fences")
     if task_fence.owner != owner or intent_fence.owner != owner:
         raise ValueError("semantic decision owner does not match fences")
-
-
-def _semantic_seal_digest(
-    task_id: str, intent_id: str, stage: str, active_link_digest: str
-) -> str:
-    return sha256_bytes(
-        canonical_json_bytes(
-            {
-                "active_digest": active_link_digest,
-                "consumer_id": f"{intent_id}:{stage}",
-                "consumer_kind": "semantic-decision",
-                "task_id": task_id,
-            }
-        )
-    )
 
 
 # The stored columns a semantic decision has to agree with, in argument order.
@@ -3348,28 +3391,6 @@ def _blocked_purge(task_id: str, code: str) -> CorruptPurgeProgress:
     return _purge_progress(task_id, "", 0, 0, state="blocked", code=code)
 
 
-def _redacted_mapping(value: dict[object, object]) -> dict[object, object]:
-    """A mapping with secret-named keys blanked and every other value walked."""
-    return {
-        key: "[REDACTED]" if _is_secret_key(key) else _redact_payload(item)
-        for key, item in value.items()
-    }
-
-
-def _redacted_container(value: object) -> object | None:
-    """The redacted copy of a container, or None when the value is not one."""
-    if isinstance(value, (list, tuple)):
-        return [_redact_payload(item) for item in value]
-    if isinstance(value, dict):
-        return _redacted_mapping(value)
-    return None
-
-
-def _redact_payload(value: object) -> object:
-    if isinstance(value, str):
-        return redact_secrets(value)
-    redacted = _redacted_container(value)
-    return value if redacted is None else redacted
 
 
 def _harden_owner_only(path: Path, mode: int) -> None:
@@ -4715,13 +4736,73 @@ def _failure_is_terminal(
     return int(row["attempts"]) >= attempt_limit
 
 
+def _delete_ordinary_purge_authorizations(
+    database: sqlite3.Connection, task_ids: Sequence[str], placeholders: str
+) -> None:
+    deleted = database.execute(
+        f"""DELETE FROM task_purge_authorizations
+            WHERE task_id IN ({placeholders})""",  # noqa: S608
+        task_ids,
+    ).rowcount
+    if deleted != len(task_ids):
+        raise QueueOperationError("purge_authorization_failed")
+
+
+def _published_purge_operation(
+    database: sqlite3.Connection, task_id: str
+) -> sqlite3.Row | None:
+    """The purge operation of a task that is gone; None while the task is still here."""
+    task_exists = database.execute(
+        "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+    ).fetchone()
+    operation = database.execute(
+        "SELECT * FROM corrupt_purge_operations WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    if task_exists is not None or operation is None:
+        return None
+    if operation["state"] != "receipt-published":
+        raise QueueOperationError("corrupt_purge_completion_invalid")
+    return operation
+
+
+def _require_semantic_seal_matches(existing: sqlite3.Row, *expected: str) -> None:
+    """An existing seal is idempotent only for the same decision."""
+    if not _semantic_decision_matches(existing, *expected):
+        raise QueueOperationError("semantic_decision_conflict")
+
+
+def _require_exported_results(
+    results_export: Path, result_manifest: list[dict[str, str]]
+) -> None:
+    """Every exported result reads back with the digest its manifest names."""
+    for item in result_manifest:
+        exported = results_export / f"{item['id']}.result"
+        data = _read_stable_owner_file(exported, _MAX_RESULT_BYTES)
+        if sha256_bytes(data) != item["sha256"]:
+            raise QueueOperationError("export_verification_failed")
+
+
+def _require_error_code(failure: QueueFailure) -> None:
+    if not failure.error_code:
+        raise ValueError("error_code must be non-empty")
+
+
+def _require_positive_task_lease(lease_seconds: int) -> None:
+    if lease_seconds <= 0:
+        raise ValueError("lease must be positive")
+
+
+def _require_claim_owner_and_lease(owner: str, lease_seconds: int) -> None:
+    if not owner:
+        raise ValueError("owner must be non-empty")
+    _require_positive_task_lease(lease_seconds)
+
+
 def _check_claim_arguments(
     owner: str, lease_seconds: int, max_attempts: int
 ) -> None:
-    if not owner:
-        raise ValueError("owner must be non-empty")
-    if lease_seconds <= 0:
-        raise ValueError("lease must be positive")
+    _require_claim_owner_and_lease(owner, lease_seconds)
     _validate_retry_policy(
         max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
     )
@@ -5683,7 +5764,7 @@ class MemoryQueue:
         dedupe_key: str | None = None,
     ) -> str:
         _require_legacy_enqueue_arguments(kind, handler_version, priority, dedupe_key)
-        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+        payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
         payload_json = payload_bytes.decode("utf-8")
         input_hash = sha256_bytes(payload_bytes)
         now = _as_utc(self._clock())
@@ -5718,10 +5799,7 @@ class MemoryQueue:
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
         max_attempts: int | None = None,
     ) -> QueueLease | None:
-        if not owner:
-            raise ValueError("owner must be non-empty")
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
+        _require_claim_owner_and_lease(owner, lease_seconds)
         attempt_limit, _base, _cap = self._retry_policy(max_attempts, None, None)
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
@@ -5911,8 +5989,7 @@ class MemoryQueue:
         *,
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
     ) -> QueueLease:
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
+        _require_positive_task_lease(lease_seconds)
         now = _as_utc(self._clock())
         expires = now + timedelta(seconds=lease_seconds)
         with self._connect() as connection, begin_immediate(connection):
@@ -6068,8 +6145,7 @@ class MemoryQueue:
         retry_base_seconds: int | None = None,
         retry_cap_seconds: int | None = None,
     ) -> None:
-        if not failure.error_code:
-            raise ValueError("error_code must be non-empty")
+        _require_error_code(failure)
         attempt_limit, retry_base, retry_cap = self._retry_policy(
             max_attempts, retry_base_seconds, retry_cap_seconds
         )
@@ -6827,11 +6903,7 @@ class MemoryQueue:
         )
         if records != records_bytes:
             raise QueueOperationError("export_verification_failed")
-        for item in result_manifest:
-            exported = results_export / f"{item['id']}.result"
-            data = _read_stable_owner_file(exported, _MAX_RESULT_BYTES)
-            if sha256_bytes(data) != item["sha256"]:
-                raise QueueOperationError("export_verification_failed")
+        _require_exported_results(results_export, result_manifest)
         manifest = _read_stable_owner_file(
             staging / "manifest.json", _MAX_EXPORT_METADATA_BYTES
         )
@@ -7863,7 +7935,7 @@ class _QueueV3CandidateReader:
         capture_fence: object,
         owner: OwnerLease,
     ) -> CaptureTaskBinding:
-        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+        payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
         dedupe_key = f"capture:{intent_id}:{handler_version}"
         existing = self._capture_replay_binding(
             intent_id=intent_id,
@@ -8469,12 +8541,8 @@ class _QueueV3CandidateReader:
             ).fetchone()
             if row is None:
                 return None
-            active = self.active_capture_binding(database, task_id)
-            _require_indexed_capture_decision(
-                row,
-                active,
-                intent_id=intent_id,
-                stage=stage,
+            sealer = self._require_decision_for_task(
+                database, row, task_id, intent_id=intent_id, stage=stage,
                 active_link_digest=active_link_digest,
             )
             published_at = _indexed_capture_decision_published_at(row)
@@ -8482,15 +8550,39 @@ class _QueueV3CandidateReader:
             self.state_root, row
         )
         return SemanticDecision(
-            task_id=task_id,
+            task_id=str(sealer["task_id"]),
             intent_id=intent_id,
             stage=stage,
             decision_path=decision_path,
             decision_sha256=decision_sha256,
-            active_link_digest=active_link_digest,
-            seal_digest=active.seal_digest or "",
+            active_link_digest=str(row["active_link_digest"]),
+            seal_digest=str(sealer["seal_digest"]),
             published_at=published_at,
         )
+
+    def _require_decision_for_task(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        task_id: str,
+        *,
+        intent_id: str,
+        stage: str,
+        active_link_digest: str,
+    ) -> sqlite3.Row:
+        """The seal behind this decision, which this task made or inherited by redrive."""
+        active = self.active_capture_binding(database, task_id)
+        sealer = _decision_sealer(database, row, intent_id, stage)
+        if sealer["task_id"] == task_id:
+            _require_indexed_capture_decision(
+                row, active, intent_id=intent_id, stage=stage, active_link_digest=active_link_digest
+            )
+            return sealer
+        _require_inherited_capture_decision(
+            database, sealer, active, intent_id=intent_id, stage=stage,
+            active_link_digest=active_link_digest,
+        )
+        return sealer
 
     def _read_semantic_decision_bytes(
         self, decision_path: str, decision_sha256: str, intent_id: str, stage: str
@@ -8499,7 +8591,7 @@ class _QueueV3CandidateReader:
         data = read_runtime_bytes(
             self.state_root / decision_path,
             self.state_root,
-            max_bytes=64 * 1024,
+            max_bytes=MAX_CAPTURE_DECISION_BYTES,
             owner_only=True,
         )
         if sha256_bytes(data) != decision_sha256:
@@ -8614,7 +8706,7 @@ class _QueueV3CandidateReader:
             (intent_id, stage, task_id),
         ).fetchone()
         if existing is not None:
-            if not _semantic_decision_matches(
+            _require_semantic_seal_matches(
                 existing,
                 intent_id,
                 stage,
@@ -8622,8 +8714,7 @@ class _QueueV3CandidateReader:
                 decision_path,
                 decision_sha256,
                 active_link_digest,
-            ):
-                raise QueueOperationError("semantic_decision_conflict")
+            )
             return
         inserted = database.execute(
             """INSERT INTO capture_task_link_seals(
@@ -8698,7 +8789,7 @@ class _QueueV3CandidateReader:
         )
         now = _utc_now()
         self._require_live_worker_intent(intent_id, intent_fence, owner, now)
-        seal_digest = _semantic_seal_digest(
+        seal_digest = _capture_semantic_seal_digest(
             task_id, intent_id, stage, active_link_digest
         )
         with closing(self._connect()) as database, begin_immediate(database):
@@ -8727,6 +8818,95 @@ class _QueueV3CandidateReader:
             active_link_digest=active_link_digest,
             seal_digest=seal_digest,
             published_at=published_at,
+        )
+
+    def adopt_semantic_decision(
+        self,
+        decision: SemanticDecision,
+        *,
+        task_id: str,
+        active_link_digest: str,
+        task_fence: TaskFence,
+        intent_fence: object,
+        owner: OwnerLease,
+    ) -> None:
+        """Seal this redrive's link to the decision an ancestor already published.
+
+        Writing Markdown needs the working task's own sealed link, and a redrive has
+        none: its link was re-signed for it. The seal names the same decision and
+        adds no second one (audit 2026-09-27 B-14).
+        """
+        from markdown_transaction import IntentFence
+        from operational_ownership import OwnerLease
+
+        _require_semantic_decision_fences(
+            task_id, decision.intent_id, decision.stage, decision.decision_sha256,
+            task_fence, intent_fence, owner, IntentFence, OwnerLease,
+        )
+        now = _utc_now()
+        self._require_live_worker_intent(decision.intent_id, intent_fence, owner, now)
+        with closing(self._connect()) as database, begin_immediate(database):
+            self._require_live_task_fence(database, task_id, task_fence, owner, now)
+            self._require_inherited_decision_row(database, decision, task_id, active_link_digest)
+            self._insert_inherited_seal(database, decision, task_id, active_link_digest, now)
+
+    def sealed_ancestor_bindings(
+        self, task_id: str, intent_id: str, stage: str
+    ) -> tuple[dict[str, str], ...]:
+        """The capture bindings this task's redrive ancestors sealed to the same decision.
+
+        A block an ancestor committed before it died carries that ancestor's binding;
+        its redrive replays the same operation and must recognise the block as its
+        own family's, not as a conflict (audit 2026-09-27 B-14).
+        """
+        with closing(self._connect()) as database:
+            seals = [
+                _decision_seal_of(database, ancestor, intent_id, stage)
+                for ancestor in sorted(_redrive_ancestors(database, task_id))
+            ]
+        return tuple(_sealed_binding(seal, intent_id) for seal in seals if seal is not None)
+
+    def _require_inherited_decision_row(
+        self,
+        database: sqlite3.Connection,
+        decision: SemanticDecision,
+        task_id: str,
+        active_link_digest: str,
+    ) -> None:
+        row = database.execute(
+            "SELECT * FROM semantic_decisions WHERE intent_id=? AND stage=?",
+            (decision.intent_id, decision.stage),
+        ).fetchone()
+        if row is None or row["decision_sha256"] != decision.decision_sha256:
+            raise QueueOperationError("semantic_decision_conflict")
+        self._require_decision_for_task(
+            database, row, task_id, intent_id=decision.intent_id, stage=decision.stage,
+            active_link_digest=active_link_digest,
+        )
+
+    @staticmethod
+    def _insert_inherited_seal(
+        database: sqlite3.Connection,
+        decision: SemanticDecision,
+        task_id: str,
+        active_link_digest: str,
+        now: datetime,
+    ) -> None:
+        """Insert this task's seal once; a retry of the same task finds it already there."""
+        seal_digest = _capture_semantic_seal_digest(
+            task_id, decision.intent_id, decision.stage, active_link_digest
+        )
+        database.execute(
+            """INSERT OR IGNORE INTO capture_task_link_seals(
+                   task_id,active_digest,consumer_kind,consumer_id,seal_digest,sealed_at
+               ) VALUES (?,?,'semantic-decision',?,?,?)""",
+            (
+                task_id,
+                active_link_digest,
+                f"{decision.intent_id}:{decision.stage}",
+                seal_digest,
+                _timestamp(now),
+            ),
         )
 
     def _read_capture_terminal(
@@ -8758,7 +8938,7 @@ class _QueueV3CandidateReader:
             data = read_runtime_bytes(
                 self.state_root / str(row["decision_path"]),
                 self.state_root,
-                max_bytes=1024 * 1024,
+                max_bytes=MAX_CAPTURE_DECISION_BYTES,
                 owner_only=True,
             )
             if sha256_bytes(data) != row["decision_sha256"]:
@@ -10885,17 +11065,9 @@ class _QueueV3CandidateReader:
     ) -> tuple[sqlite3.Row, sqlite3.Row, int] | None:
         """The purge rows for a task that is gone, or None while it is still here."""
         with closing(self._connect()) as database:
-            task_exists = database.execute(
-                "SELECT 1 FROM tasks WHERE id=?", (task_id,)
-            ).fetchone()
-            operation = database.execute(
-                "SELECT * FROM corrupt_purge_operations WHERE task_id=?",
-                (task_id,),
-            ).fetchone()
-            if task_exists is not None or operation is None:
+            operation = _published_purge_operation(database, task_id)
+            if operation is None:
                 return None
-            if operation["state"] != "receipt-published":
-                raise QueueOperationError("corrupt_purge_completion_invalid")
             disposition = database.execute(
                 """SELECT disposition.*,export.disposition_key
                    FROM corrupt_dispositions AS disposition
@@ -11266,34 +11438,37 @@ class _QueueV3CandidateReader:
         *,
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
     ) -> QueueLease:
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
-        now = _utc_now()
-        expires_at = now + timedelta(seconds=lease_seconds)
-        mismatch = False
-        with closing(self._connect()) as database, begin_immediate(database):
-            row = self._require_lease_row(database, lease, now)
-            validation = self._require_valid_task_payload(
-                database, row, now=now, parse=True
-            )
-            mismatch = validation is None
-            if not mismatch:
-                changed = database.execute(
-                    """UPDATE tasks SET lease_expires_at=?, lease_heartbeat_at=?,
-                           updated_at=? WHERE id=? AND lease_token=? AND state='leased'""",
-                    (
-                        _timestamp(expires_at),
-                        _timestamp(now),
-                        _timestamp(now),
-                        lease.id,
-                        lease.token,
-                    ),
-                ).rowcount
-                if changed != 1:
-                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-        if mismatch:
-            self._raise_payload_mismatch()
+        _require_positive_task_lease(lease_seconds)
+        expires_at = self._with_verified_lease(
+            lease, partial(self._extend_leased_task, lease=lease, lease_seconds=lease_seconds)
+        )
         return replace(lease, expires_at=expires_at)
+
+    @staticmethod
+    def _extend_leased_task(
+        database: sqlite3.Connection,
+        _row: sqlite3.Row,
+        now: datetime,
+        *,
+        lease: QueueLease,
+        lease_seconds: int,
+    ) -> datetime:
+        """Move the lease's expiry on; a lease that is no longer ours raises."""
+        expires_at = now + timedelta(seconds=lease_seconds)
+        changed = database.execute(
+            """UPDATE tasks SET lease_expires_at=?, lease_heartbeat_at=?,
+                   updated_at=? WHERE id=? AND lease_token=? AND state='leased'""",
+            (
+                _timestamp(expires_at),
+                _timestamp(now),
+                _timestamp(now),
+                lease.id,
+                lease.token,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+        return expires_at
 
     def _validated_result_digest(self, relative: str) -> str | None:
         try:
@@ -11514,23 +11689,28 @@ class _QueueV3CandidateReader:
         )
         if not isinstance(failure, QueueFailure) or not failure.error_code:
             raise ValueError("failure must have a non-empty error code")
-        now = _utc_now()
-        mismatch = False
-        with closing(self._connect()) as database, begin_immediate(database):
-            row = self._require_lease_row(database, lease, now)
-            mismatch = (
-                self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                is None
-            )
-            if not mismatch:
-                _record_failed_attempt(database, lease, row, failure, now)
-                _apply_failure_state(
-                    database, lease, row, failure, now, max_attempts
-                )
-        if mismatch:
-            self._raise_payload_mismatch()
+        self._with_verified_lease(
+            lease,
+            partial(
+                self._fail_leased_task,
+                lease=lease,
+                failure=failure,
+                max_attempts=max_attempts,
+            ),
+        )
+
+    @staticmethod
+    def _fail_leased_task(
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        now: datetime,
+        *,
+        lease: QueueLease,
+        failure: QueueFailure,
+        max_attempts: int,
+    ) -> None:
+        _record_failed_attempt(database, lease, row, failure, now)
+        _apply_failure_state(database, lease, row, failure, now, max_attempts)
 
     def recover_expired_leases(self) -> int:
         now = _utc_now()
@@ -11591,23 +11771,22 @@ class _QueueV3CandidateReader:
     ) -> bool:
         _require_active(deadline, cancelled)
         now = _utc_now()
-        mismatch = False
-        changed = False
         with closing(self._connect()) as database, begin_immediate(database):
             row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None or row["state"] in _TERMINAL_STATES:
                 return False
-            mismatch = (
-                self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                is None
-            )
-            if not mismatch:
-                changed = self._cancel_row(database, row, now)
-        if mismatch:
+            changed = self._cancel_valid_row(database, row, now)
+        if changed is None:
             self._raise_payload_mismatch()
-        return changed
+        return bool(changed)
+
+    def _cancel_valid_row(
+        self, database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+    ) -> bool | None:
+        """Cancel a row whose payload holds; None when the payload was demoted instead."""
+        if self._require_valid_task_payload(database, row, now=now, parse=True) is None:
+            return None
+        return self._cancel_row(database, row, now)
 
     @staticmethod
     def _cancel_row(
@@ -12858,13 +13037,7 @@ class _QueueV3CandidateReader:
             self._require_ordinary_purge_authorizations(
                 rows, plan.task_ids, operation_id, manifest_sha256
             )
-            deleted = database.execute(
-                f"""DELETE FROM task_purge_authorizations
-                    WHERE task_id IN ({placeholders})""",  # noqa: S608
-                plan.task_ids,
-            ).rowcount
-            if deleted != len(plan.task_ids):
-                raise QueueOperationError("purge_authorization_failed")
+            _delete_ordinary_purge_authorizations(database, plan.task_ids, placeholders)
 
     def _export_task_in_transaction(
         self, database: sqlite3.Connection, row: sqlite3.Row
@@ -13669,6 +13842,8 @@ def _process_snapshot_posix() -> list[tuple[int, int, int, str]] | None:
 
 
 _TH32CS_SNAPPROCESS = 0x2
+# PROCESSENTRY32.szExeFile is CHAR[MAX_PATH] and MAX_PATH is 260 (Win32 tlhelp32.h); the ctypes
+# layout must match it. External contract.
 _MAX_PROCESS_PATH = 260
 
 
@@ -13953,6 +14128,16 @@ def _await_cleanup(
     if descendants is None:
         return False
     deadline = time.monotonic() + max(0.0, cleanup_timeout)
+    return _poll_cleanup(process, descendants, platform_name, deadline)
+
+
+def _poll_cleanup(
+    process: multiprocessing.Process,
+    descendants: set[int],
+    platform_name: str,
+    deadline: float,
+) -> bool:
+    """Whether cleanup is confirmed before the monotonic `deadline`."""
     while True:
         if _cleanup_confirmed(process, descendants, platform_name=platform_name):
             return True
@@ -14192,6 +14377,9 @@ def _run_processor_child(
             run.stop()
 
 
+# The pause between claim attempts while the queue database is busy, within the
+# caller's deadline. Basis unknown: value predates measurement; review if claims
+# show contention in doctor or the nightly log.
 _CLAIM_BUSY_RETRY_SECONDS = 0.05
 
 
@@ -14925,9 +15113,10 @@ def _flush_inputs(payload: Mapping[str, Any], now: datetime):
 
 def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
     """Summarize one session into its daily log."""
+    from iso_time import local_now
     from llm_client import call_llm
 
-    now = _utc_now()
+    now = local_now()
     inputs = _flush_inputs(payload, now)
     if inputs is None:
         return False
@@ -14944,22 +15133,23 @@ def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
 
 
 def _manual_compile() -> bool:
-    """Run one compile pass in a child process."""
+    """Run one compile pass in a child process, for as long as one compile may run.
+
+    The bound is the nightly's (`scheduled_nightly.compile_wait_seconds`, measured and
+    operator-set); without one a hung compile held the queue worker for good (audit
+    2026-09-27 C-9).
+    """
+    from scheduled_nightly import compile_wait_seconds
+
     root = _vault_root()
-    command = [
-        sys.executable,
-        str(root / "scripts" / "compile_memory.py"),
-        "--trigger",
-        "auto",
-    ]
-    completed = subprocess.run(
-        command,
-        cwd=root,
-        check=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    command = [sys.executable, str(root / "scripts" / "compile_memory.py"), "--trigger", "auto"]
+    try:
+        completed = subprocess.run(
+            command, cwd=root, check=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=compile_wait_seconds(),
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return completed.returncode == 0
 
 

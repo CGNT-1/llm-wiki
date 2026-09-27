@@ -23,6 +23,7 @@ from markdown_transaction import (  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from page_status import is_retired  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
+from settings import raise_hint, setting_value  # noqa: E402
 
 memory = ROOT / "knowledge"
 knowledge = memory / "notes"
@@ -49,8 +50,6 @@ SKIP_NAMES = {"README.md", "index.md", "log.md"}
 MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 # `knowledge/index.md` as this module writes it and the compile reads it back.
 MAX_INDEX_BYTES = 4 * 1024 * 1024
-MAX_PAGE_COUNT = 2_000
-MAX_TOTAL_PAGE_BYTES = 32 * 1024 * 1024
 MAX_REBUILD_ATTEMPTS = 4
 
 
@@ -83,9 +82,9 @@ def build_index_bytes(
     """Render the index from disk plus unpublished transaction after-images."""
     root = Path(root)
     virtual = _virtual_pages(root, base)
-    _require_within_limits(virtual)
+    _require_within_limits(virtual, root)
     _apply_pending(virtual, pending)
-    _require_within_limits(virtual)
+    _require_within_limits(virtual, root)
     return _render_index(_index_buckets(_published_only(root, virtual)))
 
 
@@ -105,11 +104,12 @@ def _virtual_pages(
     }
 
 
-def _require_within_limits(virtual: Mapping[str, bytes]) -> None:
-    if len(virtual) > MAX_PAGE_COUNT:
-        raise ValueError("knowledge index page count exceeds limit")
-    if sum(len(content) for content in virtual.values()) > MAX_TOTAL_PAGE_BYTES:
-        raise ValueError("knowledge index source bytes exceed limit")
+def _require_within_limits(virtual: Mapping[str, bytes], root: Path) -> None:
+    """The index.max_pages and index.max_total_bytes ceilings of `settings`."""
+    if len(virtual) > setting_value("index.max_pages", root):
+        raise ValueError(f"knowledge index page count exceeds limit; {raise_hint('index.max_pages')}")
+    if sum(len(content) for content in virtual.values()) > setting_value("index.max_total_bytes", root):
+        raise ValueError(f"knowledge index source bytes exceed limit; {raise_hint('index.max_total_bytes')}")
 
 
 def _apply_pending(

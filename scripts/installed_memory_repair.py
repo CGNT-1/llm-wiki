@@ -9,7 +9,7 @@ import re
 import sqlite3
 import stat
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -27,6 +27,7 @@ from reliable_memory import (
     publish_runtime_file,
     read_runtime_bytes,
     sha256_bytes,
+    streamed_rows,
     sync_runtime_directory,
     validate_schema,
     validate_state_root,
@@ -39,12 +40,27 @@ _SCHEMA_DIR = Path(__file__).with_name("schemas")
 _TOMBSTONE_SCHEMA = _SCHEMA_DIR / "operational-db-tombstone-v1.json"
 _MIGRATION_SCHEMA = _SCHEMA_DIR / "reliability-v3-migration-v1.json"
 _ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v1.json"
+# Bounded reads of the adoption's own JSON records; each is refused past its bound,
+# never cut. Measured 2026-09-27 on the installed vault: a tombstone is 487-541
+# bytes, the migration record 1 333 and the adoption record 2 507, so 4 KiB and
+# 64 KiB leave about 8 and 25 times room. Review if a schema version adds fields.
 _MAX_TOMBSTONE_BYTES = 4 * 1024
 _MAX_RECORD_BYTES = 64 * 1024
+# In-flight adoption artifacts named in a report; one adoption leaves at most one
+# candidate and one retired file per database (four), so 32 means a broken run
+# directory. Past it the listing sets its overflow flag and the check refuses.
 _MAX_OPERATION_ARTIFACTS = 32
+# The same bounds as doctor.MAX_OPERATIONAL_DB_BYTES and MAX_RUNTIME_ENTRIES, whose
+# comments give their basis: both read the same databases and directories. Repeated
+# because doctor imports this module lazily to stay importable without the queue and
+# transaction modules; keep the pairs equal. A scan past a bound raises, never judges
+# from entries unseen. Table rows have no count cap: they are streamed (`_scanned_rows`).
 _MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
-_MAX_OPERATIONAL_ROWS = 10_000
 _MAX_RUNTIME_ENTRIES = 10_000
+# The same bound as memory_state.MAX_CAPTURE_INTENT_BYTES (the hook writes intents
+# under it); not imported because memory_state resolves the live state root at
+# import time. The largest intent on the installed vault on 2026-09-27 was 977 392
+# bytes — 93% of this bound; review the pair if intents approach it.
 _MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 from markdown_transaction import UNDO_RETENTION_DAYS as _UNDO_RETENTION_DAYS  # noqa: E402
 
@@ -64,6 +80,9 @@ _LEGACY_EVIDENCE = (
     "compile.pid",
     "maintenance.lock",
 )
+# Bounded read of scripts/integration_adapter.py for its digest: the file is
+# 133 040 bytes on 2026-09-27, so 16 MiB only refuses something that is not the
+# adapter. A guard, not a tunable.
 _MAX_INTEGRATION_BYTES = 16 * 1024 * 1024
 
 
@@ -985,21 +1004,23 @@ def _check_deadline(deadline: float) -> None:
         raise TimeoutError("Reliability V3 validation deadline expired")
 
 
-def _bounded_rows(
-    database: sqlite3.Connection,
-    query: str,
-    *,
-    deadline: float,
-    parameters: tuple[object, ...] = (),
-) -> list[sqlite3.Row]:
+def _scanned_rows(
+    database: sqlite3.Connection, query: str, *, deadline: float
+) -> Iterator[sqlite3.Row]:
+    """Every row, streamed within the deadline; a table that grows with use is never refused by count.
+
+    A 10 000-row cap raised here and reported `transaction_state_unreadable`, which
+    refuses a backup; the unpruned transactions are the two-day undo window, whose
+    size is activity (6 834 on the busiest two days on record). See
+    `docs/research/2026-09-27-doctor-reads-every-transaction.md`.
+    """
     _check_deadline(deadline)
-    rows = database.execute(
-        f"{query} LIMIT ?", (*parameters, _MAX_OPERATIONAL_ROWS + 1)
-    ).fetchall()
+    return streamed_rows(database, query, stop=lambda: _check_deadline(deadline))
+
+
+def _holds_a_row(database: sqlite3.Connection, table: str, *, deadline: float) -> bool:
     _check_deadline(deadline)
-    if len(rows) > _MAX_OPERATIONAL_ROWS:
-        raise ValueError("Reliability V3 row scan exceeded its bound")
-    return rows
+    return database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
 
 
 def _parse_timestamp(value: object) -> datetime:
@@ -1124,7 +1145,7 @@ def _queue_database_blockers(state_root: Path, deadline: float) -> set[str]:
         blockers = _queue_task_blockers(database, deadline)
         blockers.update(_queue_table_blockers(database, deadline))
         blockers.update(_capture_intent_blockers(database, state_root, deadline))
-        if _bounded_rows(database, "SELECT * FROM queue_ownership", deadline=deadline):
+        if _holds_a_row(database, "queue_ownership", deadline=deadline):
             blockers.add("queue_owner_projection_orphan")
     return blockers
 
@@ -1132,11 +1153,9 @@ def _queue_database_blockers(state_root: Path, deadline: float) -> set[str]:
 def _queue_task_blockers(
     database: sqlite3.Connection, deadline: float
 ) -> set[str]:
-    rows = _bounded_rows(database, "SELECT * FROM tasks", deadline=deadline)
     blockers: set[str] = set()
-    if rows:
+    for row in _scanned_rows(database, "SELECT * FROM tasks", deadline=deadline):
         blockers.add("queue_task_retained")
-    for row in rows:
         _validate_queue_task(row)
     return blockers
 
@@ -1187,8 +1206,7 @@ def _queue_table_blockers(
 ) -> set[str]:
     blockers: set[str] = set()
     for table, code in _QUEUE_TABLE_CODES.items():
-        rows = _bounded_rows(database, f'SELECT * FROM "{table}"', deadline=deadline)
-        if rows:
+        if _holds_a_row(database, table, deadline=deadline):
             blockers.add(code)
     return blockers
 
@@ -1196,11 +1214,9 @@ def _queue_table_blockers(
 def _capture_intent_blockers(
     database: sqlite3.Connection, state_root: Path, deadline: float
 ) -> set[str]:
-    rows = _bounded_rows(database, "SELECT * FROM capture_intents", deadline=deadline)
     blockers: set[str] = set()
-    if rows:
+    for row in _scanned_rows(database, "SELECT * FROM capture_intents", deadline=deadline):
         blockers.add("capture_intent_retained")
-    for row in rows:
         _validate_capture_intent(row, state_root)
     return blockers
 
@@ -1331,9 +1347,8 @@ def _coordinator_owner_blockers(
     deadline: float,
     excluded_owner: OwnerLease | None,
 ) -> set[str]:
-    rows = _bounded_rows(database, "SELECT * FROM maintenance_owners", deadline=deadline)
     blockers: set[str] = set()
-    for row in rows:
+    for row in _scanned_rows(database, "SELECT * FROM maintenance_owners", deadline=deadline):
         if not _owner_matches(row, excluded_owner):
             blockers.add("canonical_owner_retained")
     return blockers
@@ -1344,8 +1359,7 @@ def _coordinator_table_blockers(
 ) -> set[str]:
     blockers: set[str] = set()
     for table, code in _COORDINATOR_TABLE_CODES:
-        rows = _bounded_rows(database, f'SELECT * FROM "{table}"', deadline=deadline)
-        if rows:
+        if _holds_a_row(database, table, deadline=deadline):
             blockers.add(code)
     return blockers
 
@@ -1357,7 +1371,7 @@ def _transaction_blockers(
     # blocker and no retention. Reading all of them hit the 10 000-row bound on
     # a vault with 23 664 rows and reported the state unreadable (audit
     # 2026-09-26 A-11, docs/research/2026-09-26-a-backup-takes-what-any-installed-vault-holds.md).
-    rows = _bounded_rows(
+    rows = _scanned_rows(
         database,
         'SELECT * FROM "transaction" WHERE state <> \'committed\' OR artifacts_pruned_at IS NULL',
         deadline=deadline,
@@ -1470,7 +1484,7 @@ def _blackboard_claim_blockers(
                 contract=_COORDINATOR_CONTRACT,
             )
         ) as database:
-            rows = _bounded_rows(
+            rows = _scanned_rows(
                 database,
                 "SELECT expires_at FROM blackboard_claims",
                 deadline=deadline,
@@ -1613,6 +1627,11 @@ def _validate_partial_legacy(path: Path, state_root: Path, source_state: str) ->
         return
     if kind != "file":
         raise ValueError("legacy database path has the wrong kind")
+    _validate_legacy_record(path, state_root, source_state)
+
+
+def _validate_legacy_record(path: Path, state_root: Path, source_state: str) -> None:
+    """A tombstone, or on an upgrade the legacy database itself."""
     try:
         _read_record(
             path,

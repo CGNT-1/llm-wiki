@@ -20,6 +20,9 @@ from typing import Any
 STATE_KEY = "codex_turn_end_captures"
 # The host's own figure: Codex ends a session that has been idle for 30 minutes.
 CAPTURE_WINDOW_SECONDS = 30 * 60
+# Sessions remembered for de-duplication, newest kept: an evicted one can only be
+# captured twice, never lost, and 64 Codex sessions touched inside one 30-minute
+# window is assumed past what one operator runs (not measured).
 MAX_SESSIONS = 64
 TAIL_FIELDS = ("cwd", "transcript_path", "turn_id")
 

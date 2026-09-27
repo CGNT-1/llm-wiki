@@ -62,15 +62,9 @@ def test_a_pass_that_cannot_take_its_fence_records_the_failure(tmp_path, monkeyp
 # ---------------------------------------------------------------- A3 ----
 
 
-def test_a_truncated_transaction_scan_says_its_counts_are_lower_bounds() -> None:
-    """Growth past the read ceiling is not a health problem; a whole-truth claim is."""
-    details = {"truncated_scans": ["transaction_scan_truncated"]}
-    status, message = doctor._truncated_scan_verdict(details, "ok", "Transaction state is healthy.")
-    assert (status, "lower bound" in message) == ("ok", True)
-
-
-def test_a_complete_scan_keeps_its_verdict() -> None:
-    assert doctor._truncated_scan_verdict({"truncated_scans": []}, "ok", "fine") == ("ok", "fine")
+# A3's lower-bound message went with the row cap it described: the transaction scan
+# reads every row (docs/research/2026-09-27-doctor-reads-every-transaction.md), held
+# by tests/test_doctor_bounded_scan_truth.py.
 
 
 def test_the_state_bound_admits_what_the_writer_can_produce() -> None:
@@ -184,6 +178,7 @@ def test_young_evidence_is_kept_even_beyond_twenty(tmp_path) -> None:
 def test_consolidation_gives_its_provider_the_compile_ceiling(monkeypatch) -> None:
     import episode_consolidation
     import llm_client
+    import settings
 
     seen: list[int | None] = []
 
@@ -193,7 +188,8 @@ def test_consolidation_gives_its_provider_the_compile_ceiling(monkeypatch) -> No
 
     monkeypatch.setattr(llm_client, "call_llm", fake_call)
 
-    assert (episode_consolidation._call_provider("records"), seen) == ("ok", [300])
+    ceiling = settings.setting_value("provider.draft_ceiling_seconds")
+    assert (episode_consolidation._call_provider("records"), seen) == ("ok", [ceiling])
 
 
 # ---------------------------------------------------------------- D2 ----

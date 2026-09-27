@@ -216,6 +216,8 @@ def check_evidence_references(pages: list[Path]) -> list[str]:
 
 # ---------- individual checks ----------
 
+# Every git call has a deadline (e1be6f8e); `git ls-files` on a local checkout answers in well
+# under a second, so 30 s only bounds a hung git.
 GIT_LS_FILES_TIMEOUT_SECONDS = 30
 
 
@@ -901,6 +903,8 @@ def _is_orphan_gap(gap: Path, referenced: set[str]) -> bool:
 
 # ---------- contradictions (LLM, opt-in) ----------
 
+# Page bytes one opt-in contradiction audit sends the model; later pages wait for the next run
+# through the audit cursor. A prompt-size trade-off, not measured.
 MAX_CONTRADICTION_BYTES = 120_000
 CONTRADICTION_SYSTEM_PROMPT = "You are a careful auditor. Only flag real contradictions."
 

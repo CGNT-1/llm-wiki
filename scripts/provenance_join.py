@@ -20,10 +20,15 @@ from pathlib import Path
 
 # Graph locations joined into one provenance answer; the protocol reply bound is 10 000.
 MAX_LOCATIONS = 5
+# Pages shown in one answer, a display cut: the answer states `page_count` and
+# `pages_truncated`, so a reader knows when more pages name the symbol.
 MAX_PAGES = 8
+# Sources listed per page, a display cut; `read_page` gives the whole page.
 MAX_SOURCES_PER_PAGE = 6
+# A note above this is skipped as unreadable, not read partly: 256 KiB is about
+# thirteen times the largest note of this vault (19 KB, 2026-09-27) and keeps one scan's
+# memory bounded whatever a user puts in knowledge/notes.
 MAX_NOTE_BYTES = 256 * 1024
-MAX_NOTES_SCANNED = 500
 
 _SOURCE_LINE = re.compile(
     r"(knowledge/daily/[0-9-]+\.md|knowledge/raw/sessions/[^\s)\]`]+"
@@ -74,7 +79,10 @@ def _note_files(vault: Path) -> list[Path]:
     notes = vault / "knowledge" / "notes"
     if not notes.is_dir():
         return []
-    return sorted(notes.glob("*.md"))[:MAX_NOTES_SCANNED]
+    # Every note: a cap of 500 left the notes after the 500th alphabetically
+    # unsearched. The scan is bounded by the caller's deadline and each note by
+    # MAX_NOTE_BYTES. docs/research/2026-09-27-a-cut-says-what-it-left-out.md
+    return sorted(notes.glob("*.md"))
 
 
 def _read_note(path: Path) -> str | None:
@@ -128,15 +136,30 @@ def _page_hit(path: Path, pattern: re.Pattern[str]) -> dict | None:
 
 def _matching_pages(
     vault: Path, pattern: re.Pattern[str], deadline: float
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
+    """Every matching page the deadline allowed, and whether every note was read."""
+    notes = _note_files(vault)
     pages: list[dict] = []
-    for path in _note_files(vault):
-        if time.monotonic() >= deadline or len(pages) >= MAX_PAGES:
-            break
-        hit = _page_hit(path, pattern)
-        if hit is not None:
-            pages.append(hit)
-    return pages
+    for path in notes:
+        if time.monotonic() >= deadline:
+            return pages, False
+        pages.extend(_page_hits(path, pattern))
+    return pages, True
+
+
+def _page_hits(path: Path, pattern: re.Pattern[str]) -> list[dict]:
+    hit = _page_hit(path, pattern)
+    return [] if hit is None else [hit]
+
+
+def _pages_report(pages: list[dict], complete: bool) -> dict:
+    """The first MAX_PAGES pages, and what the cut and the deadline left out."""
+    return {
+        "pages": pages[:MAX_PAGES],
+        "page_count": len(pages),
+        "pages_truncated": len(pages) > MAX_PAGES,
+        "scan_complete": complete,
+    }
 
 
 def join_symbol_provenance(
@@ -145,13 +168,13 @@ def join_symbol_provenance(
     """The one-call chain: symbol -> locations -> pages naming it -> their sources."""
     pattern = _symbol_pattern(symbol)
     locations = _graph_locations(directory, symbol, deadline)
-    pages = _matching_pages(vault, pattern, deadline)
+    pages, complete = _matching_pages(vault, pattern, deadline)
     return {
         "symbol": symbol,
         "locations": locations[:MAX_LOCATIONS],
         "location_count": len(locations),
         "locations_truncated": len(locations) > MAX_LOCATIONS,
-        "pages": pages,
+        **_pages_report(pages, complete),
         "verification": (
             "cited_sources are surfaced, not re-verified here; "
             "read_page resolves a page's citations against source bytes"

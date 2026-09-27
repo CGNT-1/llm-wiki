@@ -43,8 +43,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from corpus_snapshot import (  # noqa: E402
     MAX_CORPUS_FILE_BYTES,
-    MAX_CORPUS_FILES,
-    MAX_CORPUS_TOTAL_BYTES,
     CorpusSnapshot,
     canonical_retrieval_chunks,
     validate_canonical_source_manifest,
@@ -61,12 +59,20 @@ from reliable_memory import (  # noqa: E402
     validate_runtime_file,
 )
 from secret_redact import redact_secrets  # noqa: E402
+from settings import raise_hint, setting_value  # noqa: E402
 
-_INDEX_REPLACE_WAIT_SECONDS = 1.0
-MAX_SEARCHABLE_PAGES = 10_000
+# Directory entries the Markdown fallback walk inspects; the live knowledge tree has 1 185
+# (2026-09-27). A vault-size bound, refused past it; a settings candidate.
 MAX_SEARCH_ENTRIES = 20_000
+# Directories the Markdown fallback walk enters; the live knowledge tree has 76 (2026-09-27). A
+# vault-size bound, refused past it; a settings candidate.
 MAX_SEARCH_DIRECTORIES = 2_000
+# Directory depth of the Markdown fallback walk; the live knowledge tree is 5 deep (2026-09-27),
+# so 32 only refuses a runaway tree.
 MAX_SEARCH_DEPTH = 32
+# The largest result count a caller may ask for; a larger one is refused with its range. Bounds
+# one answer's work. Basis unknown: value predates measurement; review when a caller needs more
+# rows.
 MAX_SEARCH_LIMIT = 1_000
 MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 SEARCH_INDEX_COLUMNS = (
@@ -120,6 +126,9 @@ GENERATION_METADATA_KEYS = frozenset(
         "chunk_count",
     }
 )
+# Chunk rows one generation's FTS index holds, the same count the corpus may produce
+# (`corpus_snapshot.MAX_CORPUS_CHUNKS`). A vault-size bound. Basis unknown: value predates
+# measurement; review when doctor warns on corpus size.
 MAX_GENERATION_FTS_CHUNKS = 100_000
 GENERATION_FTS_PROGRESS_OPCODES = 1_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -1366,6 +1375,7 @@ class _PageWalkLimits:
         self.deadline = deadline
         self.entries = 0
         self.directories = 0
+        self.max_pages = setting_value("search.max_pages")
 
     def check_deadline(self) -> None:
         if time.monotonic() >= self.deadline:
@@ -1482,8 +1492,8 @@ def _collect_directory_pages(
             continue
         seen.add(md)
         pages.append(md)
-        if len(pages) > MAX_SEARCHABLE_PAGES:
-            raise ValueError("searchable page limit exceeded")
+        if len(pages) > limits.max_pages:
+            raise ValueError(f"searchable page limit exceeded; {raise_hint('search.max_pages')}")
 
 
 def _require_depth_within_limit(depth: int) -> None:
@@ -2287,12 +2297,12 @@ def _validated_source_manifest(
 ) -> dict:
     source_manifest_path = generation_path / "source-manifest.json"
     expected = validate_runtime_file(
-        source_manifest_path, state_root, max_bytes=MAX_CORPUS_TOTAL_BYTES
+        source_manifest_path, state_root, max_bytes=setting_value("corpus.max_total_bytes")
     )
     raw = _read_identity_stable_bytes(
         source_manifest_path,
         expected,
-        max_bytes=MAX_CORPUS_TOTAL_BYTES,
+        max_bytes=setting_value("corpus.max_total_bytes"),
         label="generation source manifest",
         deadline=deadline,
         cancelled=cancelled,
@@ -2330,11 +2340,11 @@ def _valid_source_row(row: tuple[object, ...], seen: set[str]) -> bool:
 
 
 def _require_admissible_source_row(
-    row: tuple, metadata: list, seen: set[str]
+    row: tuple, metadata: list, seen: set[str], max_files: int
 ) -> None:
     """One more row is allowed only under the ceiling, and only if it is valid."""
-    if len(metadata) >= MAX_CORPUS_FILES:
-        raise ValueError("generation source row ceiling exceeded")
+    if len(metadata) >= max_files:
+        raise ValueError(f"generation source row ceiling exceeded; {raise_hint('corpus.max_files')}")
     if not _valid_source_row(row, seen):
         raise ValueError("generation evidence source rows are invalid")
 
@@ -2349,18 +2359,22 @@ def _source_metadata_rows(
     metadata: list[tuple[str, str, str, int]] = []
     seen: set[str] = set()
     total_bytes = 0
+    max_files = setting_value("corpus.max_files")
+    max_total_bytes = setting_value("corpus.max_total_bytes")
     rows = database.execute(
         "SELECT source_id, relative_path, sha256, size, length(content) FROM source "
         "ORDER BY relative_path, source_id LIMIT ?",
-        (MAX_CORPUS_FILES + 1,),
+        (max_files + 1,),
     )
     for row in rows:
         _check_generation_stop(deadline, cancelled)
-        _require_admissible_source_row(row, metadata, seen)
+        _require_admissible_source_row(row, metadata, seen, max_files)
         source_id, relative_path, digest, size, content_size = row
         total_bytes += content_size
-        if total_bytes > MAX_CORPUS_TOTAL_BYTES:
-            raise ValueError("generation evidence source bytes exceed their ceiling")
+        if total_bytes > max_total_bytes:
+            raise ValueError(
+                f"generation evidence source bytes exceed their ceiling; {raise_hint('corpus.max_total_bytes')}"
+            )
         seen.add(source_id)
         metadata.append((source_id, relative_path, digest, size))
     return metadata
@@ -2861,6 +2875,19 @@ def _stored_chunks_match(
     """
     if not check_rows:
         return True
+    return _rows_hold_invariants(
+        connection, expected_chunks, count=count, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _rows_hold_invariants(
+    connection: sqlite3.Connection,
+    expected_chunks: list[tuple[object, ...]] | None,
+    *,
+    count: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
     seen: set[str] = set()
     for order, row in enumerate(connection.execute(_FTS_CHUNK_SELECT)):
         _check_generation_stop(deadline, cancelled)
@@ -3188,25 +3215,21 @@ def _page_title(row: sqlite3.Row) -> str:
     return row["title"] or Path(row["source_path"]).stem
 
 
-def _first_prose_line(content: str) -> str:
-    """The first line under the headings: a summary that does not repeat the title."""
-    lines = [line for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-    return lines[0].strip()[:120] if lines else ""
-
-
-def _chunk_weight(authority: object, page_type: object, content: object) -> float:
+def _chunk_weight(authority: object, page_type: object, content: object, relative_path: object) -> float:
     """Who said it and what the page is, and whether this chunk is prose or a link list."""
-    return trust_weight(authority, page_type) * substance_weight(content)
+    return trust_weight(authority, page_type, relative_path) * substance_weight(content)
 
 
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
     authority = _row_text(row, "authority")
     content = _row_text(row, "content")
-    score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content)
+    score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content, row["source_path"])
     return {
         "path": row["source_path"],
         "title": _page_title(row),
-        "summary": _first_prose_line(content),
+        # No `summary`: the row's text is `content`, and a first line cut from it
+        # repeated it mid-sentence (audit 2026-09-27 C-16,
+        # docs/research/2026-09-27-a-row-that-carries-its-text-carries-no-cut-of-it.md).
         "content": content,
         "score": score,
         "project": _row_text(row, "project"),
@@ -3550,9 +3573,9 @@ def _vector_scored_rows(
         # The vector path boosts a project match by 1.5, not by the lexical 2.0.
         if project and str(result["project"]).casefold() == project.casefold():
             score *= 1.5
-        # Absent provenance weighs 1.0 by `trust_weight`'s own contract, so a row
-        # that carries none is admitted on its cosine alone rather than refused.
-        score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"))
+        # A page that states no provenance weighs as `inferred`, any other source
+        # as neutral (`provenance.page_authority`); a row is never refused for it.
+        score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"), result.get("path"))
         result["score"] = round(score, 4)
         result["requested_mode"] = "hybrid"
         result["effective_mode"] = "hybrid"
@@ -3869,7 +3892,7 @@ def _exact_page_hit(
         return None
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
-    score = round(10.0 * trust_weight(read.authority, read.page_type), 2)
+    score = round(10.0 * trust_weight(read.authority, read.page_type, read.relative_path), 2)
     return _page_hit(read, score=score, bm25_score=0.0)
 
 
@@ -3924,7 +3947,7 @@ def _retired_page_named(normalized_stem: str) -> Path | None:
         entries = sorted(KNOWLEDGE_DIR.glob("*.md"))
     except OSError:
         return None
-    for candidate in entries[:MAX_SEARCHABLE_PAGES]:
+    for candidate in entries[: setting_value("search.max_pages")]:
         if _normalized_filename_stem(candidate.name) == normalized_stem:
             return candidate
     return None
@@ -4017,7 +4040,7 @@ def _direct_match_score(
         score *= 3.0
     if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
         score *= 4.0
-    return score * trust_weight(read.authority, read.page_type)
+    return score * trust_weight(read.authority, read.page_type, read.relative_path)
 
 
 def _evidence_terms(query: str) -> set[str]:
@@ -4292,6 +4315,8 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
         print()
 
 
+# A printed search snippet, cut with an ellipsis so the cut shows. A readability trade-off, not
+# measured.
 SNIPPET_CHARS = 240
 
 

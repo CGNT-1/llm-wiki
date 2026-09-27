@@ -46,7 +46,7 @@ def test_an_abandoned_temporary_is_reclaimed(tmp_path: Path) -> None:
     result = reclaim.sweep_orphan_temporaries(tmp_path)
 
     assert not orphan.exists()
-    assert result == {"removed": 1, "bytes": 1024}
+    assert result == {"removed": 1, "bytes": 1024, "failed": 0, "unfinished": False}
 
 
 def test_a_temporary_a_live_writer_could_own_is_left_alone(tmp_path: Path) -> None:
@@ -56,7 +56,7 @@ def test_a_temporary_a_live_writer_could_own_is_left_alone(tmp_path: Path) -> No
     result = reclaim.sweep_orphan_temporaries(tmp_path)
 
     assert fresh.exists()
-    assert result == {"removed": 0, "bytes": 0}
+    assert result == {"removed": 0, "bytes": 0, "failed": 0, "unfinished": False}
 
 
 def test_the_sweep_touches_nothing_but_staged_files(tmp_path: Path) -> None:
@@ -78,6 +78,8 @@ def test_a_missing_directory_is_not_an_error(tmp_path: Path) -> None:
     assert reclaim.sweep_orphan_temporaries(tmp_path / "absent") == {
         "removed": 0,
         "bytes": 0,
+        "failed": 0,
+        "unfinished": False,
     }
 
 

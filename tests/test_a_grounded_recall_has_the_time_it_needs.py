@@ -54,4 +54,6 @@ def test_a_grounded_recall_has_the_grounded_budget() -> None:
         mcp_server._tool_operation_seconds("recall", {"query": "q"}),
     )
 
-    assert budgets == (query_memory.QA_DEADLINE_SECONDS, mcp_server.MCP_OPERATION_SECONDS)
+    # An ungrounded recall has the retrieval budget measured for its reranker (B-9),
+    # not the generic tool budget; a grounded one still has the whole QA deadline.
+    assert budgets == (query_memory.QA_DEADLINE_SECONDS, mcp_server._retrieval_operation_seconds())

@@ -63,6 +63,13 @@ the selected model to appear in `/api/tags` with local size/digest metadata and 
 Ollama process was restarted with cloud disabled. Do not describe this state as
 verified network isolation.
 
+Calls go to Ollama's native `/api/chat` (the `/v1` in the base URL is accepted and
+stripped), because only that endpoint can set a context window. Each call asks for a
+window that holds its prompt and answer, rounded up to a power of two, at least 4 096
+tokens and never above the model's trained length. On a machine with little memory,
+cap it with `MEMORY_OLLAMA_MAX_CONTEXT=<tokens>`; a prompt that then fills the window
+fails as `context_overflow` rather than being answered half-read.
+
 ---
 
 ## One-time setup
@@ -185,7 +192,7 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 | `wiki_overview` | Reports page count, recommended retrieval tier, and vault root. It does not yet provide per-component generation health. |
 | `vault_status` | Reports compile timestamp/status and changed-daily backlog only. |
 | `get_decisions` | Uses the same retrieval path as `recall` (deadline, lexical fallback, trace), keeps one row per active decision page, emits bounded telemetry, and clamps limits to 1-20. Returns `results`, `retrieval_trace` and `_meta`, and its envelope reports a fallback and the generation's freshness as recall's does. |
-| `get_context` | Packs the requested pages into one token-budgeted `text` (the budget is counted conservatively, one token per UTF-8 byte, unless a tokenizer is configured) and reports `packed_tokens` and `token_budget`. `pages`, `symbols`, `decisions`, `incidents`, `active_task` and `evidence` list what the text holds without repeating it; mandatory items keep the order they were asked in within their class. |
+| `get_context` | Packs the requested pages into one `text` so that the whole answer body, not only the text, fits `token_budget`; tokens are estimated as UTF-8 bytes / 2 (the lowest ratio measured on this vault's Markdown was 2.3), the same estimate every answer's `answer_cost` reports. `items` names each packed item once (source, representation, headings, byte range, type) without repeating its text, and `dropped` says what did not fit and why. A budget too small for the answer's own item list is refused with an error rather than exceeded; mandatory items keep the order they were asked in within their class. |
 | `check_contradiction` | Returns structured assessments, evidence, validity, and lifecycle recommendations; unsupported evidence is quarantined rather than treated as verified. |
 | `log_decision` | Appends through the locked daily-log writer; it does not directly publish a durable decision page. |
 | `compile` | Requests the existing non-blocking, single-lock background compile. |
@@ -199,6 +206,11 @@ output is used when the installed SDK supports it. The envelope's top-level
 generation a recall or code answer came from, or the collection time of a `get_context`
 answer; it is null when neither is known. Treat row-level generation and fallback fields
 as the current retrieval truth.
+
+A recall or `get_decisions` answer is `stale` when a page it returned changed or vanished
+after the generation was built, or when a compiled note did (the index cannot see it
+yet). A project `state.md` the answer did not return does not make it stale. When the
+generation's source manifest cannot be read, the freshness is `unknown`.
 
 ## Repository indexes follow your worktrees
 
@@ -699,10 +711,58 @@ inside the 2-day undo window; no retained queue task/result or legacy queue arti
    and no live project lease, writer, queue worker, maintenance owner, or LSP owner;
    retained LSP failure evidence also blocks deletion. Deleting an
 otherwise eligible `run/` loses undo history. Installers and repair commands never
-remove it automatically. Its one automatic Git operation is the nightly
+remove it automatically. Its automatic Git operations are two: the nightly
 fast-forward of the checkout on its default branch, which never pushes and declines
-when it would touch a locally modified file; it provides no persistent daemon, cloud
+when it would touch a locally modified file, and the nightly commit of the
+`knowledge/` snapshot into its own local repository outside the vault, which never
+pushes either; it provides no persistent daemon, cloud
 service, remote queue/cache, or SQLite knowledge source.
+
+### Limits you can raise (`llm-wiki.toml`)
+
+A few pipelines hold their whole input in memory, so each stops at a size ceiling:
+the index rebuild and the compile at 2 000 pages or 32 MiB, the search corpus at
+10 000 files or 64 MiB, and a few more. When your vault grows past one, the pipeline
+stops with a message that names the setting to raise, for example
+`raise corpus.max_files in llm-wiki.toml or LLM_WIKI_CORPUS_MAX_FILES`. `doctor`
+warns earlier, once the vault is at 80 % of a ceiling.
+
+To raise one, create `llm-wiki.toml` in the vault root (it is gitignored):
+
+```toml
+[corpus]
+max_files = 20000
+```
+
+For a single run, set the variable instead: `LLM_WIKI_CORPUS_MAX_FILES=20000`. A
+misspelt key or a value that is not a positive integer stops the run with the key's
+name instead of being ignored. `uv run python scripts/doctor.py` shows every value you
+changed and where it came from. Every setting, with its default and the reason for it,
+is listed in `scripts/settings.py`.
+
+How long the vault keeps its own disposable history is a setting too (section
+`[retention]`), for a machine short of disk or an operator who wants a longer record:
+
+- `report_days` (30), `report_files` (60), `report_bytes` (32 MiB) — maintenance
+  reports under `logs/` and their step output;
+- `telemetry_days` (90) — retrieval telemetry;
+- `benchmark_run_days` (30) — benchmark run directories under `cache/benchmarks/`;
+- `config_backup_days` (90) — backups of agent configuration the installer rewrote.
+
+One more, section `[provider]`: `draft_ceiling_seconds` (600) is how long one compile
+draft or episode batch may wait for the model. Drafts measured 99 to 418 s on a loaded
+machine; raise it if compiles report `provider_timeout`. `MEMORY_LLM_TIMEOUT_S`, when
+set, still overrides every call.
+
+Section `[mcp]`: `retrieval_seconds` (14) is the time an MCP `recall` or
+`get_decisions` answer may take, so the cross-encoder reranker fits in it: warm, it took
+a median 3.5 s and a 95th percentile 5.7 s on four idle cores. On a slower or busy
+machine the answer comes back without the rerank more often; raise it there. Every
+other tool keeps 10 s.
+
+Other limits are not settings: they are protocol values, safety bounds on input, or
+the timing a lease and its heartbeat share. Each states its reason where it is defined,
+or is listed in `tests/fixtures/law9-unexplained-limits.txt` until it does.
 
 ### Skills (agent-side workflows)
 
@@ -777,6 +837,10 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 - Weights are read from the local Hugging Face cache only, like the embedding
   model's; `scripts/install_models.py` puts them there (see above). Without
   them the trace says `reranker_unavailable` and the fused order stands.
+- When the rerank's measured cost does not fit the time a question has left, it
+  is not waited for: the trace says `optional_stage_not_admitted`, the fused
+  order stands and the answer is not marked partial. `optional_stage_timeout`
+  means a stage was waited for and ran out of time.
 - `LLMWIKI_RERANKER_MODEL=off` switches it off; `LLMWIKI_RERANKER_MODEL` plus a
   40-hex `LLMWIKI_RERANKER_REVISION` name another model.
   `LLMWIKI_RERANKER_PRECISION=fp32` restores full precision at twice the time.

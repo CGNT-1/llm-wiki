@@ -7,6 +7,7 @@ is NOT a full DLP scanner. For CI secret scanning, rely on gitleaks.
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 
@@ -86,29 +87,79 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         "[REDACTED_JWT]",
     ),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), "[REDACTED_PEM_KEY]"),
+    # A key with no END line (`head id_rsa`) is redacted to the end of the text: what
+    # follows its BEGIN line is the key until something proves otherwise.
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
+        "[REDACTED_PEM_KEY]",
+    ),
+    # Google OAuth access tokens, Telegram bot tokens, Slack incoming webhooks
+    # (audit 2026-09-27 B-4, docs/research/2026-09-27-the-redactor-knows-the-missing-shapes.md).
+    (re.compile(r"(?<![A-Za-z0-9])ya29\.[A-Za-z0-9_-]{20,}"), "[REDACTED_GOOGLE_TOKEN]"),
+    # A bot id, a colon and the secret: the Bot API documents `123456:ABC-DEF1234ghIkl-…`
+    # (a 34-character secret); issued secrets run 35. From 30 on it is a token, not a clock.
+    (re.compile(r"(?<![\w:])\d{6,10}:[A-Za-z0-9_-]{30,}(?![\w-])"), "[REDACTED_TELEGRAM_TOKEN]"),
+    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"), "[REDACTED_SLACK_WEBHOOK]"),
+    # A credential in a URL query (`?api_key=…`, `&access_token=…`, a signed URL's `sig=`).
+    (
+        re.compile(
+            r"(?i)([?&](?:api[_-]?key|(?:access|refresh|id)[_-]?token|token|client[_-]?secret|secret|"
+            r"password|passwd|pwd|auth|sig|signature|key)=)[^&\s#\"'<>]+"
+        ),
+        r"\1[REDACTED]",
+    ),
     (re.compile(r"(?<![A-Za-z0-9])glpat-[\w-]{20,}"), "[REDACTED_GITLAB_TOKEN]"),
     # The password in `scheme://user:password@host` (RFC 3986 3.2.1 deprecates it
     # for exactly this reason); the user and the host stay readable.
     # Up to the LAST `@` of the authority (`user:p@ss@host`), never a port alone.
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@]+:)(?!\d+@)[^\s/]+(@)"), r"\1[REDACTED]\2"),
+    # A scheme starts where no scheme character precedes it: `\b` let the scheme run
+    # start at every dot of `a.a.a…` and rescan it, 6.7 s on 40 KB (audit 2026-09-27 B-6).
+    (re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^\s/:@]+:)(?!\d+@)[^\s/]+(@)"), r"\1[REDACTED]\2"),
     # `curl -u user:password`: the part after the first colon.
     (re.compile(r"(?<![\w-])((?:-u|--user)(?:\s+|=)[^\s:]+:)(?!\$)[^\s]+"), r"\1[REDACTED]"),
     # `--password=X`, `--password X` (docker login, podman, many CLIs).
     (re.compile(r"(?<![\w-])(--password(?:=|[^\S\r\n]+))(?![$-])[^\s]+"), r"\1[REDACTED]"),
-    # MySQL clients take `-pPASSWORD` with no space.
-    (
-        re.compile(r"(?i)(\bmysql(?:dump|admin|import|show|check)?\b[^\r\n]*?\s-p)(?![\s$])[^\s]+"),
-        r"\1[REDACTED]",
-    ),
+    # MySQL's `-pPASSWORD`, `sshpass -p` and `docker login -p` are redacted by
+    # `_redact_command_passwords`, one pass per line (a lazy scan per command name was
+    # quadratic: 2.5 s on 40 KB of `mysql `, audit 2026-09-27 B-6).
 ]
+
+# A command whose `-p` takes a password: MySQL clients only attached (`-pX`; `-p db`
+# prompts and names a database), sshpass and docker login attached or separated.
+_PASSWORD_COMMAND = re.compile(
+    r"(?i)(?<![\w.-])(?:(mysql(?:dump|admin|import|show|check)?)|sshpass|docker[^\S\r\n]+login)(?![\w.-])"
+)
+# A quoted password is taken whole, spaces and all.
+_FLAG_VALUE = r"(?:'[^'\r\n]*'|\"[^\"\r\n]*\"|\S+)"
+_ATTACHED_PASSWORD = re.compile(r"(?<!\S)(-p)(?![\s$])" + _FLAG_VALUE)
+_ANY_PASSWORD = re.compile(r"(?<!\S)(-p(?:[^\S\r\n]+)?)(?![\s$-])" + _FLAG_VALUE)
+
+
+def _command_line(line: str) -> str:
+    command = _PASSWORD_COMMAND.search(line)
+    if command is None:
+        return line
+    flag = _ATTACHED_PASSWORD if command.group(1) else _ANY_PASSWORD
+    return line[: command.end()] + flag.sub(r"\1[REDACTED]", line[command.end():])
+
+
+def _redact_command_passwords(text: str) -> str:
+    return "".join(_command_line(line) for line in text.splitlines(keepends=True))
 
 _HIGH_ENTROPY_RE = re.compile(
     r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"
 )
 _PURE_HEX_RE = re.compile(r"^[0-9a-f]+$")
+# Shannon bits per character above which an unlabelled run is taken for a secret: random base64 is
+# near 6, hex at most 4, prose lower. Basis unknown: value predates measurement; review when a
+# real secret or a path is misjudged (see _MIN_BASE64_RUN).
 _ENTROPY_THRESHOLD = 4.0
+# A slash-separated run whose shortest segment is shorter than this reads as a path, not a key
+# (ba81f395: macOS temporary paths were redacted). Basis unknown: value predates measurement;
+# review when a key or a path is misjudged.
 _MIN_BASE64_SEGMENT = 3
+# The longest segment a high-entropy run needs before it is a secret (ba81f395). Basis unknown:
+# value predates measurement; review when a key or a path is misjudged.
 _MIN_BASE64_RUN = 16
 
 # Syntax a credential literal never contains: calls, subscripts, generics,
@@ -349,4 +400,69 @@ def redact_secrets(text: str) -> str:
     # `_PATTERNS`, so `token=sk-…` collapsed to `token=[REDACTED]` and never to
     # `token=[REDACTED_API_KEY]`. Splitting them into their own pass must not
     # renumber that — the marker is asserted, hashed and stored downstream.
-    return _redact_high_entropy(_redact_patterns(_redact_named_values(text)))
+    return _redact_high_entropy(_redact_command_passwords(_redact_patterns(_redact_named_values(text))))
+
+
+# --- structured values ------------------------------------------------------
+#
+# A regex over serialized JSON cannot tell a value from the quote that ends it:
+# `export PASSWORD=x` inside a JSON string became `…=[REDACTED],"description"…`,
+# which is no longer JSON, and that turn dropped out of the session record
+# (audit 2026-09-27 A-4). Structured data is redacted as structure: every string
+# leaf through `redact_secrets`, every value under a secret-named key blanked.
+# One walker for the queue, the blackboard, event payloads and transcripts.
+# Research: docs/research/2026-09-27-a-secret-in-structure-is-redacted-as-structure.md
+SECRET_KEYS = frozenset(
+    {
+        "api_key", "apikey", "authorization", "cookie", "credential", "credentials", "pass",
+        "passwd", "passphrase", "password", "private_key", "secret", "set_cookie", "token",
+    }
+)
+_SECRET_KEY_SUFFIXES = ("_api_key", "_authorization", "_cookie", "_credential", "_password", "_secret", "_token")
+
+
+def is_secret_key(key: object) -> bool:
+    """Whether this mapping key names a secret; a non-string key names none.
+
+    JSON turns the other basic key types into "1", "true" and "null", so none of
+    them can spell a secret. See
+    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
+    """
+    if not isinstance(key, str):
+        return False
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+    return normalized in SECRET_KEYS or normalized.endswith(_SECRET_KEY_SUFFIXES)
+
+
+def _redacted_mapping(value: dict) -> dict:
+    return {key: "[REDACTED]" if is_secret_key(key) else redact_structure(item) for key, item in value.items()}
+
+
+def _redacted_container(value: object) -> object:
+    if isinstance(value, dict):
+        return _redacted_mapping(value)
+    if isinstance(value, (list, tuple)):
+        return [redact_structure(item) for item in value]
+    return value
+
+
+def redact_structure(value: object) -> object:
+    """A copy of a JSON-shaped value with its secrets removed, structure intact."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    return _redacted_container(value)
+
+
+def _redacted_line(line: str) -> str:
+    body = line.rstrip("\r\n")
+    try:
+        record = json.loads(body)
+    except ValueError:
+        return redact_secrets(line)
+    ending = line[len(body):]
+    return json.dumps(redact_structure(record), ensure_ascii=False, separators=(",", ":")) + ending
+
+
+def redact_jsonl(text: str) -> str:
+    """JSON Lines with each record redacted as structure; a line that is not JSON as text."""
+    return "".join(_redacted_line(line) for line in text.splitlines(keepends=True))

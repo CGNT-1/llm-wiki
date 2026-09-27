@@ -40,6 +40,10 @@ NOTES_RELATIVE = "knowledge/notes"
 MAX_ACCESS_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_PAGES_PER_EXPORT = 100
 MAX_CANDIDATES_SCANNED_PER_EXPORT = 1_000
+# Access events one export reads for one page. The page's `access_telemetry_sequence` watermark
+# advances to the last event read, so the next export resumes there and none is lost; the bound
+# only sizes one read. Basis unknown: value predates measurement; review when an export regularly
+# reads a full batch.
 MAX_EVENTS_PER_PAGE_EXPORT = 1_000
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)

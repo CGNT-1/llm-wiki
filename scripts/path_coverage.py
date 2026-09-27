@@ -27,6 +27,12 @@ try:
 except ImportError:
     from python_parse import PARSE_FAILURES, parse_python
 
+# What one coverage answer counts or parses. Each is reported when reached, never
+# silent: a node count at the ceiling says `nodes_exact: false`, parse errors past the
+# limit set `errors_truncated`, and a file over MAX_PARSE_BYTES answers `not_parsed`
+# with its reason. The parse walk stops after PARSE_NODE_CEILING syntax nodes and also
+# sets `errors_truncated`. Basis unknown: values predate measurement (2026-09-10); review if a
+# real source file is reported truncated or not parsed.
 NODE_CEILING = 10_000
 PARSE_ERROR_LIMIT = 20
 PARSE_NODE_CEILING = 200_000
@@ -38,6 +44,9 @@ COVERAGE_NOTE = (
 )
 
 
+# A source hashed to tell whether the index still matches it: the same 16 MiB as
+# mcp_server.MAX_NAVIGATION_SOURCE_BYTES, the largest file navigation reads; a larger
+# one is refused by lsp_security's bounded reader, never hashed in part.
 MAX_HASHED_BYTES = 16 * 1024 * 1024
 # Never a digest: 64 hex characters cannot spell it.
 UNREADABLE = "unreadable"

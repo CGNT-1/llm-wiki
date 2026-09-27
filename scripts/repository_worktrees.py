@@ -28,7 +28,6 @@ import repository_index as index
 
 INDEX_KEY = "llmwiki.index"
 BRANCH_KEY = "llmwikiIndex"
-MAX_WORKTREES_PER_REPOSITORY = 64
 # A worktree's first build is a full one (reuse is per checkout), so one pass
 # starts at most this many; the rest wait for the next pass or first use.
 MAX_FOLLOWED_PER_PASS = 8
@@ -76,7 +75,11 @@ def parse_worktrees(listing: str) -> list[Worktree]:
 
 def list_worktrees(checkout: Path) -> list[Worktree]:
     listing = index._git_text(checkout, "worktree", "list", "--porcelain", "-z")  # noqa: SLF001
-    return parse_worktrees(listing)[:MAX_WORKTREES_PER_REPOSITORY]
+    # Every worktree: a cap of 64 left the ones past it in git's listing
+    # undiscovered for good. The listing is bounded by MAX_GIT_OUTPUT_BYTES (a
+    # refusal, not a cut) and the indexing per pass by MAX_FOLLOWED_PER_PASS.
+    # docs/research/2026-09-27-a-cut-says-what-it-left-out.md
+    return parse_worktrees(listing)
 
 
 def _indexable(worktree: Worktree) -> bool:

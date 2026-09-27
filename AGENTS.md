@@ -206,7 +206,8 @@ end as an error).
 A session whose close failed is closed again by the next caller for its key, under
 that caller's deadline, and is evicted before a healthy idle one. A start that ran
 out of time or met the operating system is retried at most three times, after 5 s,
-30 s and 120 s; identity, protocol and capability failures stay terminal. Open
+30 s and 120 s — a server that ran 600 s before failing earns the three back —; identity,
+protocol and capability failures stay terminal. Open
 documents are a bounded cache, not a ledger: the least recently used is closed with
 `textDocument/didClose` to make room, and `synchronize` re-reads a retained document
 only when its file identity changed. A server unused for 300 seconds is closed by the

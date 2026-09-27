@@ -58,13 +58,24 @@ from reliable_memory import (  # noqa: E402
     sha256_bytes,
 )
 
-DEFAULT_HOT_DAYS = 90
+# The Stage 2 contract's 90 hot days (CLAUDE.md: "Archives keep 90 hot days"), from
+# its one definition rather than a second literal.
+DEFAULT_HOT_DAYS = DEFAULTS.archive_hot_days
 from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
 
 DEFAULT_TRANSACTION_RETENTION_DAYS = UNDO_RETENTION_DAYS
+# One small JSON or Markdown file the archiver reads whole (a compile receipt, a build intent, a
+# decision page); the largest live receipt is 16.6 KB (2026-09-27), so 1 MiB only refuses a
+# corrupted file.
 MAX_POLICY_BYTES = 1024 * 1024
+# Entries one archive directory listing reads (a month's bags, a package's files); a listing past
+# it refuses rather than reading a corrupted or foreign directory. Basis unknown: value predates
+# measurement; review when a real month or package nears it.
 MAX_ARCHIVE_ENTRIES = 10_000
+# Month directories one archive listing reads: 1 200 months is a hundred years of monthly bags, so
+# only a corrupted or foreign root reaches it, and the listing refuses.
 MAX_ARCHIVE_MONTHS = 1_200
+# An archive step yields to a live Markdown writer rather than queueing; the next nightly retries. basis unknown — value predates measurement; review when archive steps report the gate busy on consecutive nights.
 ARCHIVE_WRITER_WAIT_SECONDS = 0.25
 # Explicit access control entries survive `/inheritance:r`, which only drops
 # inherited ones. Windows images place explicit SYSTEM, Administrators and

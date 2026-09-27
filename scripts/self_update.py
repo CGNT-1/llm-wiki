@@ -14,6 +14,7 @@ See knowledge/notes/automatic-code-update-decision.md.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import subprocess
@@ -28,6 +29,7 @@ else:  # pragma: no cover - 3.10 reads the same documents through tomli
 
 from secret_redact import describe_error
 
+# One `git fetch` of the nightly update; the update's time limit counts one fetch. basis unknown — value predates measurement; review when fetches time out on a working network.
 FETCH_TIMEOUT_SECONDS = 120.0
 # One git call of the nightly update, which fetches over the network; the local-only git calls elsewhere allow 10-20 s.
 GIT_TIMEOUT_SECONDS = 60.0
@@ -41,17 +43,19 @@ BASELINE_SYNC_COMMAND = (
 )
 FETCH_DETAIL_CHARS = 300
 
-# What one update may cost the pass that calls it, by its own timeouts: two
-# fetches (the default branch and the tracked one), the baseline sync, and the
-# sixteen ordinary git calls of a full update — `rev-parse --abbrev-ref`,
-# `config --get`, `symbolic-ref`, `rev-parse FETCH_HEAD` twice, `rev-parse HEAD`
-# twice, `merge-base --is-ancestor` twice, four `diff`s, `hash-object`,
-# `cat-file` and the `merge`. The
-# nightly counts this in its own bound instead of leaving the step out of the
-# sum. Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+# What one update may cost the pass that calls it, by its own timeouts: one
+# fetch of the default branch, the baseline sync, and the sixteen ordinary git
+# calls of a full update — `rev-parse --abbrev-ref`, `config --get`,
+# `symbolic-ref`, `rev-parse FETCH_HEAD`, `rev-parse HEAD` twice,
+# `merge-base --is-ancestor` twice, five `diff`s, `hash-object`, `cat-file` and
+# the `merge`. The nightly counts this in its own bound instead of leaving the
+# step out of the sum; `tests/test_an_update_costs_what_it_says.py` runs a real
+# update and holds the counts to the code. Research:
+# docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+FETCHES_PER_UPDATE = 1
 GIT_CALLS_PER_UPDATE = 16
 WORST_CASE_SECONDS = (
-    2 * FETCH_TIMEOUT_SECONDS
+    FETCHES_PER_UPDATE * FETCH_TIMEOUT_SECONDS
     + SYNC_TIMEOUT_SECONDS
     + GIT_CALLS_PER_UPDATE * GIT_TIMEOUT_SECONDS
 )
@@ -453,7 +457,7 @@ def _set_aside(root: Path, paths: list[str]) -> dict[str, tuple[bytes, int]]:
 
 
 def _put_back(root: Path, saved: dict[str, tuple[bytes, int]]) -> None:
-    """A failed merge leaves the tree as it was: each copy set aside returns."""
+    """A failed or interrupted merge leaves the tree as it was: each copy set aside returns."""
     for path, (content, mode) in saved.items():
         target = root / path
         if not os.path.lexists(target):
@@ -465,7 +469,10 @@ def _fast_forward_over(root: Path, fetched: str, copies: list[str]) -> None:
     saved = _set_aside(root, copies)
     try:
         _git(root, "merge", "--ff-only", fetched)
-    except SelfUpdateError:
+    except BaseException:
+        # A timeout or an OSError skipped the put-back too (audit 2026-09-27 C-13);
+        # only a missing path is written, so a merge that got as far as the file
+        # is left alone.
         _put_back(root, saved)
         raise
 
@@ -501,3 +508,44 @@ def _update_over_copies(root: Path, head: str, fetched: str) -> dict:
     if isinstance(copies, dict):
         return copies
     return _merged_update(root, head, fetched, copies)
+
+
+# What the installers print for the checkout they leave, by the reason
+# `_update_target` stops with: they used to promise a fast-forward of whatever
+# branch was checked out (audit 2026-09-27 C-12,
+# docs/research/2026-09-27-the-installers-say-which-branch-and-which-warning.md).
+_TARGET_NOTES = {
+    "detached_head": (
+        "none - this checkout is pinned to one commit, which the nightly update skips; "
+        "update it by hand with git"
+    ),
+    "no_tracking_remote": "none - the checked-out branch tracks no remote, so the nightly update skips it",
+    "not_on_default_branch": (
+        "none while {branch} is checked out - the nightly update follows only the default "
+        "branch; switch to it with git"
+    ),
+}
+
+
+def update_target_note(root: Path | str) -> str:
+    """What the nightly update will do with this checkout, in the installers' words."""
+    try:
+        target = _update_target(Path(root))
+    except (OSError, subprocess.TimeoutExpired, SelfUpdateError) as error:
+        return f"unknown - {describe_error(error)}"
+    if isinstance(target, dict):
+        return _TARGET_NOTES[target["reason"]].format(**target)
+    branch, remote = target
+    return f"nightly fast-forward of {branch}, the default branch of {remote}"
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Say what the nightly code update does with a checkout.")
+    parser.add_argument("--note", type=Path, required=True, metavar="ROOT", help="the checkout to describe")
+    args = parser.parse_args(argv)
+    print(update_target_note(args.note))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -19,8 +19,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import compile_memory  # noqa: E402
 import llm_client  # noqa: E402
+import settings  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +66,11 @@ def test_a_ceiling_that_is_not_positive_whole_seconds_is_refused(bad: object) ->
             pass
 
 
-def test_the_compile_ceiling_is_above_the_default_and_below_the_observed_pass() -> None:
-    ceiling = compile_memory.COMPILE_PROVIDER_CEILING_S
-    assert llm_client.DEFAULT_TIMEOUT_S < ceiling
-    assert ceiling < 600
+# The longest compile draft measured through the claude CLI on a copy of the vault,
+# 2026-09-27 (24 drafts, 99 to 418 s, the machine loaded by test runs).
+LONGEST_MEASURED_DRAFT_SECONDS = 418
+
+
+def test_the_compile_ceiling_is_above_the_default_and_the_longest_measured_draft(tmp_path: Path) -> None:
+    ceiling = settings.setting_value("provider.draft_ceiling_seconds", tmp_path, environ={})
+    assert llm_client.DEFAULT_TIMEOUT_S < LONGEST_MEASURED_DRAFT_SECONDS < ceiling

@@ -29,6 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 
 DROPPED_CLAIMS_KEY = "dropped_claims"
+# The prompt's own "up to five short, concrete search queries"; change both together.
 MAX_QUERIES = 5
 MISSING_SYSTEM_PROMPT = (
     "You write search queries over one person's chat history. You are given a "

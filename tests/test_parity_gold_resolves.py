@@ -131,6 +131,15 @@ def _assert_named_line_holds(fact: tuple[str, int, str], name: str) -> None:
     assert name in text, f"{path}:{line} does not name {name}: {text.strip()!r}"
 
 
+def _assert_cited_line_holds(fact: tuple[str, int, str], name: str | None) -> None:
+    """A cited line resolves, and names `name` when the note expects one."""
+    path, line, _note = fact
+    if name is None:
+        _resolved_line(path, line)
+        return
+    _assert_named_line_holds(fact, name)
+
+
 def _assert_anchor_holds(fact: tuple[str, int, str]) -> None:
     path, line, note = fact
     if not (ROOT / path).is_file():
@@ -139,10 +148,7 @@ def _assert_anchor_holds(fact: tuple[str, int, str]) -> None:
     if line == 0:
         _assert_definition_resolves(path, name or "")
         return
-    if name is None:
-        _resolved_line(path, line)
-        return
-    _assert_named_line_holds(fact, name)
+    _assert_cited_line_holds(fact, name)
 
 
 def _terms_of(entry: object) -> list[str]:

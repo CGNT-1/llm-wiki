@@ -17,7 +17,7 @@ def test_the_session_start_maintenance_pass_asks_for_a_missed_nightly(monkeypatc
     """Not the hook itself: the detached pass, which costs the session nothing."""
     asked: list[str] = []
     monkeypatch.setattr(integration_adapter, "_run_maintenance_command", lambda *a: None)
-    monkeypatch.setattr(integration_adapter, "spawn_compile_if_idle", lambda: None)
+    monkeypatch.setattr(integration_adapter, "spawn_compile_if_idle", lambda **_kwargs: None)
     monkeypatch.setattr(
         session_start_context,
         "maybe_spawn_nightly_catchup",
@@ -34,7 +34,7 @@ def test_a_catch_up_that_raises_does_not_break_the_maintenance_pass(monkeypatch)
         raise RuntimeError("state is locked")
 
     monkeypatch.setattr(integration_adapter, "_run_maintenance_command", lambda *a: None)
-    monkeypatch.setattr(integration_adapter, "spawn_compile_if_idle", lambda: None)
+    monkeypatch.setattr(integration_adapter, "spawn_compile_if_idle", lambda **_kwargs: None)
     monkeypatch.setattr(session_start_context, "maybe_spawn_nightly_catchup", _explode)
 
     assert integration_adapter._run_session_start_maintenance() == 0

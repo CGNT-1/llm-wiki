@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import doctor
+from settings import setting_value
 
 SCHEMA_VERSION = "1.0"
 ACTIONS = (
@@ -26,9 +27,12 @@ ACTIONS = (
     "doctor",
 )
 ACTION_STATUSES = ("ok", "changed", "skipped", "error")
+# The default for --time-limit-seconds; one run sets its own.
 DEFAULT_TIME_LIMIT_SECONDS = 30.0
 DEFAULT_ACTION_LIMIT = len(ACTIONS)
+# One dependency check's timeout, within the sync's own limit. basis unknown — value predates measurement; review when a check times out on a healthy install.
 DEPENDENCY_TIMEOUT_SECONDS = 30.0
+# Time to reap a child after it was stopped; the stop itself is already bounded.
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 2.0
 WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
@@ -389,7 +393,7 @@ _INDEXES = "indexes"
 
 
 def _run_generation_builder(
-    *, root: Path, state_root: Path, timeout: float, max_sources: int
+    *, root: Path, state_root: Path, timeout: float, max_sources: int | None = None
 ) -> dict:
     if timeout <= 0:
         return _result(
@@ -485,10 +489,25 @@ def _repair_actions(apply: bool) -> set[str] | None:
     return None
 
 
-def _final_doctor_message(status: str) -> str:
+def _attention(report: dict) -> dict[str, str]:
+    """Each doctor check that is not ok, with its own message."""
+    return {
+        str(check.get("id")): str(check.get("message") or check.get("status"))
+        for check in report.get("checks", [])
+        if check.get("status") != "ok"
+    }
+
+
+def _final_doctor_message(status: str, attention: dict[str, str]) -> str:
+    """The verdict, and when it is not ok, which checks made it so.
+
+    "Requires attention" alone left a fresh install ending "with warnings" and no
+    way to tell which; see docs/research/2026-09-27-the-installers-say-which-branch-and-which-warning.md.
+    """
     if status == "ok":
         return "Final doctor check completed."
-    return "Final doctor check requires attention."
+    named = "; ".join(f"{check_id}: {message}" for check_id, message in attention.items())
+    return f"Final doctor check requires attention - {named or 'doctor named no check'}"
 
 
 def _skipped_by_limit(action_id: str) -> dict:
@@ -577,7 +596,7 @@ class _SyncRun:
             root=self.root,
             state_root=self.state_root,
             timeout=self.remaining(),
-            max_sources=doctor.DEFAULT_GENERATION_SOURCE_LIMIT,
+            max_sources=setting_value("corpus.max_files", self.root),
         )
 
 
@@ -596,11 +615,12 @@ class _SyncRun:
     def final_doctor_action(self) -> dict:
         report = self.doctor_report(repair=False, refresh=True)
         status = _mapped_status(str(report.get("overall_status", "error")))
+        attention = _attention(report)
         return _result(
             "doctor",
             status,
-            _final_doctor_message(status),
-            {"overall_status": report.get("overall_status", "error")},
+            _final_doctor_message(status, attention),
+            {"overall_status": report.get("overall_status", "error"), "attention": attention},
         )
 
     def action(self, action_id: str) -> dict:

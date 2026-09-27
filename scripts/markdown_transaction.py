@@ -63,6 +63,7 @@ from reliable_memory import (
     validate_schema,
     validate_state_root,
 )
+from transaction_lineage import quarantine_witnesses, resolved_quarantines
 
 ChangeKind = Literal["create", "replace", "delete"]
 Validator = Callable[[Mapping[str, object]], object]
@@ -99,11 +100,16 @@ _SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v1.json"
 _PROJECT_CHECKPOINT_SCHEMA = (
     Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
 )
+# The writer gate's lease; it must outlive many heartbeats (below) so one late beat never loses the gate.
 _WRITER_LEASE_SECONDS = 30.0
+# The writer's heartbeat: 60 beats per lease. Coordination interval, not operator-tunable.
 _WRITER_HEARTBEAT_SECONDS = 0.5
 _WRITER_WAIT_SECONDS = DEFAULTS.markdown_busy_ms / 1_000
+# First retry delay for a busy writer gate, doubled per attempt up to the cap below.
 _WRITER_RETRY_BASE_SECONDS = 0.005
+# Retry delay cap: short against the hook budgets, so a waiting hook still sees the gate free within them.
 _WRITER_RETRY_CAP_SECONDS = 0.05
+# Deadline for validating a v3 candidate during offline adoption. basis unknown — value predates measurement; review when adoption reports this deadline on a real vault.
 _ADOPTION_VALIDATION_SECONDS = 30.0
 _ADOPTION_VALIDATION_CACHE: set[tuple[object, ...]] = set()
 _ADOPTION_VALIDATION_LOCK = threading.Lock()
@@ -117,12 +123,16 @@ _RELEASE_RETRY_DELAYS = (1.0, 2.0, 5.0, 10.0, 30.0) + (60.0,) * 60
 MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
 MAX_KNOWLEDGE_PATH_BYTES = 512
 MAX_KNOWLEDGE_COMPONENT_BYTES = 128
+# Path depth of a knowledge write target; the deepest live path is 5 (2026-09-27), so 12 only
+# refuses a malformed target (path-safety bound).
 MAX_KNOWLEDGE_DEPTH = 12
 _FEEDBACK_JSON_RE = re.compile(r"knowledge/feedback/[0-9a-f]{6,64}\.json")
 _BLACKBOARD_JSONL_RE = re.compile(
     r"knowledge/projects/[A-Za-z0-9._-]+/\.blackboard/"
     r"(?:tasks|completed|signals|conflicts)\.jsonl"
 )
+# SQLite INTEGER is a signed 64-bit value (https://www.sqlite.org/datatype3.html); file identities
+# are stored inside that range, unsigned ones folded by _UINT64_MODULUS.
 _SQLITE_INT64_MIN = -(1 << 63)
 _SQLITE_INT64_MAX = (1 << 63) - 1
 _UINT64_MODULUS = 1 << 64
@@ -594,16 +604,68 @@ def _coordinator_v3_object_matches(
     ) == _normalized_coordinator_sql(sql)
 
 
-def _coordinator_v3_schema_complete(database: sqlite3.Connection) -> bool:
-    objects = database.execute(
-        """SELECT type, name FROM sqlite_schema
-           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
-    ).fetchall()
-    expected = {("table", name) for name, _sql in _COORDINATOR_V3_TABLE_SQL}
-    return {(str(row[0]), str(row[1])) for row in objects} == expected and all(
-        _coordinator_v3_object_matches(database, name, sql)
-        for name, sql in _COORDINATOR_V3_TABLE_SQL
+# Indexes on the child keys the history prune deletes against: without them every
+# deleted transaction row scans both checkpoint tables (audit 2026-09-27 B-1, owner
+# approved; docs/research/2026-09-27-the-checkpoint-keys-are-indexed.md). Optional in
+# a v3 database — one built before them is complete without them, and the prune
+# creates them before it deletes. They are not part of COORDINATOR_V3_SCHEMA_SHA256,
+# which names the table contract recorded adoptions were written against.
+_COORDINATOR_V3_INDEX_SQL = (
+    (
+        "project_checkpoints_transaction",
+        "CREATE INDEX project_checkpoints_transaction ON project_checkpoints(transaction_id)",
+    ),
+    (
+        "project_checkpoint_attempts_transaction",
+        "CREATE INDEX project_checkpoint_attempts_transaction ON project_checkpoint_attempts(transaction_id)",
+    ),
+)
+_COORDINATOR_V3_INDEXES = dict(_COORDINATOR_V3_INDEX_SQL)
+
+
+def _known_coordinator_index(database: sqlite3.Connection, kind: object, name: object) -> bool:
+    if kind != "index" or name not in _COORDINATOR_V3_INDEXES:
+        return False
+    row = database.execute("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (name,)).fetchone()
+    return row is not None and _normalized_coordinator_sql(row[0]) == _normalized_coordinator_sql(
+        _COORDINATOR_V3_INDEXES[str(name)]
     )
+
+
+def _ensure_coordinator_v3_indexes(database: sqlite3.Connection) -> None:
+    for _name, sql in _COORDINATOR_V3_INDEX_SQL:
+        database.execute(sql.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1))
+
+
+def _schema_objects(database: sqlite3.Connection) -> set[tuple[str, str]]:
+    rows = database.execute("SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")
+    return {(str(row[0]), str(row[1])) for row in rows}
+
+
+def _coordinator_v3_tables_match(database: sqlite3.Connection) -> bool:
+    return all(_coordinator_v3_object_matches(database, name, sql) for name, sql in _COORDINATOR_V3_TABLE_SQL)
+
+
+_COORDINATOR_V3_TABLES = frozenset(("table", name) for name, _sql in _COORDINATOR_V3_TABLE_SQL)
+
+
+def _tables_of(objects: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    return {item for item in objects if item[0] == "table"}
+
+
+def _only_known_indexes(database: sqlite3.Connection, others: set[tuple[str, str]]) -> bool:
+    return all(_known_coordinator_index(database, kind, name) for kind, name in others)
+
+
+def _coordinator_v3_schema_complete(database: sqlite3.Connection) -> bool:
+    """Exactly the v3 tables, each as declared, plus only the known optional indexes."""
+    objects = _schema_objects(database)
+    tables = _tables_of(objects)
+    if tables != _COORDINATOR_V3_TABLES:
+        return False
+    if not _only_known_indexes(database, objects - tables):
+        return False
+    return _coordinator_v3_tables_match(database)
 
 
 def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
@@ -682,14 +744,25 @@ _RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS = (
     "UPDATE project_checkpoints SET transaction_id = NULL WHERE state = 'committed' "
     'AND transaction_id IN (SELECT id FROM "transaction" WHERE ' + _SETTLED_PAST_WINDOW + ")"
 )
-_PRUNE_SETTLED_TRANSACTIONS = (
-    'DELETE FROM "transaction" WHERE ' + _SETTLED_PAST_WINDOW + " "
+_PRUNABLE_TRANSACTION = (
+    _SETTLED_PAST_WINDOW + " "
     "AND NOT (" + " OR ".join("operation_id LIKE ?" for _ in KEPT_OPERATION_FAMILIES) + ") "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoints WHERE transaction_id IS NOT NULL) "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoint_attempts WHERE transaction_id IS NOT NULL)"
 )
+_PRUNABLE_TRANSACTION_IDS = 'SELECT id FROM "transaction" WHERE ' + _PRUNABLE_TRANSACTION + " ORDER BY updated_at"
+# Re-checked per row at delete time, so a row that became referenced since the
+# candidates were read is kept.
+_PRUNE_ONE_TRANSACTION = 'DELETE FROM "transaction" WHERE id = ? AND ' + _PRUNABLE_TRANSACTION
 
+# How many `#<n>` retry ordinals one refused operation may take before the search for
+# a free one stops. Basis unknown: value predates measurement; review when an
+# operation is refused for exhausting it.
 MAX_ATTEMPT_ORDINAL = 100
+
+
+def _kept_family_patterns() -> tuple[str, ...]:
+    return tuple(f"{family}:%" for family in KEPT_OPERATION_FAMILIES)
 
 # How old a transaction directory no row names must be before the prune removes it.
 UNNAMED_ARTIFACT_AGE_SECONDS = 3600
@@ -790,13 +863,14 @@ def _coordinator_schema_objects(
 def _coordinator_schema_exact(
     database: sqlite3.Connection, objects: list[tuple[str, str]]
 ) -> bool:
-    expected = {name: sql for name, sql in _COORDINATOR_V3_TABLE_SQL}
-    return all(
-        kind == "table"
-        and name in expected
-        and _coordinator_v3_object_matches(database, str(name), expected[str(name)])
-        for kind, name in objects
-    )
+    return all(_coordinator_v3_object_known(database, kind, name) for kind, name in objects)
+
+
+def _coordinator_v3_object_known(database: sqlite3.Connection, kind: object, name: object) -> bool:
+    expected = dict(_COORDINATOR_V3_TABLE_SQL)
+    if kind != "table":
+        return _known_coordinator_index(database, kind, name)
+    return name in expected and _coordinator_v3_object_matches(database, str(name), expected[str(name)])
 
 
 def _require_rebuildable_schema(
@@ -3722,13 +3796,17 @@ def _captured_targets(
         }
 
 
+def _prepared_delete(relative: str, before: bytes | None) -> MarkdownChange:
+    if before is None:
+        raise FileNotFoundError(relative)
+    return MarkdownChange.delete(relative)
+
+
 def _prepared_change(
     relative: str, content: bytes | None, before: bytes | None
 ) -> MarkdownChange:
     if content is None:
-        if before is None:
-            raise FileNotFoundError(relative)
-        return MarkdownChange.delete(relative)
+        return _prepared_delete(relative, before)
     if before is None:
         return MarkdownChange.create(relative, _require_bytes(content))
     return MarkdownChange.replace(relative, _require_bytes(content))
@@ -4484,13 +4562,17 @@ def append_knowledge(
 
 
 def _capture_append_context_matches(
-    stored: Mapping[str, object], current: Mapping[str, object]
+    stored: Mapping[str, object],
+    current: Mapping[str, object],
+    inherited: Sequence[Mapping[str, object]] = (),
 ) -> bool:
+    """The committed append was made under this binding, or one a redrive inherited."""
     stored_fence = stored.get("intent_fence")
     current_fence = current.get("intent_fence")
     if not isinstance(stored_fence, Mapping) or not isinstance(current_fence, Mapping):
         return False
-    return stored.get("capture_binding") == current.get("capture_binding") and (
+    bindings = [current.get("capture_binding"), *inherited]
+    return stored.get("capture_binding") in bindings and (
         stored_fence.get("intent_id"),
         stored_fence.get("mode"),
     ) == (
@@ -4507,10 +4589,16 @@ def append_captured_knowledge(
     block: bytes,
     *,
     preconditions: Mapping[str, object],
+    inherited_bindings: Sequence[Mapping[str, object]] = (),
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
 ) -> TransactionRecord:
-    """CAS-append one provider decision under live capture preconditions."""
+    """CAS-append one provider decision under live capture preconditions.
+
+    `inherited_bindings` are the sealed bindings of the task's redrive ancestors for
+    the same decision: a block one of them committed before it died is this
+    redrive's own, not a conflict (audit 2026-09-27 B-14).
+    """
     operation_id, append_path, content = _normalize_append_request(
         operation_id, path, block
     )
@@ -4532,7 +4620,7 @@ def append_captured_knowledge(
             deadline=deadline,
             cancelled=cancelled,
         )
-    if not _capture_append_context_matches(record.preconditions, expected):
+    if not _capture_append_context_matches(record.preconditions, expected, inherited_bindings):
         raise ValueError("capture append transaction preconditions conflict")
     return record
 
@@ -5233,6 +5321,19 @@ class MarkdownCoordinator:
         )
         return occurrence or deduplicated
 
+    def _require_same_occurrence(
+        self,
+        occurrence: sqlite3.Row,
+        base: Mapping[str, object],
+        idempotency_key: str,
+        allocated: set[str],
+    ) -> None:
+        if occurrence["idempotency_key"] != idempotency_key:
+            raise ValueError(
+                "occurrence_id is already bound to another idempotency key"
+            )
+        self._require_same_checkpoint_event(occurrence, base, allocated)
+
     def _require_consistent_checkpoint(
         self,
         occurrence: sqlite3.Row | None,
@@ -5242,11 +5343,7 @@ class MarkdownCoordinator:
     ) -> None:
         allocated = {"project", "sequence", "last_applied_sequence"}
         if occurrence is not None:
-            if occurrence["idempotency_key"] != idempotency_key:
-                raise ValueError(
-                    "occurrence_id is already bound to another idempotency key"
-                )
-            self._require_same_checkpoint_event(occurrence, base, allocated)
+            self._require_same_occurrence(occurrence, base, idempotency_key, allocated)
         if deduplicated is not None:
             self._require_same_checkpoint_event(
                 deduplicated, base, allocated | {"occurrence_id"}
@@ -7586,26 +7683,71 @@ class MarkdownCoordinator:
         return pruned
 
     def prune_history(
-        self, *, retention_days: int = HISTORY_RETENTION_DAYS, now: datetime | None = None
-    ) -> dict[str, int]:
+        self,
+        *,
+        retention_days: int = HISTORY_RETENTION_DAYS,
+        now: datetime | None = None,
+        deadline: float = float("inf"),
+        slice_seconds: float = float("inf"),
+    ) -> dict[str, int | bool]:
         """Drop settled history past its window: committed attempts, then settled rows.
 
         Attempts first, so the transactions they named are no longer named, then a
         committed checkpoint lets go of its settled transaction. Every family but
         the authority ones (`KEPT_OPERATION_FAMILIES`) goes; a transaction an
-        unsettled checkpoint names stays, and so does every quarantined one;
-        operations go with their transaction (`ON DELETE CASCADE`).
+        unsettled checkpoint names stays, and so does every quarantined one and
+        every row that ties a quarantine to its resolution
+        (`transaction_lineage.quarantine_witnesses`); operations go with their
+        transaction (`ON DELETE CASCADE`). Rows go in slices of at most
+        `slice_seconds` under the gate, each committed, until `deadline`: a
+        killed or late prune keeps what it already did and says it is unfinished
+        (audit 2026-09-27 A-6, B-1,
+        docs/research/2026-09-27-a-prune-keeps-what-resolves-a-quarantine.md).
         """
         cutoff = _timestamp(_prune_cutoff(retention_days, now))
+        attempts = self._prune_attempts(cutoff)
+        candidates = self._prunable_history(cutoff)
+        processed, removed = self._prune_in_slices(candidates, cutoff, deadline, slice_seconds)
+        return {"attempts": attempts, "transactions": removed, "unfinished": processed < len(candidates)}
+
+    def _prune_attempts(self, cutoff: str) -> int:
         with self.writer_gate(), self._connect() as database, begin_immediate(database):
+            if getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT:
+                _ensure_coordinator_v3_indexes(database)
             spent = database.execute(_PRUNE_SPENT_RESERVATIONS).rowcount
             attempts = spent + database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
             database.execute(_RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS, (cutoff,))
-            families = tuple(f"{family}:%" for family in KEPT_OPERATION_FAMILIES)
-            transactions = database.execute(
-                _PRUNE_SETTLED_TRANSACTIONS, (cutoff, *families)
-            ).rowcount
-        return {"attempts": attempts, "transactions": transactions}
+        return attempts
+
+    def _prunable_history(self, cutoff: str) -> list[str]:
+        """Candidate rows, oldest first, less every witness of a quarantine."""
+        with self._connect() as database:
+            witnesses = quarantine_witnesses(database)
+            rows = database.execute(_PRUNABLE_TRANSACTION_IDS, (cutoff, *_kept_family_patterns()))
+            return [str(row[0]) for row in rows if row[0] not in witnesses]
+
+    def _prune_in_slices(
+        self, candidates: list[str], cutoff: str, deadline: float, slice_seconds: float
+    ) -> tuple[int, int]:
+        """(candidates processed, rows deleted)."""
+        processed = removed = 0
+        while processed < len(candidates) and time.monotonic() < deadline:
+            stop_at = min(deadline, time.monotonic() + slice_seconds)
+            step, deleted = self._prune_slice(candidates[processed:], cutoff, stop_at)
+            processed, removed = processed + step, removed + deleted
+        return processed, removed
+
+    def _prune_slice(self, candidates: list[str], cutoff: str, stop_at: float) -> tuple[int, int]:
+        """Delete candidates in one committed transaction until `stop_at`; at least one."""
+        processed = deleted = 0
+        arguments = (cutoff, *_kept_family_patterns())
+        with self.writer_gate(), self._connect() as database, begin_immediate(database):
+            for identifier in candidates:
+                deleted += database.execute(_PRUNE_ONE_TRANSACTION, (identifier, *arguments)).rowcount
+                processed += 1
+                if time.monotonic() >= stop_at:
+                    break
+        return processed, deleted
 
     def _recover_interrupted_prunes(self) -> None:
         """Put back the images of every prune that died between rename and mark.
@@ -7661,14 +7803,22 @@ class MarkdownCoordinator:
         return row is not None and row["artifacts_pruned_at"] is None
 
     def _prunable_rows(self) -> list[sqlite3.Row]:
+        """Settled rows with images, and quarantined ones the rows show resolved.
+
+        A resolved quarantine's images proved nothing any more: the retry that
+        committed, or the commit that created its files, is the evidence, and
+        the row itself is kept. Before this, 117 quarantined rows held 60.8 MB of
+        images on this vault for good (audit 2026-09-27 B-2,
+        docs/research/2026-09-27-a-resolved-quarantine-lets-go-of-its-images.md).
+        """
         with self._connect() as database:
-            return list(
-                database.execute(
-                    'SELECT id, updated_at FROM "transaction" '
-                    "WHERE state IN ('committed', 'discarded') "
-                    "AND artifacts_pruned_at IS NULL"
-                )
+            resolved = resolved_quarantines(database)
+            rows = database.execute(
+                'SELECT id, updated_at, state FROM "transaction" '
+                "WHERE state IN ('committed', 'discarded', 'quarantined') "
+                "AND artifacts_pruned_at IS NULL"
             )
+            return [row for row in rows if row["state"] != "quarantined" or row["id"] in resolved]
 
     def _prune_one(
         self,
@@ -8531,18 +8681,23 @@ class MarkdownCoordinator:
         except OSError as exc:
             raise _as_parent_boundary_failure(parent, exc) from exc
 
+    def _capture_target_on_windows(
+        self, target: Path, max_before_bytes: int | None
+    ) -> tuple[bytes | None, tuple[int, int]]:
+        with self._hold_windows_parent(target.parent):
+            before = self._parent_identity(target.parent)
+            content = self._read_bounded_target(target, max_before_bytes)
+            if self._parent_identity(target.parent) != before:
+                raise TargetBoundaryFailure(
+                    f"parent identity changed while reading {target}"
+                )
+            return content, before
+
     def _capture_target(
         self, target: Path, *, max_before_bytes: int | None = None
     ) -> tuple[bytes | None, tuple[int, int]]:
         if not _use_posix_dir_fd():
-            with self._hold_windows_parent(target.parent):
-                before = self._parent_identity(target.parent)
-                content = self._read_bounded_target(target, max_before_bytes)
-                if self._parent_identity(target.parent) != before:
-                    raise TargetBoundaryFailure(
-                        f"parent identity changed while reading {target}"
-                    )
-                return content, before
+            return self._capture_target_on_windows(target, max_before_bytes)
         descriptor = _open_parent_directory(target.parent)
         try:
             metadata = os.fstat(descriptor)
@@ -8719,11 +8874,24 @@ class MarkdownCoordinator:
         if not self._within_capture_bound(before, target):
             return _OVERSIZED_TARGET
         descriptor = os.open(target, _CAPTURE_OPEN_FLAGS)
+        return self._hash_opened_target(
+            descriptor, before, target, lambda: _lstat_or_none(target), target
+        )
+
+    def _hash_opened_target(
+        self,
+        descriptor: int,
+        before: os.stat_result,
+        target: Path,
+        current: Callable[[], os.stat_result | None],
+        label: object,
+    ) -> str:
+        """Hash an opened bounded target and close it; `current` re-reads its metadata."""
         try:
             hashed = self._hashed_or_none(descriptor, before, target)
             if hashed is None:
                 return _OVERSIZED_TARGET
-            self._require_unchanged_hash(hashed[1], _lstat_or_none(target), target)
+            self._require_unchanged_hash(hashed[1], current(), label)
             return hashed[0]
         finally:
             os.close(descriptor)
@@ -8735,16 +8903,9 @@ class MarkdownCoordinator:
         if not self._within_capture_bound(before, Path(name)):
             return _OVERSIZED_TARGET
         descriptor = os.open(name, _CAPTURE_OPEN_FLAGS, dir_fd=parent_descriptor)
-        try:
-            hashed = self._hashed_or_none(descriptor, before, Path(name))
-            if hashed is None:
-                return _OVERSIZED_TARGET
-            self._require_unchanged_hash(
-                hashed[1], _stat_at_or_none(parent_descriptor, name), name
-            )
-            return hashed[0]
-        finally:
-            os.close(descriptor)
+        return self._hash_opened_target(
+            descriptor, before, Path(name), lambda: _stat_at_or_none(parent_descriptor, name), name
+        )
 
     def _within_capture_bound(self, metadata: os.stat_result, target: Path) -> bool:
         """False means the target is too large to be captured at all."""
@@ -9226,6 +9387,49 @@ class MarkdownCoordinator:
         finally:
             self._local.content_guard = previous
 
+    def _refresh_v3_writer_lease(
+        self,
+        database: sqlite3.Connection,
+        owner: object,
+        owner_token: object,
+        fencing_epoch: object,
+    ) -> None:
+        """Copy the canonical owner's lease onto the gate row; lost ownership raises."""
+        registry = self._ownership_registry()
+        registry.require(database, owner)
+        cursor = database.execute(
+            """UPDATE writer_owners
+               SET heartbeat_at=(
+                       SELECT heartbeat_at FROM maintenance_owners
+                       WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
+                         AND fencing_epoch=?
+                   ),
+                   expires_at=(
+                       SELECT expires_at FROM maintenance_owners
+                       WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
+                         AND fencing_epoch=?
+                   )
+               WHERE gate_name='global' AND owner_token=? AND fencing_epoch=?""",
+            (
+                owner.role,
+                owner.scope,
+                owner.actor_id,
+                owner.token,
+                owner.epoch,
+                owner.role,
+                owner.scope,
+                owner.actor_id,
+                owner.token,
+                owner.epoch,
+                owner_token,
+                fencing_epoch,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "Markdown writer gate ownership was lost before mutation"
+            )
+
     def _assert_writer_ownership(self, database: sqlite3.Connection) -> None:
         owner_token = getattr(self._local, "gate_token", None)
         fencing_epoch = getattr(self._local, "gate_fence", None)
@@ -9234,40 +9438,7 @@ class MarkdownCoordinator:
             getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT
             and owner is not None
         ):
-            registry = self._ownership_registry()
-            registry.require(database, owner)
-            cursor = database.execute(
-                """UPDATE writer_owners
-                   SET heartbeat_at=(
-                           SELECT heartbeat_at FROM maintenance_owners
-                           WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
-                             AND fencing_epoch=?
-                       ),
-                       expires_at=(
-                           SELECT expires_at FROM maintenance_owners
-                           WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
-                             AND fencing_epoch=?
-                       )
-                   WHERE gate_name='global' AND owner_token=? AND fencing_epoch=?""",
-                (
-                    owner.role,
-                    owner.scope,
-                    owner.actor_id,
-                    owner.token,
-                    owner.epoch,
-                    owner.role,
-                    owner.scope,
-                    owner.actor_id,
-                    owner.token,
-                    owner.epoch,
-                    owner_token,
-                    fencing_epoch,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError(
-                    "Markdown writer gate ownership was lost before mutation"
-                )
+            self._refresh_v3_writer_lease(database, owner, owner_token, fencing_epoch)
             return
         heartbeat = _now()
         cursor = database.execute(

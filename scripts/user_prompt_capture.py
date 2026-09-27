@@ -49,9 +49,10 @@ from memory_state import spawn_detached, update_state  # noqa: E402
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
 STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 
-from capture_diagnostics import record_capture_failure  # noqa: E402
+from capture_diagnostics import hook_object, record_capture_failure  # noqa: E402
 from capture_operation import claim_operation, complete_operation  # noqa: E402
 from event_envelope import build_event_envelope  # noqa: E402
+from iso_time import local_now  # noqa: E402
 from memory_state import HOOK_STATE_LOCK_TIMEOUT  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 from session_start_project_state import _compute_slug  # noqa: E402
@@ -82,14 +83,7 @@ def _read_stdin() -> str:
 
 def _read_hook_input() -> dict:
     """Parse Claude Code hook JSON from stdin. Tolerant of empty stdin."""
-    raw = _read_stdin()
-    if not raw.strip():
-        return {}
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return result if isinstance(result, dict) else {}
+    return hook_object(_read_stdin(), "prompt_input")
 
 
 def _compute_slug_from_cwd(cwd: str) -> str:
@@ -167,7 +161,9 @@ def _increment_prompt_count(session_id: str, slug: str) -> int:
     try:
         update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
         return count
-    except Exception:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001 - a hook never fails its host
+        # Counted as nothing, so the periodic capture is not started: said, not silent.
+        record_capture_failure("prompt_counter", "prompt count not updated", error=error)
         return 0
 
 
@@ -228,7 +224,7 @@ def _append_prompt_tag(
             append_deadline,
         )
 
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = local_now().strftime("%H:%M:%S")
         # One line: a newline in the prompt started a real daily-log entry
         # (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
         safe = " ".join(redact_secrets(preview).split())[:MAX_PROMPT_PREVIEW]

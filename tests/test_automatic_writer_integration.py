@@ -40,7 +40,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/blackboard.py:_append_jsonl",
     "scripts/bootstrap_project.py:bootstrap",
     "scripts/build_guardrails.py:main",
-    "scripts/build_context.py:main",
+    "scripts/build_context.py:_write_project_context",
     "scripts/daily_log_append.py:locked_append",
     "scripts/daily_log_append.py:locked_append_once",
     "scripts/flush_memory.py:append_daily",
@@ -318,7 +318,8 @@ def _drive_build_context(d: _Drive) -> None:
     monkeypatch.setattr(module, "build_context", lambda *args: secret)
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
     monkeypatch.setattr(sys, "argv", ["build_context.py", "demo", "--write"])
-    d.function()
+    # The writer is `_write_project_context`; the command line reaches it through `main`.
+    module.main()
 
 
 def _drive_daily_log_append(d: _Drive) -> None:

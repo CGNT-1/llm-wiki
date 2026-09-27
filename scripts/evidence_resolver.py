@@ -14,10 +14,22 @@ from pathlib import Path
 from bounded_io import read_stable_bytes
 from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
+# Bounded reads of evidence files; a file past its bound is refused by name, never
+# cut, so a citation or an archive check fails rather than reading a partial file.
+# A daily log read for archiving (also by archive_daily): the largest of 32 daily logs
+# on the installed vault on 2026-09-27 was 867 318 bytes, so 16 MiB is about 19 times
+# that; review if days grow toward it.
 MAX_DAILY_BYTES = 16 * 1024 * 1024
+# A source a grounded answer cites. Basis unknown: value predates measurement; the
+# largest note is about 19 KB and the largest journal segment about 4 MiB.
 MAX_GROUNDED_SOURCE_BYTES = 8 * 1024 * 1024
+# An archive bag's manifest or compile receipt, and one BagIt tag file. Basis unknown:
+# value predates measurement; no bag existed on the installed vault on 2026-09-27.
 MAX_ARCHIVE_MANIFEST_BYTES = 1024 * 1024
 MAX_TAG_FILE_BYTES = 1024 * 1024
+# Bags in one archive month and entries in one listed directory; a month past it is
+# refused rather than resolved from a partial listing. An archive writes about one
+# bag per archived daily log, some 31 a month, so 10 000 only stops a corrupted one.
 MAX_BAGS_PER_MONTH = 10_000
 MAX_DIRECTORY_ENTRIES = 10_000
 ARCHIVE_SCHEMA = Path(__file__).with_name("schemas") / "archive-manifest-v1.json"
@@ -696,13 +708,34 @@ def _part_receipts(
 ) -> tuple[list[dict[str, object] | None], list[str]]:
     """A split day: its parts must be the day's own compile parts, each with its receipt."""
     parts = manifest["compile_parts"]
-    spans = [(part["byte_start"], part["byte_end"]) for part in parts]
-    if spans != _daily_part_bounds(payload):
-        raise EvidenceResolutionError("archive compile parts are not the day's parts")
+    _require_recorded_parts([(part["byte_start"], part["byte_end"]) for part in parts], payload)
     names = [str(part["compile_receipt_ref"]["embedded_path"]) for part in parts]
     expected.update(names)
     receipts = [_part_receipt(path, part, daily_id, payload, coordinator) for part in parts]
     return receipts, names
+
+
+def _require_recorded_parts(spans: list[tuple[int, int]], payload: bytes) -> None:
+    """The bag's own part table, checked without today's split rule (audit 2026-09-27 B-17).
+
+    A sealed bag is checked against what it recorded, not against a rule that
+    may change after it was sealed (RFC 8493 validity; research:
+    docs/research/2026-09-27-a-sealed-bag-carries-its-own-parts.md). What makes
+    the record correct needs no size: non-empty parts cover the day from its
+    first byte to its last, each starting where the one before it ended and
+    where an entry starts. Each part's digest is then held to its
+    receipt by `_part_receipt`.
+    """
+    starts = [start for start, _end in spans]
+    ends = [end for _start, end in spans]
+    checks = (
+        starts[:1] == [0] and ends[-1:] == [len(payload)],
+        starts[1:] == ends[:-1],
+        all(map(int.__lt__, starts, ends)),
+        set(starts) <= set(_daily_entry_offsets(payload)),
+    )
+    if not all(checks):
+        raise EvidenceResolutionError("archive compile parts are not the day's parts")
 
 
 def _part_receipt(
@@ -1100,7 +1133,12 @@ def compile_part_slice(content: bytes, digest: str) -> bytes | None:
     present verbatim and in place, which is the append-only argument a
     transparency log makes with a consistency proof (RFC 6962).
     """
-    for start, _end in _daily_part_bounds(content):
+    return _slice_at(content, [start for start, _end in _daily_part_bounds(content)], digest)
+
+
+def _slice_at(content: bytes, starts: list[int], digest: str) -> bytes | None:
+    """The first entry-aligned slice, from one of these part starts, whose bytes hash to `digest`."""
+    for start in starts:
         found = _slice_from(content, start, digest)
         if found is not None:
             return found
@@ -1157,7 +1195,7 @@ class EvidenceResolver:
             reason = "not found" if not matches else "ambiguous"
             raise EvidenceResolutionError(f"archive evidence source is {reason}")
         bag = matches[0]
-        source = _referenced_source(bag.payload, ref)
+        source = _referenced_source(bag, ref)
         assert source is not None
         return self._slice(ref, source, bag.payload_path, "archive")
 
@@ -1268,16 +1306,25 @@ def _span_inside(ref: EvidenceRef, start: int, end: int) -> bool:
 def _bag_matches(bag: ValidatedBag, ref: EvidenceRef) -> bool:
     if bag.manifest["logical_daily_id"] != ref.daily_id:
         return False
-    if _referenced_source(bag.payload, ref) is None:
+    if _referenced_source(bag, ref) is None:
         raise EvidenceResolutionError("archive daily source hash mismatch")
     return True
 
 
-def _referenced_source(payload: bytes, ref: EvidenceRef) -> bytes | None:
+def _referenced_source(bag: ValidatedBag, ref: EvidenceRef) -> bytes | None:
     """The whole day, or the compile part a page quoted from (audit 2026-09-26 B-1)."""
-    if sha256_bytes(payload) == ref.source_sha256:
-        return payload
-    return compile_part_slice(payload, ref.source_sha256)
+    if sha256_bytes(bag.payload) == ref.source_sha256:
+        return bag.payload
+    return _slice_at(bag.payload, _recorded_part_starts(bag.manifest), ref.source_sha256)
+
+
+def _recorded_part_starts(manifest: Mapping[str, object]) -> list[int]:
+    """Where the sealed day was cut, as the bag recorded it (audit 2026-09-27 B-17).
+
+    A v1 bag holds a day compiled whole, so its only part starts at the first byte.
+    """
+    parts = manifest.get("compile_parts") or [{"byte_start": 0}]
+    return [int(part["byte_start"]) for part in parts]
 
 
 def extract_evidence_references(text: str) -> list[EvidenceRef]:

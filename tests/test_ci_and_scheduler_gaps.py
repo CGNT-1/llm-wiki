@@ -5,13 +5,14 @@ nothing. Research: `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.
 """
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests.powershell_literal import ps_literal
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
@@ -31,7 +32,7 @@ def _tracked_powershell_scripts() -> list[str]:
 def test_every_powershell_script_parses(script):
     command = (
         "$tokens = $null; $errors = $null; "
-        f"[void][System.Management.Automation.Language.Parser]::ParseFile({json.dumps(str(ROOT / script))}, [ref]$tokens, [ref]$errors); "
+        f"[void][System.Management.Automation.Language.Parser]::ParseFile({ps_literal(str(ROOT / script))}, [ref]$tokens, [ref]$errors); "
         "if ($errors.Count) { $errors | Out-String | Write-Error; exit 1 }"
     )
 

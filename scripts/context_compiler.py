@@ -51,6 +51,12 @@ DEFAULT_BUDGET = ContextBudget(
     reserved_output_tokens=0,
     safety_margin_tokens=512,
 )
+# How much surrounding page the compiler adds around a retrieved chunk: a parent
+# section up to 1 500 characters is taken whole, a larger one only as a 2 000-character
+# subtree, and a following section of up to 200 characters rides along when it still
+# fits. These shape context, not correctness: nothing is refused or lost past them.
+# Basis unknown: values predate measurement (2026-07-18, the L0/L1/L2 compiler); review
+# when answer quality is measured against context size.
 DEFAULT_SMALL_PARENT_CHARS = 1500
 DEFAULT_LARGE_PARENT_SUBTREE_CHARS = 2000
 ADJACENT_CONTEXT_CHARS = 200

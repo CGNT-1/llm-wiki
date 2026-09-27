@@ -70,7 +70,7 @@ def test_a_session_record_authority_is_named_by_the_contract_and_is_not_a_claim_
 
     claim_authorities = dict(_EXTRACTION_ENUMS)["authority"]
     contract = (Path(__file__).resolve().parent.parent / "CLAUDE.md").read_text("utf-8")
-    ranked = authority_weight("inferred") < authority_weight("session") < authority_weight("ai-derived")
+    ranked = authority_weight("inferred", "knowledge/notes/x.md") < authority_weight("session", "knowledge/notes/x.md") < authority_weight("ai-derived", "knowledge/notes/x.md")
 
     assert ("source_authority: session" in contract, "session" in claim_authorities, ranked) == (
         True,

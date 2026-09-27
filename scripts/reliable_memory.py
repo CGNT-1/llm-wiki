@@ -24,6 +24,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 
+# The Reliability v3 contract's coordination values, fixed in its plan
+# (docs/superpowers/plans/2026-07-13-reliable-memory.md) and pinned by
+# tests/test_reliable_memory.py. They are not operator settings (law 9 class c, kept):
+# leases and heartbeats are pairs whose ratio every live owner relies on (a heartbeat
+# at a third of its lease), attempt counts, busy waits and worker bounds are the
+# plan's, and retention days are the contract's undo/archive windows (CLAUDE.md,
+# Stage 2: "Archives keep 90 hot days"). Changing one means changing the contract.
 @dataclass(frozen=True)
 class ReliableMemoryDefaults:
     markdown_busy_ms: int = 10_000
@@ -50,6 +57,15 @@ class ReliableMemoryDefaults:
 
 
 DEFAULTS = ReliableMemoryDefaults()
+
+# The one bound on a capture decision file, for the writer and every reader. The
+# indexer read it with 64 KiB while the writer allowed 1 MiB, so a verbose classifier
+# answer (43 KB, stored twice: the wire answer and the plan) failed every retry and
+# the day's summary was lost (audit 2026-09-27 B-3,
+# docs/research/2026-09-27-one-file-one-bound.md). 1 MiB is the writer's bound, kept:
+# about 170 times the 1 500-token answer the classifier asks for, so it refuses only an
+# answer no summary needs, and CLI providers do not enforce the request's token cap.
+MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 
 
 def _require_positive_int(name: str, value: object) -> None:
@@ -297,19 +313,20 @@ def _path_is_under(path: str, mount_point: str) -> bool:
     return mount_point == "/" or path == mount_point or path.startswith(f"{mount_point}/")
 
 
+def _has_reparse_attribute(candidate: Path) -> bool:
+    if not candidate.exists():
+        return False
+    attributes = getattr(candidate.stat(follow_symlinks=False), "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
+
+
 def _windows_reparse_point(path: Path) -> bool:
     if os.name != "nt":
         return False
     current = path.absolute()
     candidates = [current, *current.parents]
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-        attributes = getattr(candidate.stat(follow_symlinks=False), "st_file_attributes", 0)
-        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        if attributes & reparse_flag:
-            return True
-    return False
+    return any(_has_reparse_attribute(candidate) for candidate in candidates)
 
 
 def _second_writer_is_blocked(second: sqlite3.Connection) -> bool:
@@ -412,9 +429,8 @@ def _owner_permissions_supported(path: Path) -> bool:
     return _platform_system() != "Windows" and os.name == "posix"
 
 
-def _set_owner_only(path: Path, mode: int) -> bool:
-    if not _owner_permissions_supported(path):
-        return False
+def _chmod_or_warn(path: Path, mode: int) -> bool:
+    """Apply `mode`; False (with the warning) when the filesystem has no permission bits."""
     try:
         path.chmod(mode)
     except OSError as exc:
@@ -424,12 +440,24 @@ def _set_owner_only(path: Path, mode: int) -> bool:
         warnings.warn(
             f"owner-only permission bits are unsupported for {path}",
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
         return False
+    return True
+
+
+def _require_applied_mode(path: Path, mode: int) -> None:
     actual = stat.S_IMODE(path.stat().st_mode)
     if actual != mode:
         raise PermissionError(f"owner-only mode {mode:o} was not applied to {path}: got {actual:o}")
+
+
+def _set_owner_only(path: Path, mode: int) -> bool:
+    if not _owner_permissions_supported(path):
+        return False
+    if not _chmod_or_warn(path, mode):
+        return False
+    _require_applied_mode(path, mode)
     return True
 
 
@@ -568,28 +596,36 @@ def _validate_or_initialize_operational_contract(
     *,
     initialize: bool,
 ) -> None:
-    application_id = _pragma_integer(connection, "application_id")
-    user_version = _pragma_integer(connection, "user_version")
+    identity = (
+        _pragma_integer(connection, "application_id"),
+        _pragma_integer(connection, "user_version"),
+    )
     if initialize:
-        if (application_id, user_version) == (0, 0):
-            connection.execute(f"PRAGMA application_id={contract.application_id:d}")
-            connection.execute(f"PRAGMA user_version={contract.user_version:d}")
-            application_id = _pragma_integer(connection, "application_id")
-            user_version = _pragma_integer(connection, "user_version")
-        elif (application_id, user_version) != (
-            contract.application_id,
-            contract.user_version,
-        ):
-            raise OperationalDatabaseContractError(
-                "cannot initialize a conflicting operational database contract"
-            )
-    if (application_id, user_version) != (
-        contract.application_id,
-        contract.user_version,
-    ):
+        identity = _initialized_contract_identity(connection, contract, identity)
+    if identity != (contract.application_id, contract.user_version):
         raise OperationalDatabaseContractError(
             "operational database application_id or user_version mismatch"
         )
+
+
+def _initialized_contract_identity(
+    connection: sqlite3.Connection,
+    contract: OperationalDatabaseContract,
+    identity: tuple[int, int],
+) -> tuple[int, int]:
+    """Stamp an empty database with the contract; refuse one stamped otherwise."""
+    if identity == (0, 0):
+        connection.execute(f"PRAGMA application_id={contract.application_id:d}")
+        connection.execute(f"PRAGMA user_version={contract.user_version:d}")
+        return (
+            _pragma_integer(connection, "application_id"),
+            _pragma_integer(connection, "user_version"),
+        )
+    if identity != (contract.application_id, contract.user_version):
+        raise OperationalDatabaseContractError(
+            "cannot initialize a conflicting operational database contract"
+        )
+    return identity
 
 
 def _migration_incomplete(message: str) -> OperationalDatabaseContractError:
@@ -665,12 +701,16 @@ def _require_bounded_regular_file(
         raise PermissionError("runtime file must be a bounded regular file")
 
 
+def _require_windows_owner_only(path: Path) -> None:
+    from memory_queue import _is_owner_only
+
+    if not _is_owner_only(path):
+        raise PermissionError("runtime file must be owner-only")
+
+
 def _require_owner_only_file(path: Path, metadata: os.stat_result) -> None:
     if os.name == "nt":
-        from memory_queue import _is_owner_only
-
-        if not _is_owner_only(path):
-            raise PermissionError("runtime file must be owner-only")
+        _require_windows_owner_only(path)
         return
     mode = stat.S_IMODE(metadata.st_mode)
     if mode & 0o077 or mode & 0o600 != 0o600:
@@ -799,6 +839,35 @@ def _require_replayed_journal(path: Path, error: sqlite3.OperationalError) -> No
         raise error
     if not _replayed_hot_journal(path):
         raise error
+
+
+# Rows fetched per step of a streamed scan of an operational table, so memory holds one
+# batch rather than a table: doctor's materialised scan peaked at 67 MB of Python
+# objects on the 29 275-row installed vault. 1 000 rows keep a batch well under 1 MB at
+# the measured 291-byte mean preconditions and bound the time between stop checks;
+# review if a batch's rows grow past that mean by orders of magnitude.
+OPERATIONAL_SCAN_BATCH_ROWS = 1_000
+
+
+def streamed_rows(
+    database: sqlite3.Connection,
+    query: str,
+    parameters: Sequence[object] = (),
+    *,
+    stop: Callable[[], None],
+) -> Iterator[sqlite3.Row]:
+    """Every row of the query, one batch in memory at a time.
+
+    `stop` runs before each batch is handed out and raises to end the scan (a
+    deadline). No row count is capped: a table that grows with use is read whole
+    rather than refused past a number, which is how doctor and the installed-vault
+    check both misjudged a busy vault. See
+    `docs/research/2026-09-27-doctor-reads-every-transaction.md`.
+    """
+    cursor = database.execute(query, tuple(parameters))
+    while batch := cursor.fetchmany(OPERATIONAL_SCAN_BATCH_ROWS):
+        stop()
+        yield from batch
 
 
 def open_readonly_operational_db(

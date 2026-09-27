@@ -58,6 +58,9 @@ class _SubprocessFacade:
 subprocess = _SubprocessFacade()
 _lsp_process_tree.subprocess = subprocess
 
+# The server stderr kept in memory, oldest bytes dropped first: a project constraint of the
+# 2026-07-22 Pyright plan (docs/superpowers/plans/2026-07-22-python-pyright-navigation.md, "4 MiB
+# stderr"); only the redacted last kilobyte is ever written out. Not measured.
 MAX_STDERR_BYTES = 4 * 1024 * 1024
 LSP_ENV_ALLOWLIST = frozenset(
     {
@@ -76,6 +79,8 @@ LSP_ENV_ALLOWLIST = frozenset(
     }
 )
 
+# One read of the stderr pipe: 64 KiB + 1, one byte over the default Linux pipe capacity of
+# 65 536. The commit that set it (7d1f1a5d) gives no reason; review if stderr reads show up.
 _STDERR_CHUNK_BYTES = 65_537
 # Spawning the server and publishing its first lease took longer than two
 # seconds on a loaded four-core Windows machine, which turned a healthy
@@ -85,26 +90,42 @@ _STARTUP_WAIT_SECONDS = 10.0
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _STARTUP_FAILED = "startup_failed"
 _PROCESS_EXITED = "process_exited"
+# owner.json, lease.json and failure.json: the largest on the live vault is 219 bytes
+# (2026-09-27) and failure.json's stderr tail is bounded at 1 KiB, so 4 KiB refuses only a record
+# that is not ours.
 _MAX_EVIDENCE_BYTES = 4096
 # The redacted last words of a failed server, as JSON encodes them. The rest of
 # the record is under 300 bytes, so the whole file stays well inside its bound.
 _STDERR_TAIL_BYTES = 1024
 # Redacted before the tail is cut, so no line reaches the redactor without its key.
 _STDERR_REDACTION_WINDOW_BYTES = 64 * 1024
+# Output of the Windows ACL command run for one owner root (stdout and stderr together); 16 KiB
+# refuses runaway output. Value predates measurement; review if a healthy ACL run is refused.
 _MAX_ACL_OUTPUT_BYTES = 16 * 1024
+# The live lease is refreshed every 10 s and expires 30 s after its last refresh: the contract
+# in CLAUDE.md and knowledge/notes/lsp-live-lease-decision.md (three missed beats = dead).
 _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
+# A server's graceful exit before it is killed; 2 s held on a loaded hosted Windows runner except once in
+# 200 (docs/research/2026-09-25-the-clean-run-after-the-audit-fixes.md).
 _GRACEFUL_CLEANUP_SECONDS = 2.0
+# The first recovery retry beat; it doubles up to the ceiling below. No contract depends on the value.
 _RECOVERY_RETRY_SECONDS = 0.05
 # Where the recovery beat stops doubling. A cleanup that is stuck is stuck;
 # past this the retries cost more than they can win back.
 _RECOVERY_RETRY_CEILING_SECONDS = 2.0
+# Windows handles and temporary names held for cleanup at once, and incomplete startups in the
+# module registry: one per start is normal; the bounds refuse a leak. Values predate measurement.
 _MAX_PENDING_CHILD_HANDLES = 8
 _MAX_PENDING_TEMP_NAMES = 1
 _MAX_STARTUP_CLEANUP_OWNERS = 8
+# A server launch command: every pinned profile builds at most four arguments (node, server,
+# one flag, one owner path; lsp_server_profile.launch_command). 64 arguments and 64 KiB refuse a malformed command before exec; both stay far
+# under ARG_MAX. Values predate measurement; review when a profile needs more.
 _MAX_GENERATION_LAUNCH_ARGUMENTS = 64
 _MAX_GENERATION_LAUNCH_BYTES = 64 * 1024
 _WINDOWS_LEASE_RETRY_ERRORS = frozenset({5, 32, 33})
+# Pause between retries of a Windows lease write refused by a sharing error (5, 32, 33), bounded by the lease expiry.
 _WINDOWS_LEASE_RETRY_SECONDS = 0.01
 _LIFECYCLE_REENTRANCY_ERROR = (
     "LSP lifecycle operations are not reentrant from protocol callbacks"
@@ -207,6 +228,11 @@ def _first_error(
         if error is not None:
             return error
     return None
+
+
+def _flush_owner_directory_windows(handle: int) -> None:
+    if not _windows_workspace.flush_directory(handle):
+        raise OSError("LSP owner directory durability flush failed")
 
 
 def _lease_payload(record: Mapping[str, object]) -> bytes:
@@ -793,18 +819,27 @@ class _OwnerDirectory:
             expires_monotonic = _validated_deadline(expires_monotonic)
         payload = _lease_payload(record)
         with self._child_handle_lock:
-            self._retry_pending_temp_names()
-            temporary = f".lease-{secrets.token_hex(8)}.tmp"
-            if os.name == "posix":
-                self._write_lease_posix(temporary, payload, expires_monotonic)
-                return
-            self._write_lease_windows(
-                temporary,
-                payload,
-                expires_monotonic,
-                retry_deadline,
-                retry_stop,
-            )
+            self._write_lease_locked(payload, expires_monotonic, retry_deadline, retry_stop)
+
+    def _write_lease_locked(
+        self,
+        payload: bytes,
+        expires_monotonic: float | None,
+        retry_deadline: float,
+        retry_stop: threading.Event | None,
+    ) -> None:
+        self._retry_pending_temp_names()
+        temporary = f".lease-{secrets.token_hex(8)}.tmp"
+        if os.name == "posix":
+            self._write_lease_posix(temporary, payload, expires_monotonic)
+            return
+        self._write_lease_windows(
+            temporary,
+            payload,
+            expires_monotonic,
+            retry_deadline,
+            retry_stop,
+        )
 
     def sync_directory(self) -> None:
         handle = self.owner_handle
@@ -818,8 +853,7 @@ class _OwnerDirectory:
             os.fsync(handle)
             return
         if os.name == "nt":
-            if not _windows_workspace.flush_directory(handle):
-                raise OSError("LSP owner directory durability flush failed")
+            _flush_owner_directory_windows(handle)
             return
         raise RuntimeError("LSP owner directories are unsupported on this platform")
 
@@ -841,8 +875,7 @@ class _OwnerDirectory:
 
     def remove_lease(self) -> None:
         if self.owner_handle is None:
-            if self._pending_temp_names:
-                raise RuntimeError("LSP pending temporary owner is closed")
+            self._require_no_pending_temp_names()
             return
         self._retry_pending_temp_names()
         if os.name == "posix":
@@ -850,6 +883,10 @@ class _OwnerDirectory:
         else:
             self._remove_lease_windows()
         self._lease_expires_monotonic = None
+
+    def _require_no_pending_temp_names(self) -> None:
+        if self._pending_temp_names:
+            raise RuntimeError("LSP pending temporary owner is closed")
 
     def _read_record_posix(self, name: str) -> bytes:
         descriptor = os.open(
@@ -1630,10 +1667,13 @@ class LspProcess:
             return coordinator.active
         if coordinator.candidate is not None:
             return coordinator.candidate
-        for generation in coordinator.retired:
-            if generation.nonce == self.generation_nonce:
-                return generation
-        return None
+        return self._retired_generation(coordinator)
+
+    def _retired_generation(self, coordinator: _LifecycleCoordinator) -> _Generation | None:
+        return next(
+            (generation for generation in coordinator.retired if generation.nonce == self.generation_nonce),
+            None,
+        )
 
     @property
     def _tree(self) -> ProcessTree | None:
@@ -3505,6 +3545,19 @@ def _intent_exhausted(
     )
 
 
+def _terminal_intent_decision_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    intent: _FailureIntent,
+) -> _IntentDecision:
+    """An exhausted intent: select the terminal failure, and stop when it is ours."""
+    code = "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED
+    terminal = _select_terminal_failure_locked(instance, coordinator, code)
+    if terminal:
+        coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+    return _IntentDecision(terminal, False)
+
+
 def _decide_failure_intent_locked(
     instance: LspProcess,
     coordinator: _LifecycleCoordinator,
@@ -3512,11 +3565,7 @@ def _decide_failure_intent_locked(
 ) -> _IntentDecision:
     """Whether this failure ends the lifecycle or asks for one restart."""
     if _intent_exhausted(instance, coordinator, intent):
-        code = "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED
-        terminal = _select_terminal_failure_locked(instance, coordinator, code)
-        if terminal:
-            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-        return _IntentDecision(terminal, False)
+        return _terminal_intent_decision_locked(instance, coordinator, intent)
     coordinator.recovery_attempted = True
     coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
     instance.state = ProcessState.DEGRADED
@@ -3618,6 +3667,16 @@ def _process_failure_intent_owned(
     decision = _settle_failure_intent(instance, coordinator, intent, key)
     if decision is None:
         return None, False
+    return _failure_intent_outcome(instance, coordinator, decision, deadline)
+
+
+def _failure_intent_outcome(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    decision: _IntentDecision,
+    deadline: float,
+) -> tuple[str | None, bool]:
+    """A terminal decision's cleanup code, or whether the settled intent restarts."""
     if decision.terminal:
         code = _terminal_cleanup_code(instance, coordinator, deadline)
         if code is not None:
@@ -3817,12 +3876,7 @@ def _promote_lsp_process_workspace_ready(
     deadline: float,
 ) -> bool:
     deadline = _validated_deadline(deadline)
-    if not isinstance(generation_nonce, str):
-        raise TypeError("generation_nonce must be a string")
-    if re.fullmatch(r"[0-9a-f]{32}", generation_nonce) is None:
-        raise ValueError(
-            "generation_nonce must be 32 lowercase hexadecimal characters"
-        )
+    _require_generation_nonce(generation_nonce)
 
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
@@ -5037,20 +5091,30 @@ def _failure_evidence_owner_locked(
     return owner
 
 
+def _settled_failure_identity_locked(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    terminal_code: str,
+) -> _FailureEvidenceIdentity:
+    identity = coordinator.failure_evidence_identity
+    if identity is not None:
+        return identity
+    identity = _failure_identity(instance, coordinator, terminal_code)
+    if identity is None:
+        raise RuntimeError(
+            "LSP failure evidence generation identity is unavailable"
+        )
+    coordinator.failure_evidence_identity = identity
+    return identity
+
+
 def _failure_evidence_identity_locked(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
     terminal_code: str,
 ) -> _FailureEvidenceIdentity:
     """The identity this evidence is written under, settled once and kept."""
-    identity = coordinator.failure_evidence_identity
-    if identity is None:
-        identity = _failure_identity(instance, coordinator, terminal_code)
-        if identity is None:
-            raise RuntimeError(
-                "LSP failure evidence generation identity is unavailable"
-            )
-        coordinator.failure_evidence_identity = identity
+    identity = _settled_failure_identity_locked(instance, coordinator, terminal_code)
     if identity.code != terminal_code:
         raise RuntimeError(
             "LSP failure evidence identity is not terminal-code exact"
@@ -5954,12 +6018,16 @@ def _stop_stderr_drain(generation: _Generation, deadline: float) -> bool:
     thread = generation.stderr_thread
     wake = generation.stderr_wake
     if thread is None or _thread_never_started(thread):
-        if wake is not None:
-            wake.abandon()
+        _abandon_stderr_wake(wake)
         return True
     if wake is not None:
         wake.request()
     return _join_owned_thread(thread, deadline)
+
+
+def _abandon_stderr_wake(wake: _StderrWake | None) -> None:
+    if wake is not None:
+        wake.abandon()
 
 
 def _close_generation_pipes(
@@ -6604,7 +6672,11 @@ _OWNER_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}")
 # The sweep examines no more owner roots than doctor reports on; a root that
 # kept failure evidence is passed over with one stat and costs nothing of it.
 _MAX_SWEPT_OWNER_ROOTS = 128
+# Entries of run/lsp/ the sweep looks at before stopping; a vault holds tens. Value predates
+# measurement.
 _MAX_SCANNED_OWNER_ENTRIES = 4096
+# A process start identity (platform, boot id, start tick) is 52 characters on this host
+# (2026-09-27); 128 refuses a record that is not one.
 _MAX_START_IDENTITY_CHARS = 128
 
 

@@ -37,6 +37,8 @@ from typing import BinaryIO
 
 WORKER_ENV = "LLM_WIKI_MCP_WORKER"
 INIT_ID_PREFIX = "llm-wiki-supervisor:initialize:"
+# Each of terminate and kill gets 5 s after the graceful wait above
+# (docs/research/2026-09-25-the-supervisor-lets-the-worker-finish.md).
 STOP_SECONDS = 5.0
 # After its input closes the worker waits up to 30 s for model inference
 # (`mcp_server.SHUTDOWN_INFERENCE_SECONDS`); a signal before that lands mid-settle.

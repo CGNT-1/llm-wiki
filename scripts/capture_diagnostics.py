@@ -37,8 +37,18 @@ from memory_state import (  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 FAILURE_LOG = REPORTS_DIR / "capture-failures.jsonl"
+# The capture-failure log is trimmed to its newest three quarters past this, so it never grows
+# without bound; the counters in hook state keep the totals. Basis unknown: value predates
+# measurement; review when a burst of failures pushes a day's records out before doctor reads
+# them.
 MAX_FAILURE_LOG_BYTES = 256 * 1024
+# Failure kinds counted in hook state; past it the least recently seen kind is dropped so the
+# state file stays bounded. The live state counts 5 kinds (2026-09-27).
 MAX_FAILURE_KINDS = 32
+# A failure reason is redacted, then cut to one bounded line of the capture-failure log (itself
+# capped by MAX_FAILURE_LOG_BYTES). Live reasons reach this cap (logs/capture-failures.jsonl,
+# 2026-09-27), so long ones are cut; Basis unknown: value predates measurement; review when a cut
+# reason hides its cause.
 MAX_REASON_CHARS = 200
 STATE_KEY = "capture_failures"
 
@@ -379,6 +389,31 @@ def _drop_oldest_kinds(counters: dict) -> None:
     ranked = sorted(counters.items(), key=lambda kv: str(kv[1].get("last_at", "")))
     for kind, _ in ranked[: len(counters) - MAX_FAILURE_KINDS]:
         counters.pop(kind, None)
+
+
+def hook_object(raw: str, kind: str) -> dict:
+    """The hook's JSON object; any other input is a lost capture, recorded, and read as `{}`.
+
+    The prompt and tool hooks both turned a malformed input into `{}` and captured
+    nothing without a trace (audit 2026-09-27 C-3,
+    docs/research/2026-09-27-a-capture-that-fails-says-so.md). Empty input is not a
+    loss: a host may call a hook with nothing to say.
+    """
+    if not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        record_capture_failure(kind, "hook input is not JSON", error=error)
+        return {}
+    return _object_or_recorded(value, kind)
+
+
+def _object_or_recorded(value: object, kind: str) -> dict:
+    if isinstance(value, dict):
+        return value
+    record_capture_failure(kind, "hook input is not a JSON object")
+    return {}
 
 
 def record_capture_failure(

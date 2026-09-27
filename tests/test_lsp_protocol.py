@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +41,18 @@ from lsp_protocol import (
 
 from tests.fake_lsp_server import FakeLspPeer, FakeLspServer
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+
+
+@pytest.fixture(autouse=True, params=[False, True], ids=["posix-close", "windows-close"])
+def _close_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every case runs through both close paths, not only the one of the host.
+
+    The Windows path (an owner closes its own stream) never ran on Linux, so a
+    `fileno()` on a stream its owner had already closed raised ValueError out of
+    every close on Windows CI only (run 36327902173). A case that needs one path
+    sets the flag itself; its own monkeypatch runs after this one.
+    """
+    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", request.param)
 
 
 @pytest.fixture
@@ -2831,3 +2844,115 @@ def test_windows_owner_handles_are_retained_cancelled_and_closed_once(
     assert protocol._writer_os_handle is None
     assert not protocol.reader_thread.is_alive()
     assert not protocol.writer_thread.is_alive()
+
+
+class _CrtPipeReader:
+    """A Windows pipe as the C runtime serves it: close waits for a read in progress.
+
+    The fake records a close that arrives while its owner is inside `read` instead of
+    blocking, which on Windows is the hang of CI run 36312497314. See
+    docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md.
+    """
+
+    def __init__(self) -> None:
+        self._read_fd, self._write_fd = os.pipe()
+        self.inside_read = threading.Event()
+        self.released = threading.Event()
+        self.closed_during_read = False
+
+    def fileno(self) -> int:
+        return self._read_fd
+
+    def read(self, _size: int = -1) -> bytes:
+        self.inside_read.set()
+        self.released.wait(LONG_TIMEOUT)
+        self.inside_read.clear()
+        return b""
+
+    def close(self) -> None:
+        self.closed_during_read = self.closed_during_read or self.inside_read.is_set()
+        self.released.set()
+        os.close(self._read_fd)
+        os.close(self._write_fd)
+
+
+class _LateCancelProtocol(LspProtocol):
+    """CancelSynchronousIo at the platform boundary: the first cancel finds no read yet."""
+
+    reader_cancels = 0
+
+    def _cancel_owner_io(self, owner: threading.Thread) -> None:
+        if owner is not self.reader_thread:
+            return
+        self.reader_cancels += 1
+        if self.reader_cancels > 1:
+            self._reader.released.set()
+
+
+def test_a_lost_cancel_is_repeated_and_a_read_stream_is_never_closed_under_its_reader(monkeypatch) -> None:
+    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", True, raising=False)
+    monkeypatch.setattr(lsp_protocol, "_PIPES_HAVE_NO_SELECT", True, raising=False)
+    reader = _CrtPipeReader()
+    protocol = _LateCancelProtocol(
+        reader, _BlockingWriter(block_after=100), "crt-pipe", fatal_callback=lambda _reason: None  # type: ignore[arg-type]
+    )
+    assert reader.inside_read.wait(LONG_TIMEOUT)
+
+    protocol.close()
+
+    assert not reader.closed_during_read
+    assert protocol.reader_cancels > 1
+    assert not protocol.reader_thread.is_alive()
+
+
+def test_a_peer_closes_cleanly_after_its_client_left() -> None:
+    """A send that met a departed client leaves nothing for close to send again.
+
+    Under load the fatal-callback test's handler sent its second frame after teardown
+    had closed the client; the buffered peer writer kept it and raised BrokenPipeError
+    from close. docs/research/2026-09-27-a-reader-is-cancelled-until-it-leaves.md
+    """
+    client, server = socket.socketpair()
+    peer = FakeLspPeer(server)
+    client.close()
+    assert _send_until_the_client_is_gone(peer), "the departed client was never reported"
+    peer.close()
+
+
+def _send_until_the_client_is_gone(peer: FakeLspPeer) -> bool:
+    """Send until the OS reports the departed client; True once it does.
+
+    On Linux the first send to a closed socketpair end fails; on Windows the pair is
+    TCP over loopback, the first send is buffered and a later one meets the reset
+    (CI run 36339197300). The test is about what close does after that failure, so
+    it waits for the failure on every platform, bounded by LONG_TIMEOUT.
+    """
+    deadline = time.monotonic() + LONG_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            peer.send_raw(b"Worse\r\n\r\n")
+        except OSError:
+            return True
+    return False
+
+
+def test_only_a_pipe_is_left_to_its_windows_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A socket read is woken by closing its stream; a pipe read is not (run 36334525135).
+
+    Holding a socket stream for its owner left Windows readers blocked: Winsock's
+    shutdown disallows only later receives, and the socket stays open while its
+    makefile does, so every socket-backed close timed out.
+    """
+    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", True)
+    left, right = socket.socketpair()
+    read_fd, write_fd = os.pipe()
+    socket_stream = left.makefile("rb")
+    pipe_stream = os.fdopen(read_fd, "rb", buffering=0)
+    try:
+        assert (lsp_protocol._fd_stream_held(socket_stream), lsp_protocol._fd_stream_held(pipe_stream)) == (False, True)
+    finally:
+        socket_stream.close()
+        pipe_stream.close()
+        os.close(write_fd)
+        left.close()
+        right.close()

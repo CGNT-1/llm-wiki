@@ -26,7 +26,6 @@ Output: empty (PostToolUse has no continue/cancel semantics for our use).
 from __future__ import annotations
 
 import io
-import json
 import os
 import sys
 from datetime import datetime
@@ -49,9 +48,10 @@ from memory_state import update_state  # noqa: E402
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
 STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 
-from capture_diagnostics import record_capture_failure  # noqa: E402
+from capture_diagnostics import hook_object, record_capture_failure  # noqa: E402
 from capture_operation import claim_operation, complete_operation  # noqa: E402
 from event_envelope import build_event_envelope, canonical_agent  # noqa: E402
+from iso_time import local_now  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 from session_start_project_state import _compute_slug  # noqa: E402
 
@@ -71,6 +71,8 @@ SIGNIFICANT_TOOLS = frozenset(
 )
 
 # Per-(slug, tool, target) dedupe window.
+# The same (slug, tool, target) captured again within this window is skipped as a duplicate. A
+# noise trade-off, not measured; review when distinct edits are lost.
 RATE_LIMIT_SECONDS = 60
 
 # Bash commands shorter than this are noise (cd, pwd, ls, etc.).
@@ -80,23 +82,13 @@ MIN_BASH_CMD_CHARS = 8
 MAX_TARGET_PREVIEW = 100
 
 
-def _parse_hook_input(raw: str) -> dict:
-    if not raw.strip():
-        return {}
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(result, dict):
-        return {}
-    return result
-
-
 def _read_hook_input() -> dict:
     try:
-        return _parse_hook_input(sys.stdin.read())
-    except Exception:  # noqa: BLE001
+        raw = sys.stdin.read()
+    except (OSError, UnicodeDecodeError) as error:
+        record_capture_failure("tool_input", "hook input could not be read", error=error)
         return {}
+    return hook_object(raw, "tool_input")
 
 
 def _compute_slug_from_cwd(cwd: str) -> str:
@@ -196,8 +188,9 @@ def _append_tool_tag(
             append_deadline,
         )
 
-        ts = datetime.now().strftime("%H:%M:%S")
-        preview = redact_secrets(target)[:MAX_TARGET_PREVIEW] if target else ""
+        ts = local_now().strftime("%H:%M:%S")
+        # One line, as the prompt breadcrumb: a line break in a path is not a line of the log.
+        preview = " ".join(redact_secrets(target).split())[:MAX_TARGET_PREVIEW]
         source = canonical_agent(agent)
         block = (
             f"- `[{ts}] tool | {source} | {session_id[:8]} | "

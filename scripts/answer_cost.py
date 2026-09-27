@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import os
 
-from answer_budget import estimate_tokens
+from answer_budget import BYTES_PER_TOKEN, estimate_tokens
 
 # The key the block occupies inside the envelope's `data`. Not a top-level
 # envelope field: `mcp_contract.envelope_schema()` declares
@@ -54,7 +54,7 @@ COST_KEY = "answer_cost"
 # Named in-band beside the number, because the count is an offline estimate
 # rather than a provider-reported one and the caller cannot tell from a bare
 # integer which it is holding.
-ESTIMATE_METHOD = "chars/4"
+ESTIMATE_METHOD = f"utf8_bytes/{BYTES_PER_TOKEN}"
 
 MODE_ENV = "LLM_WIKI_ANSWER_COST"
 _AUTO = "auto"
@@ -67,16 +67,21 @@ _MODES = frozenset({_AUTO, _ALWAYS, _NEVER})
 # trimmed against rule 4 - see MEASURED_BLOCK_TOKENS.
 MAX_SHARE_OF_ANSWER = 0.01
 
-# What the block costs, measured 2026-08-28, so a reader need not run it to
-# find out: 23 tokens on an answer with no optional stages, 52 on a retrieval
-# answer carrying the stage line and a refusal reason. At 1 % that admits
-# answers from ~2 300 tokens (~5 200 with stages) upward; a `recall` answer
-# measured 12 525. `tests/test_answer_cost.py` holds both to the promise.
-MEASURED_BLOCK_TOKENS = {"without_stages": 23, "with_stages": 52}
+# What the block costs, remeasured 2026-09-27 under the one estimator at its
+# measured ratio (`utf8_bytes/2`, rounded up; 25 and 54 under `utf8_bytes/4`
+# earlier that day, 23 and 52 under `chars/4` on 2026-08-28), so a reader need not
+# run it to find out: 49 tokens on an answer with no optional stages, 108 on a
+# retrieval answer carrying the stage line and a refusal reason. At 1 % that
+# admits answers from ~4 900 tokens (~10 800 with stages) upward - the same bytes
+# as before, since both sides of the share are counted one way. A `recall` answer
+# measured 12 525 under the earlier estimate, ~25 000 under this one.
+# `tests/test_answer_cost.py` holds both to the promise.
+MEASURED_BLOCK_TOKENS = {"without_stages": 49, "with_stages": 108}
 
 # Digit widths move the block by a token or two; the ceiling is what a caller
-# may rely on, the numbers above are what a canonical block actually costs.
-BLOCK_TOKEN_CEILING = 60
+# may rely on, the numbers above are what a canonical block actually costs. The
+# ceiling keeps the 240 bytes it allowed under `utf8_bytes/4`; only its unit moved.
+BLOCK_TOKEN_CEILING = 120
 
 # A stage that produced evidence, even stale evidence, ran; a stage recorded as
 # missing was refused, timed out or was never asked for, and `not_run_reason`

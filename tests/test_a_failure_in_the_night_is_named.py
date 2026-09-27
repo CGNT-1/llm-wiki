@@ -43,7 +43,8 @@ def _rows(*updated: datetime) -> list[sqlite3.Row]:
     return database.execute("SELECT * FROM tasks").fetchall()
 
 
-def test_only_this_weeks_dead_tasks_count() -> None:
+def test_every_dead_task_counts_and_the_oldest_age_is_shown() -> None:
+    """An old dead task is still unresolved (audit 2026-09-27 B-13)."""
     now = datetime.now(timezone.utc)
 
-    assert doctor._recent_dead_count(_rows(now - timedelta(days=1), now - timedelta(days=30)), now) == 1
+    assert doctor._dead_backlog(_rows(now - timedelta(days=1), now - timedelta(days=30)), now) == (2, 30)

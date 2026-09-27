@@ -58,10 +58,8 @@ from lsp_security import (
 from lsp_server_profile import LanguageServerProfile, thaw_profile_value
 from pyright_profile import (
     MAX_SERVER_BYTES,
-    PYRIGHT_CONFIGURATION,
     PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
     PyrightIdentity,
-    thaw_pyright_profile_value,
 )
 from reliable_memory import _known_network_path
 from repository_scope import RepositoryScope
@@ -71,9 +69,13 @@ from workspace_revision import (
     diff_workspace_revisions,
 )
 
+# A Pyright session's startup budget, capped by the caller's deadline (docs/superpowers/plans/2026-07-22-python-pyright-navigation.md).
 STARTUP_SECONDS = 60.0
+# Live language servers one MCP process keeps: 4, from the 2026-07-22 Pyright plan; past it an
+# idle session is closed to make room or the request degrades. Not measured.
 MAX_LSP_PROCESSES = 4
 
+# Cleanup budget of an owner that failed to start. basis unknown — value predates measurement; review when failed startups leave owners registered.
 _OWNER_CLEANUP_SECONDS = 2.0
 # How long a session may go unused before the next request closes the server it
 # owns. The manager keeps one clock: this bound and capacity eviction both read
@@ -83,25 +85,41 @@ _IDLE_SECONDS = 300.0
 # How much of a caller's time one idle reap may spend. There is no daemon, so
 # the reap rides on a request; it must not become the request's cost.
 _IDLE_REAP_SECONDS = 2.0
+# How often a caller waiting on a session lock looks again; always capped by its own deadline.
 _LOCK_POLL_SECONDS = 0.01
 _MAX_DOCUMENT_BYTES = MAX_FRAME_BYTES - 1
 _MAX_OPEN_DOCUMENTS = 256
+# Session memory for open documents, least recently used closed first: 256 documents or 64 MiB.
+# Value predates measurement; review if a large repository keeps evicting.
 _MAX_OPEN_DOCUMENT_BYTES = 64 * 1024 * 1024
+# workspace/configuration: 64 items of 256-byte section names refuse a malformed request. Values
+# predate measurement; review if a pinned server is refused its configuration.
 _MAX_CONFIGURATION_ITEMS = 64
 _MAX_CONFIGURATION_SECTION_BYTES = 256
 _MAX_PREPARED_CALL_ITEMS = MAX_LOCATIONS
+# Text fields of a server answer: a symbol name 4 KiB, a diagnostic message 64 KiB, a progress
+# message 4 KiB. A longer field makes that item unreadable. Values predate measurement.
 _MAX_CALL_ITEM_TEXT_BYTES = 4096
 _MAX_DIAGNOSTIC_TEXT_BYTES = 64 * 1024
+# Diagnostics retained per session: 256 files and 16 MiB in all, each item costed with a fixed
+# overhead (128 bytes, 96 per related entry). A publication past them keeps the snapshot
+# held for its version, or an empty one, marked `partial`, so the query answers at once
+# and says it is incomplete. Values predate measurement; review if diagnostics go missing
+# on a large repository.
 _MAX_DIAGNOSTIC_URIS = 256
 _MAX_DIAGNOSTIC_BYTES = 16 * 1024 * 1024
 _DIAGNOSTIC_BASE_BYTES = 128
 _DIAGNOSTIC_RELATED_BASE_BYTES = 96
+# Server progress kept as a ring: the last 256 events or 1 MiB, each costed 32 bytes plus text;
+# the oldest event leaves first. Values predate measurement.
 _MAX_PROGRESS_TEXT_BYTES = 4096
 _MAX_PROGRESS_EVENTS = 256
 _MAX_PROGRESS_BYTES = 1024 * 1024
+# The fixed cost charged per progress event, on top of its text (see the ring above).
 _PROGRESS_EVENT_BASE_BYTES = 32
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _WINDOWS_STAT_CREATION_TIME = os.name == "nt"
+# LSP 3.17 base type `uinteger`: "an unsigned integer number in the range of 0 to 2^31 - 1".
 _LSP_UINTEGER_MAX = 2**31 - 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CAPABILITY_FIELDS = {
@@ -539,12 +557,16 @@ def _bounded_hover_string(value: object) -> str | None:
     return value
 
 
+def _hover_kind_labelled(value: Mapping[str, object], text: str) -> str | None:
+    if value.get("kind") in {"plaintext", "markdown"}:
+        return text
+    return None
+
+
 def _hover_fragment_labelled(value: Mapping[str, object], text: str) -> str | None:
     """A fragment is usable when its kind or its language names something real."""
     if "kind" in value:
-        if value.get("kind") in {"plaintext", "markdown"}:
-            return text
-        return None
+        return _hover_kind_labelled(value, text)
     language = value.get("language")
     if not isinstance(language, str) or not language:
         return None
@@ -1512,12 +1534,17 @@ def _configuration_value(settings: Mapping[str, object], section: str) -> object
 
 
 def _configuration_result(settings: Mapping[str, object], item: object) -> object:
-    """What to answer for one requested configuration item."""
+    """What to answer for one requested configuration item.
+
+    An item without a section asks for this server's whole configuration, as
+    the reference clients answer it (vscode-languageclient, Neovim); it is the
+    session's own profile settings, never another profile's.
+    """
     section, usable = _configuration_section(item)
     if not usable:
         return None
     if section is None:
-        return thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
+        return settings
     return _configuration_value(settings, section)
 
 
@@ -1574,6 +1601,21 @@ def _matching_diagnostics(
         snapshot.document_version,
         snapshot.partial,
     )
+
+
+def _over_budget_replacement(
+    existing: _DiagnosticSnapshot | None, version: int | None
+) -> _DiagnosticSnapshot:
+    """What a publication past the diagnostics budget leaves, marked `partial`.
+
+    The snapshot already held for the same version stays, now saying it may be
+    incomplete; otherwise an empty marker of that version. A marker costs one fixed
+    item, so all open documents' markers stay within
+    `_MAX_OPEN_DOCUMENTS * _DIAGNOSTIC_BASE_BYTES` (32 KiB) above the budget.
+    """
+    if existing is not None and existing.document_version == version:
+        return dataclasses.replace(existing, partial=True)
+    return _DiagnosticSnapshot((), version, True, _DIAGNOSTIC_BASE_BYTES)
 
 
 def _expired_diagnostics(
@@ -1867,23 +1909,32 @@ class _LaunchServerGuard:
         """
         return (self._descriptor_path(descriptor), *self._command[1:])
 
-    def _copy_snapshot(self, snapshot: BinaryIO) -> str:
+    def _rewound_descriptor(self) -> int:
         descriptor = self._descriptor
         if descriptor is None:
             raise RuntimeError("Pyright launch server guard is closed")
         os.lseek(descriptor, 0, os.SEEK_SET)
-        snapshot.seek(0)
-        digest = hashlib.sha256()
+        return descriptor
+
+    def _server_chunks(self, descriptor: int) -> Iterator[bytes]:
+        """The server file in bounded chunks, each read inside the startup deadline."""
         total = 0
         while True:
             _require_startup_deadline(self._deadline)
             chunk = os.read(descriptor, 64 * 1024)
             _require_startup_deadline(self._deadline)
             if not chunk:
-                break
+                return
             total += len(chunk)
             if total > MAX_SERVER_BYTES:
                 raise self._digest_mismatch()
+            yield chunk
+
+    def _copy_snapshot(self, snapshot: BinaryIO) -> str:
+        descriptor = self._rewound_descriptor()
+        snapshot.seek(0)
+        digest = hashlib.sha256()
+        for chunk in self._server_chunks(descriptor):
             snapshot.write(chunk)
             digest.update(chunk)
         snapshot.flush()
@@ -1891,21 +1942,9 @@ class _LaunchServerGuard:
         return digest.hexdigest()
 
     def _digest(self) -> str:
-        descriptor = self._descriptor
-        if descriptor is None:
-            raise RuntimeError("Pyright launch server guard is closed")
-        os.lseek(descriptor, 0, os.SEEK_SET)
+        descriptor = self._rewound_descriptor()
         digest = hashlib.sha256()
-        total = 0
-        while True:
-            _require_startup_deadline(self._deadline)
-            chunk = os.read(descriptor, 64 * 1024)
-            _require_startup_deadline(self._deadline)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_SERVER_BYTES:
-                raise self._digest_mismatch()
+        for chunk in self._server_chunks(descriptor):
             digest.update(chunk)
         return digest.hexdigest()
 
@@ -2613,15 +2652,16 @@ class LanguageServerSession:
             return [], False
         if not isinstance(value, list):
             return [], True
-        partial = len(value) > MAX_LOCATIONS
-        related: list[tuple[LspLocation, str | None]] = []
-        for relation in value[:MAX_LOCATIONS]:
-            entry = self._related_entry(relation)
-            if entry is None:
-                partial = True
-                continue
-            related.append(entry)
-        return related, partial
+        related, dropped = self._related_entries(value[:MAX_LOCATIONS])
+        return related, len(value) > MAX_LOCATIONS or dropped
+
+    def _related_entries(
+        self, relations: list[object]
+    ) -> tuple[list[tuple[LspLocation, str | None]], bool]:
+        """The entries that parse, and whether any did not."""
+        entries = [self._related_entry(relation) for relation in relations]
+        related = [entry for entry in entries if entry is not None]
+        return related, len(related) != len(entries)
 
     def _parse_diagnostic(
         self,
@@ -2698,14 +2738,12 @@ class LanguageServerSession:
 
     def _diagnostic_snapshot(
         self, values: list[object], uri: str, version: int | None
-    ) -> _DiagnosticSnapshot | None:
-        """The snapshot to publish, or None when it would not fit the budget."""
+    ) -> _DiagnosticSnapshot:
+        """The snapshot as published; `_store_diagnostics` decides whether it fits."""
         diagnostics, partial = self._parsed_diagnostics(values, uri)
         retained_bytes = _DIAGNOSTIC_BASE_BYTES + sum(
             self._diagnostic_retained_bytes(diagnostic) for diagnostic in diagnostics
         )
-        if retained_bytes > _MAX_DIAGNOSTIC_BYTES:
-            return None
         return _DiagnosticSnapshot(
             tuple(diagnostics),
             version,
@@ -2713,23 +2751,34 @@ class LanguageServerSession:
             retained_bytes,
         )
 
+    def _aggregate_after_locked(self, uri: str, snapshot: _DiagnosticSnapshot) -> int:
+        existing = self._diagnostics.get(uri)
+        previous_bytes = existing.retained_bytes if existing is not None else 0
+        return self._diagnostic_bytes - previous_bytes + snapshot.retained_bytes
+
     def _store_diagnostics(
         self, uri: str, version: int | None, snapshot: _DiagnosticSnapshot
     ) -> None:
-        """Publish the snapshot, unless the session moved on or ran out of budget."""
+        """Publish the snapshot, or what the budget allows, unless the session moved on.
+
+        A publication past the budget used to be dropped without a trace, so the
+        query for that version waited out its whole deadline and then answered
+        an unexplained partial. Now it is answered at once, marked `partial`.
+        """
         with self._lock:
             if not self._diagnostic_update_admissible_locked(uri, version):
                 return
-            existing = self._diagnostics.get(uri)
-            previous_bytes = existing.retained_bytes if existing is not None else 0
-            aggregate_bytes = (
-                self._diagnostic_bytes - previous_bytes + snapshot.retained_bytes
-            )
-            if aggregate_bytes > _MAX_DIAGNOSTIC_BYTES:
-                return
+            snapshot = self._fitting_snapshot_locked(uri, snapshot)
+            self._diagnostic_bytes = self._aggregate_after_locked(uri, snapshot)
             self._diagnostics[uri] = snapshot
-            self._diagnostic_bytes = aggregate_bytes
             self._condition.notify_all()
+
+    def _fitting_snapshot_locked(
+        self, uri: str, snapshot: _DiagnosticSnapshot
+    ) -> _DiagnosticSnapshot:
+        if self._aggregate_after_locked(uri, snapshot) <= _MAX_DIAGNOSTIC_BYTES:
+            return snapshot
+        return _over_budget_replacement(self._diagnostics.get(uri), snapshot.document_version)
 
     def _diagnostic_target(
         self, params: object
@@ -2752,10 +2801,12 @@ class LanguageServerSession:
         with self._lock:
             if not self._diagnostic_update_admissible_locked(uri, version):
                 return
-        snapshot = self._diagnostic_snapshot(values, uri, version)
-        if snapshot is None:
-            return
-        self._store_diagnostics(uri, version, snapshot)
+        self._store_diagnostic_snapshot(uri, values, version)
+
+    def _store_diagnostic_snapshot(
+        self, uri: str, values: list[object], version: int | None
+    ) -> None:
+        self._store_diagnostics(uri, version, self._diagnostic_snapshot(values, uri, version))
 
     def _bootstrap_owned_generation(
         self,
@@ -3140,18 +3191,32 @@ class LanguageServerSession:
         startup_deadline: float,
     ) -> bool:
         """Clear what a previous attempt left; False when one refused again."""
-        if retained_cleanup is not None:
-            if not self._startup_retry_ok(
-                lambda: retained_cleanup.retry_cleanup(startup_deadline)
-            ):
-                return False
-            self._clear_retained_cleanup(retained_cleanup)
-        if retained_process is not None:
-            if not self._startup_retry_ok(
-                lambda: retained_process.close(startup_deadline)
-            ):
-                return False
-            self._clear_retained_process(retained_process)
+        if not self._retained_cleanup_cleared(retained_cleanup, startup_deadline):
+            return False
+        return self._retained_process_cleared(retained_process, startup_deadline)
+
+    def _retained_cleanup_cleared(
+        self, retained_cleanup: StartupCleanupError | None, startup_deadline: float
+    ) -> bool:
+        if retained_cleanup is None:
+            return True
+        if not self._startup_retry_ok(
+            lambda: retained_cleanup.retry_cleanup(startup_deadline)
+        ):
+            return False
+        self._clear_retained_cleanup(retained_cleanup)
+        return True
+
+    def _retained_process_cleared(
+        self, retained_process: LspProcess | None, startup_deadline: float
+    ) -> bool:
+        if retained_process is None:
+            return True
+        if not self._startup_retry_ok(
+            lambda: retained_process.close(startup_deadline)
+        ):
+            return False
+        self._clear_retained_process(retained_process)
         return True
 
     def _clear_bootstrap_nonce_locked(self, attempt: _StartupAttempt) -> None:
@@ -3843,9 +3908,13 @@ class LanguageServerSession:
         """
         if incoming_bytes > _MAX_OPEN_DOCUMENT_BYTES:
             return []
+        return self._evictions_to_fit_locked(
+            len(self._documents) + 1, self._document_bytes + incoming_bytes
+        )
+
+    def _evictions_to_fit_locked(self, count: int, used: int) -> list[OpenDocument]:
+        """Least recently used evictable documents, until `count` and `used` fit."""
         crowded: list[OpenDocument] = []
-        count = len(self._documents) + 1
-        used = self._document_bytes + incoming_bytes
         for document in self._documents_by_use_locked():
             if _documents_fit(count, used):
                 break

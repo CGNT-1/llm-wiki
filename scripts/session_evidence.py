@@ -25,7 +25,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 SESSION_EVIDENCE_DIR = "knowledge/raw/sessions"
+# One session record; a longer one is cut with a visible note. The largest live record is 358 KB
+# (2026-09-27); see docs/research/2026-08-26-a-record-too-large-to-keep-whole.md.
 MAX_EVIDENCE_BYTES = 512 * 1024
+# One tool call's target in a session record, redacted before it is cut
+# (docs/research/2026-09-26-a-tool-line-is-redacted-before-it-is-cut.md). A record-size trade-off,
+# not measured.
 MAX_TOOL_LINE_CHARS = 200
 # The host's subagent tool: `Agent`, named `Task` by older hosts.
 SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
@@ -36,14 +41,19 @@ TRUNCATION_NOTE = "\n\n_(record truncated at the size limit)_\n"
 # less thing to reason about when it becomes a path.
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 _TOOL_INPUT_FIELDS = ("command", "file_path", "path", "pattern", "query", "url")
-# Every record is redacted where it is written, one line per header value; the body is
-# cut to the bound plus this much first, so a secret at the final cut was whole when
-# it was redacted. See `docs/research/2026-09-14-every-session-record-is-redacted.md`.
-REDACTION_SLACK_CHARS = 64 * 1024
+# Every record is redacted where it is written, one line per header value, and every
+# text is redacted before it is cut, so no secret is judged by a fragment of itself.
+# See `docs/research/2026-09-14-every-session-record-is-redacted.md` and
+# `docs/research/2026-09-27-a-secret-is-redacted-before-it-is-cut.md`.
 _LINE_BREAKING = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]+")
 
 
+# The longest session-record file stem, far under the 255-byte NAME_MAX of common
+# filesystems so a digest suffix still fits. Basis unknown beyond that: value predates
+# measurement; review if record names collide or are cut.
 _NAME_LIMIT = 64
+# 12 hex characters (48 bits) keep two unsafe session ids from sharing a record name; a collision
+# needs about 16 million records.
 _NAME_DIGEST_CHARS = 12
 
 
@@ -79,6 +89,8 @@ def evidence_relative_path(day: str, session_id: str, document: bytes = b"") -> 
     )
 
 
+# 8 hex characters (32 bits) tell apart the captures of one session on one day; a collision needs
+# about 65 000 captures of that session.
 PART_DIGEST_CHARS = 8
 
 
@@ -176,9 +188,12 @@ def _result_text(content: object) -> str:
 
 
 def _clipped_report(text: str) -> str:
-    if len(text) <= MAX_SUBAGENT_REPORT_CHARS:
-        return text
-    return text[:MAX_SUBAGENT_REPORT_CHARS] + SUBAGENT_REPORT_CUT
+    from secret_redact import redact_secrets
+
+    redacted = redact_secrets(text)
+    if len(redacted) <= MAX_SUBAGENT_REPORT_CHARS:
+        return redacted
+    return redacted[:MAX_SUBAGENT_REPORT_CHARS] + SUBAGENT_REPORT_CUT
 
 
 def _subagent_report(block: Mapping[str, object], subagent_calls: frozenset[str]) -> str | None:
@@ -464,7 +479,7 @@ def _header_value(value: object) -> str:
 def _redacted_body(body: str) -> str:
     from secret_redact import redact_secrets
 
-    return redact_secrets(body[: MAX_EVIDENCE_BYTES + REDACTION_SLACK_CHARS])
+    return redact_secrets(body)
 
 
 def _document_from_body(fields: Mapping[str, object], body: str) -> str:

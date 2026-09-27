@@ -22,6 +22,8 @@ from okf_types import DEFAULT_AGE_DAYS, TYPE_AGE_DAYS
 from page_status import normalized_status
 from provenance import trust_weight
 
+# Bytes read from a page's head to find its frontmatter; the largest live frontmatter is 495 bytes
+# (2026-09-27), so 8 KiB is 16 times that.
 MAX_FRONTMATTER_BYTES = 8192
 
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
@@ -102,7 +104,7 @@ def _facts_from(relative_path: str, path: Path, text: str) -> PageFacts:
         authority=authority,
         confidence=_field(frontmatter, "confidence"),
         status=normalized_status(_field(frontmatter, "status")),
-        trust_weight=trust_weight(authority, page_type),
+        trust_weight=trust_weight(authority, page_type, relative_path),
         age_days=age,
         age_limit_days=limit,
         aging=_is_aging(page_type, age, limit),
