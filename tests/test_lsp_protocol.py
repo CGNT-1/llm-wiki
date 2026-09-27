@@ -2918,3 +2918,25 @@ def test_a_peer_closes_cleanly_after_its_client_left() -> None:
     with pytest.raises(OSError):
         peer.send_raw(b"Worse\r\n\r\n")
     peer.close()
+
+
+def test_only_a_pipe_is_left_to_its_windows_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A socket read is woken by closing its stream; a pipe read is not (run 36334525135).
+
+    Holding a socket stream for its owner left Windows readers blocked: Winsock's
+    shutdown disallows only later receives, and the socket stays open while its
+    makefile does, so every socket-backed close timed out.
+    """
+    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", True)
+    left, right = socket.socketpair()
+    read_fd, write_fd = os.pipe()
+    socket_stream = left.makefile("rb")
+    pipe_stream = os.fdopen(read_fd, "rb", buffering=0)
+    try:
+        assert (lsp_protocol._fd_stream_held(socket_stream), lsp_protocol._fd_stream_held(pipe_stream)) == (False, True)
+    finally:
+        socket_stream.close()
+        pipe_stream.close()
+        os.close(write_fd)
+        left.close()
+        right.close()

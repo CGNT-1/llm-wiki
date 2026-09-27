@@ -1031,10 +1031,25 @@ def _owner_never_started(owner: threading.Thread) -> bool:
     return owner.ident is None and owner not in threading.enumerate()
 
 
+def _socket_backed(stream: BinaryIO) -> bool:
+    """A socket under the stream: its read waits on no C-runtime descriptor lock.
+
+    A Winsock `shutdown` only disallows *subsequent* receives (Microsoft,
+    shutdown function), and a socket with an open `makefile` is not really
+    closed until that file is; so the only way to wake a blocked socket read is
+    to close the stream, as before the Windows owner rule (CI run 36334525135).
+    """
+    return any(getattr(layer, "_sock", None) is not None for layer in LspProtocol._stream_layers(stream))
+
+
+def _fd_stream_held(stream: BinaryIO) -> bool:
+    """On Windows a descriptor-backed pipe read holds the CRT lock that close() waits on."""
+    return _CLOSE_WAITS_FOR_A_READ and _descriptor_of(stream) is not None and not _socket_backed(stream)
+
+
 def _owner_holds_stream(owner: threading.Thread, stream: BinaryIO) -> bool:
-    """A live owner is inside the descriptor's read or write; only it may close it."""
-    held = _CLOSE_WAITS_FOR_A_READ and _descriptor_of(stream) is not None
-    return held and owner is not threading.current_thread() and owner.is_alive()
+    """A live owner is inside the pipe's read or write; only it may close it."""
+    return _fd_stream_held(stream) and owner is not threading.current_thread() and owner.is_alive()
 
 
 def _owner_present(owner: threading.Thread) -> bool:

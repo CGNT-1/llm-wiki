@@ -128,3 +128,21 @@ Guard: `tests/test_lsp_protocol.py` runs every case through both close paths
 path fails on Linux too: 5 failed, 42 errors; fixed: 308 passed. With the Windows
 close path forced on, the 14 suites that failed on Windows CI pass on Linux (715).
 Real Windows remains the final check.
+
+## Follow-up: only a pipe is left to its Windows owner (2026-09-27)
+
+CI run 36334525135 (PR #45 at 427f616a) still failed 12 Windows jobs, now only in the
+`windows-close` cases on socket-backed streams (the fake LSP server) and in
+`test_an_oversized_reply_fails_its_request_not_its_server`: "LSP protocol owner did not
+stop before deadline". The owner rule held every descriptor-backed stream, sockets too,
+and woke a socket read with `shutdown` + `close`. Neither wakes it on Windows: Microsoft's
+shutdown reference says "If the how parameter is SD_RECEIVE, subsequent calls to the recv
+function on the socket will be disallowed" (subsequent, not the one in progress), and
+Python does not really close a socket while a `makefile` of it is open. Before the owner
+rule, sockets were woken by closing their stream, and every Windows CI run passed that way.
+
+The CRT descriptor lock the rule avoids belongs to C-runtime file descriptors (pipes), not
+to sockets, so the rule now holds only a descriptor-backed stream with no socket under it
+(`_fd_stream_held`). Guard: `test_only_a_pipe_is_left_to_its_windows_owner` (fails on the
+previous code). Linux cannot reproduce the Winsock semantics, so real Windows CI remains
+the check.
