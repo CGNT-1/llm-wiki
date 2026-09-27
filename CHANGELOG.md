@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- The installed-vault check (backup and run/ deletion) streams every operational row through one reliable_memory.streamed_rows helper, which doctor now shares, instead of refusing past 10 000 rows as transaction_state_unreadable; a table that only has to be empty is asked for one row. The live undo window held 6 095 rows (68 % of the old cap on the busiest two days on record).
 - Four more cuts say what they left out: an oversized Pyright diagnostics publication keeps the stored snapshot marked partial instead of vanishing, a deep install error says further causes were not shown, positions past the refresh limit are marked not refreshed, and the navigation source cache evicts the oldest source instead of dropping the next one.
 - The installer tests' survivor checks count a killed but unreaped (zombie) process as dead: kill -0 answers for a zombie too, and under load the reaping lagged behind the check.
 - doctor reads every transaction and operation row in bounded batches inside one read snapshot instead of the first 10 000 (the live vault holds 29 369), and a quarantine that never reached planning is no longer reported as corrupt metadata.

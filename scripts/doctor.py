@@ -36,6 +36,7 @@ from iso_time import utc_text
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
+    streamed_rows,
 )
 from secret_redact import describe_error
 from settings import (
@@ -780,12 +781,6 @@ _OPERATION_QUERY = (
     "SELECT transaction_id, position, kind, path, before_hash, after_hash, "
     'parent_device, parent_inode, applied FROM "operation"'
 )
-# Rows fetched per step of the streamed scan, so memory holds one batch rather than a
-# table: a full materialised scan peaked at 67 MB of Python objects on the 29 275-row
-# vault. 1 000 rows keep a batch well under 1 MB at the measured 291-byte mean
-# preconditions and bound the time between deadline checks; review if a batch's rows
-# grow past that mean by orders of magnitude.
-SCAN_BATCH_ROWS = 1_000
 _OWNER_TABLE_QUERIES = {
     "writer_owners": "SELECT * FROM writer_owners LIMIT ?",
     "maintenance_owners": "SELECT * FROM maintenance_owners LIMIT ?",
@@ -1054,15 +1049,16 @@ def _scan_transaction_rows(
     return _RowVerdict(codes, corrupt, mismatched)
 
 
+def _stop_at(deadline: float) -> None:
+    if _deadline_reached(deadline):
+        raise TimeoutError("transaction check deadline")
+
+
 def _streamed_rows(
     database: sqlite3.Connection, query: str, deadline: float
 ) -> Iterator[sqlite3.Row]:
     """Every row of the query, one batch in memory at a time, within the deadline."""
-    cursor = database.execute(query)
-    while batch := cursor.fetchmany(SCAN_BATCH_ROWS):
-        if _deadline_reached(deadline):
-            raise TimeoutError("transaction check deadline")
-        yield from batch
+    return streamed_rows(database, query, stop=lambda: _stop_at(deadline))
 
 
 def _lease_live(value: object, now: datetime) -> bool:

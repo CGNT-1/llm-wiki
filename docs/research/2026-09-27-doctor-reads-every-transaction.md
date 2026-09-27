@@ -93,3 +93,37 @@ without accusing. Six of its fifteen tests fail on HEAD.
 On the live undo directory, 70 entries named no transaction row at the time of the
 check. Some may be skew between the database copy and the later listing; whether
 committed rows are dropped from history while their directories stay is not checked.
+
+## The same class in the installed-vault check (2026-09-27, later)
+
+`installed_memory_repair._bounded_rows` read every operational table it validates
+(queue tasks, capture intents, owner and fence tables, the unpruned transaction rows,
+blackboard claims) with `LIMIT 10 001` and raised `ValueError` past 10 000 rows; the
+callers turn that into `transaction_state_unreadable`, which refuses a backup and the
+`run/` deletion check — the failure A-11 already met once at 23 664 rows.
+
+Measured on a backup-API copy of the installed databases at 14:25 UTC: the transaction
+query (rows not committed, or committed with images still held) returned 6 095 rows —
+the two-day undo window; the largest queue table held 347 rows. So the installed vault
+does not refuse today, and the claim that it does was not reproduced. The window's
+size is activity, not a constant: the busiest two consecutive days on record hold
+6 834 transactions, 68 % of the cap, and more agents raise it. A cap tied to a count
+that grows with use is the defect doctor had; it gets the same fix.
+
+- Rows are streamed in `SCAN_BATCH_ROWS` batches through one helper in
+  `reliable_memory` (`streamed_rows`), which doctor now uses too, instead of each
+  module holding a copy (law 6). The deadline is checked between batches.
+- A table that only has to be empty is asked `SELECT 1 … LIMIT 1`; reading all its
+  rows to learn that one exists was the cap's only use there.
+- `_MAX_OPERATIONAL_ROWS` has no reader left and goes (law 8); `doctor.MAX_OPERATIONAL_ROWS`
+  still bounds its own small owner and lease tables.
+
+### The 70 undo directories without a row
+
+Re-listed on the installed vault and compared with a database snapshot taken after the
+listing, so no row created before the listing can be missing: 6 068 directories, one
+without a row. It is 25 minutes old, its `before/` and `after/` are empty and the pid in
+its `owner.json` is gone — a prepare that failed before inserting its row. The existing
+nightly `_remove_unnamed_artifact_roots` retires such a root once it is an hour old.
+The earlier count of 70 came from listing after the copy, which the doctor note above
+already suspected; nothing is lost and nothing needs a new mechanism.

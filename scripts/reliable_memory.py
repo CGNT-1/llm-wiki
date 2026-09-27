@@ -841,6 +841,35 @@ def _require_replayed_journal(path: Path, error: sqlite3.OperationalError) -> No
         raise error
 
 
+# Rows fetched per step of a streamed scan of an operational table, so memory holds one
+# batch rather than a table: doctor's materialised scan peaked at 67 MB of Python
+# objects on the 29 275-row installed vault. 1 000 rows keep a batch well under 1 MB at
+# the measured 291-byte mean preconditions and bound the time between stop checks;
+# review if a batch's rows grow past that mean by orders of magnitude.
+OPERATIONAL_SCAN_BATCH_ROWS = 1_000
+
+
+def streamed_rows(
+    database: sqlite3.Connection,
+    query: str,
+    parameters: Sequence[object] = (),
+    *,
+    stop: Callable[[], None],
+) -> Iterator[sqlite3.Row]:
+    """Every row of the query, one batch in memory at a time.
+
+    `stop` runs before each batch is handed out and raises to end the scan (a
+    deadline). No row count is capped: a table that grows with use is read whole
+    rather than refused past a number, which is how doctor and the installed-vault
+    check both misjudged a busy vault. See
+    `docs/research/2026-09-27-doctor-reads-every-transaction.md`.
+    """
+    cursor = database.execute(query, tuple(parameters))
+    while batch := cursor.fetchmany(OPERATIONAL_SCAN_BATCH_ROWS):
+        stop()
+        yield from batch
+
+
 def open_readonly_operational_db(
     path: Path,
     state_root: Path,
