@@ -107,7 +107,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── markdown-transactions.sqlite3 current DB; approved legacy tombstone target
 │   ├── markdown-transactions-v3.sqlite3 approved active transaction/owner DB
 │   ├── markdown-transactions-v2-retired.sqlite3 approved upgrade evidence
-│   ├── transactions/<id>/           before/after images, plans, proposed abort receipt
+│   ├── transactions/<id>/           before/after images (an append: its added bytes only), plans, proposed abort receipt
 │   ├── queue.sqlite3                 current DB; approved legacy tombstone target
 │   ├── queue-v3.sqlite3              approved active queue + owner DB
 │   ├── queue-v2-retired.sqlite3      approved upgrade evidence

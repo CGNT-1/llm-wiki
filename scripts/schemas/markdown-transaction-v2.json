@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/markdown-transaction-v2.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "transaction_id",
+    "operations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "markdown-transaction/v2"
+    },
+    "transaction_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content_guard": {
+      "enum": [
+        "model_output"
+      ]
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "path",
+          "before",
+          "after"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "create",
+              "replace",
+              "delete"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "before": {
+            "oneOf": [
+              {
+                "const": "absent"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "sha256",
+                  "artifact"
+                ],
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "artifact": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "sha256",
+                  "length"
+                ],
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "length": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "sha256",
+                  "base_length",
+                  "suffix",
+                  "suffix_sha256"
+                ],
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "base_length": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "suffix": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "suffix_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          },
+          "after": {
+            "oneOf": [
+              {
+                "const": "absent"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "sha256",
+                  "artifact"
+                ],
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "artifact": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "sha256",
+                  "length"
+                ],
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "length": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "sha256",
+                  "base_length",
+                  "suffix",
+                  "suffix_sha256"
+                ],
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "base_length": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "suffix": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "suffix_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
