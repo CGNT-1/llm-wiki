@@ -24,7 +24,10 @@
 [CmdletBinding()]
 param(
     [switch]$ProtectPush,
-    [switch]$ConfirmAllAgentsStopped
+    [switch]$ConfirmAllAgentsStopped,
+    # The operator takes over a file changed outside the installer as it is now;
+    # see docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md.
+    [string[]]$Adopt = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -300,6 +303,7 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
     )
     if ($ProtectPush) { $reexecArguments += "-ProtectPush" }
     if ($ConfirmAllAgentsStopped) { $reexecArguments += "-ConfirmAllAgentsStopped" }
+    foreach ($resourceId in $Adopt) { $reexecArguments += @("-Adopt", $resourceId) }
     try {
         & $hostExecutable @reexecArguments
         $nativeExit = $LASTEXITCODE
@@ -499,6 +503,7 @@ try {
     if ($openCodeDetected) { $installControlArgs += "--opencode-plugin" }
     if ($claudeDetected) { $installControlArgs += "--claude-settings" }
     if ($codexHooksState -eq "absent") { $installControlArgs += "--codex-hooks" }
+    foreach ($resourceId in $Adopt) { $installControlArgs += @("--adopt", $resourceId) }
     $installControlJson = Invoke-NativeCommand uv $installControlArgs -CaptureOutput
     $installControl = $installControlJson | ConvertFrom-Json
     if ($installControl.status -ne "committed" -or

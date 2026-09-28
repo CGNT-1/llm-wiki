@@ -21,7 +21,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -73,6 +73,10 @@ class ManagedResource:
     metadata: Mapping[str, object] = field(default_factory=dict)
     definitions: Mapping[str, bytes] = field(default_factory=dict, repr=False, compare=False)
     adopt_as_absent: bool = False
+    # The operator's explicit `--adopt`: this run takes over the resource as it is now,
+    # keeping its current content as the rollback point instead of refusing the drift
+    # (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
+    adopt_current: bool = field(default=False, compare=False)
 
 
 def _utc_now() -> str:
@@ -2033,6 +2037,14 @@ def _persist_resource_definition(install_root: Path, resource: ManagedResource) 
             _atomic_write(target, value)
 
 
+def _require_recognized(resource: ManagedResource, current: bytes | None) -> None:
+    """A file we cannot tell ours is refused, unless the operator adopts it as it is."""
+    if current is None or resource.adopt_current:
+        return
+    if not resource.recognizes(current):
+        raise InstallControlError("install_resource_ownership_ambiguous")
+
+
 def _resource_origin(resource: ManagedResource, current: bytes | None) -> bytes | None:
     if current is not None and resource.adopt_as_absent:
         return None
@@ -2593,9 +2605,8 @@ def _v2_snapshot(install_root: Path, value: bytes | None) -> dict[str, object]:
 def _v2_resource_record(install_root: Path, resource: ManagedResource) -> dict[str, object]:
     _persist_resource_definition(install_root, resource)
     current = resource.read_owned()
-    if current is not None and not resource.recognizes(current):
-        raise InstallControlError("install_resource_ownership_ambiguous")
-    origin = _resource_origin(resource, current)
+    _require_recognized(resource, current)
+    origin = current if resource.adopt_current else _resource_origin(resource, current)
     baseline = _v2_snapshot(install_root, origin)
     return {
         "desired": _v2_snapshot(install_root, resource.desired),
@@ -2797,6 +2808,12 @@ def _v2_revert_resource(
     record: dict[str, object],
     resource: ManagedResource,
 ) -> None:
+    if record.get("state") in {"pending", "reverted"}:
+        # Never written by this transaction, or already reverted by an earlier attempt:
+        # there is nothing of ours to undo, and the file may hold edits made outside the
+        # installer since (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
+        _mark_resource_state(transaction_path, transaction, record, "reverted")
+        return
     desired, _origin, rollback = _v2_resource_snapshots(record)
     current = _revert_start_projection(
         install_root, resource, (desired, rollback), rollback
@@ -3004,7 +3021,12 @@ def _v2_failed_operation(
             resources=resources,
         )
     except Exception as rollback_error:
-        transaction["error"] = {"code": _failure_code(rollback_error)}
+        # The forward failure is why the install stopped; the rollback's is why it is
+        # quarantined. Keeping only the second hid the cause from the operator.
+        transaction["error"] = {
+            "code": _failure_code(rollback_error),
+            "cause": _failure_code(error),
+        }
         _set_transaction_state(transaction_path, transaction, "quarantined")
         raise InstallControlError("install_rollback_quarantined") from error
 
@@ -3246,9 +3268,18 @@ def _new_v2_resource_record(
         "locator": resource.locator,
         "metadata": previous["metadata"],
         "origin": previous["origin"],
-        "rollback": previous["desired"],
+        "rollback": _update_rollback(install_root, resource, previous),
         "state": "pending",
     }
+
+
+def _update_rollback(
+    install_root: Path, resource: ManagedResource, previous: Mapping[str, object]
+) -> Mapping[str, object]:
+    """What an update reverts to: what was installed, or what an adopted file holds now."""
+    if resource.adopt_current:
+        return _v2_snapshot(install_root, resource.read_owned())
+    return previous["desired"]
 
 
 def _updated_resource_records(
@@ -3907,7 +3938,9 @@ def _rollback_target(
     active: Mapping[str, object], previous: Mapping[str, object] | None
 ) -> tuple[Mapping[str, object], Mapping[str, object], dict[str, object]]:
     if previous is not None:
-        return previous["desired"], previous["origin"], dict(previous["metadata"])
+        # The update recorded what it replaced: the previous release's value, or what an
+        # adopted file held when it was taken over.
+        return active["rollback"], previous["origin"], dict(previous["metadata"])
     metadata = dict(active["metadata"])
     metadata["_retire_after_commit"] = True
     return active["origin"], active["origin"], metadata
@@ -4026,6 +4059,13 @@ def _start_v2_committed_rollback(
 
 
 def _interrupted_v2_operation(transaction: Mapping[str, object] | None) -> bool:
+    """An install or update left between states; `rollback` reverts what it did.
+
+    A quarantined one is included: its revert stopped, and retrying the same bounded
+    revert is the operator's way out. It writes only files that still hold what this
+    transaction wrote, so it cannot overwrite an edit made since
+    (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
+    """
     if transaction is None or transaction.get("operation") not in {"install", "update"}:
         return False
     return transaction.get("state") in {
@@ -4033,6 +4073,7 @@ def _interrupted_v2_operation(transaction: Mapping[str, object] | None) -> bool:
         "mutating",
         "publishing",
         "reverting",
+        "quarantined",
     }
 
 
@@ -4980,6 +5021,36 @@ def _selected_backend(requested: str) -> str:
 
 
 def _requested_resources(args: argparse.Namespace, backend: str) -> list[ManagedResource]:
+    resources = _built_resources(args, backend)
+    return _marked_adopted(resources, getattr(args, "adopt", None) or ())
+
+
+def _marked_adopted(
+    resources: list[ManagedResource], adopt: Sequence[str]
+) -> list[ManagedResource]:
+    """The resources the operator named with `--adopt`; an unknown name is refused."""
+    unknown = set(adopt) - {resource.resource_id for resource in resources}
+    if unknown:
+        raise InstallControlError("install_adopt_unknown_resource")
+    return [_adopted(resource, adopt) for resource in resources]
+
+
+# A scheduler's state is "which of our rendered definitions is installed": a unit or
+# task edited by hand is none of them, so it cannot be recorded as a rollback point.
+_UNADOPTABLE_KINDS = frozenset(
+    {"systemd_scheduler", "launchd_scheduler", "windows_task_scheduler", "cron_scheduler"}
+)
+
+
+def _adopted(resource: ManagedResource, adopt: Sequence[str]) -> ManagedResource:
+    if resource.resource_id not in adopt:
+        return resource
+    if resource.kind in _UNADOPTABLE_KINDS:
+        raise InstallControlError("install_adopt_unsupported")
+    return replace(resource, adopt_current=True)
+
+
+def _built_resources(args: argparse.Namespace, backend: str) -> list[ManagedResource]:
     return build_install_resources(
         backend=backend,
         root=args.root.resolve(),
@@ -5233,6 +5304,13 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--opencode-plugin", action="store_true")
     install.add_argument("--claude-settings", action="store_true")
     install.add_argument("--codex-hooks", action="store_true")
+    install.add_argument(
+        "--adopt",
+        action="append",
+        default=[],
+        metavar="RESOURCE_ID",
+        help="take over this resource as it is now, keeping its content as the rollback point",
+    )
     _add_existing_arguments(subparsers.add_parser("rollback"))
     _add_existing_arguments(subparsers.add_parser("uninstall"))
     return parser

@@ -215,6 +215,7 @@
   "test_a_revision_holds_only_what_it_proves.py": 1.59,
   "test_a_revision_walks_no_ignored_top_level_folder.py": 0.75,
   "test_a_revision_walks_what_the_corpus_walks.py": 3.33,
+  "test_a_rollback_undoes_only_what_it_did.py": 0.34,
   "test_a_round_is_the_unit_of_finding.py": 0.11,
   "test_a_route_and_a_snippet_say_what_they_left_out.py": 0.23,
   "test_a_row_that_carries_its_text_carries_no_cut_of_it.py": 0.36,
