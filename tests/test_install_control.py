@@ -1820,9 +1820,15 @@ def test_validated_v1_install_is_adopted_into_v2_without_rewriting_resource(
     assert (state_root / "run" / "install" / rollback["preimage"]).read_bytes() == b"installed"
 
 
-def test_v2_update_drift_is_quarantined_without_overwriting_user_value(
+def test_v2_update_drift_is_refused_and_reverted_without_overwriting_user_value(
     tmp_path: Path,
 ) -> None:
+    """The drifted resource was never written, so its revert has nothing to undo.
+
+    It used to be quarantined here: the revert reached the same untouched, drifted
+    resource and refused it again, leaving no way forward or back
+    (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
+    """
     state_root = tmp_path / "state"
     state_root.mkdir()
     value: bytes | None = None
@@ -1852,7 +1858,7 @@ def test_v2_update_drift_is_quarantined_without_overwriting_user_value(
     )
     value = b"user-drift"
 
-    with pytest.raises(Exception, match="quarantined"):
+    with pytest.raises(Exception, match="install_resource_drift"):
         install_resources(
             state_root=state_root,
             vault_root=tmp_path / "vault",
@@ -1868,10 +1874,10 @@ def test_v2_update_drift_is_quarantined_without_overwriting_user_value(
     active = json.loads(
         (state_root / "run" / "install" / "manifest.json").read_text(encoding="utf-8")
     )
-    assert transaction["state"] == "quarantined"
+    assert (transaction["state"], transaction["error"]) == ("reverted", {"code": "install_resource_drift"})
     assert active == old
     assert value == b"user-drift"
-    assert validate_install_state(state_root)["status"] == "quarantined"
+    assert validate_install_state(state_root)["status"] == "active"
 
 
 def test_interrupted_v2_update_rollback_uses_persisted_fragments_not_checkout_desired(

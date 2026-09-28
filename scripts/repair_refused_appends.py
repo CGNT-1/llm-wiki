@@ -86,22 +86,22 @@ def _plan_of(directory: Path) -> dict | None:
         return None
 
 
-def _artifact_of(directory: Path, descriptor: object) -> Path | None:
+def _artifact_of(directory: Path, descriptor: object, key: str = "artifact") -> Path | None:
     if not isinstance(descriptor, dict):
         return None
-    artifact = directory / str(descriptor.get("artifact", ""))
+    artifact = directory / str(descriptor.get(key, ""))
     if not artifact.is_file():
         return None
     return artifact
 
 
-def _image(directory: Path, descriptor: object) -> bytes | None:
+def _image(directory: Path, descriptor: object, key: str = "artifact", digest: str = "sha256") -> bytes | None:
     """One planned image, only if it still hashes to what the plan recorded."""
-    artifact = _artifact_of(directory, descriptor)
+    artifact = _artifact_of(directory, descriptor, key)
     if artifact is None:
         return None
     content = _image_bytes(artifact)
-    if sha256_bytes(content) != descriptor.get("sha256"):
+    if sha256_bytes(content) != descriptor.get(digest):
         return None
     return content
 
@@ -124,9 +124,12 @@ def _tail_added(before: bytes | None, after: bytes | None) -> bytes | None:
 def _delta_of(directory: Path, operation: dict) -> bytes | None:
     if not _is_knowledge_replace(operation):
         return None
+    after = operation.get("after")
+    if isinstance(after, dict) and "suffix" in after:
+        # A v2 append keeps only the bytes it added (2026-09-28-an-append-keeps-only-what-it-added).
+        return _image(directory, after, "suffix", "suffix_sha256")
     before = _image(directory, operation.get("before"))
-    after = _image(directory, operation.get("after"))
-    return _tail_added(before, after)
+    return _tail_added(before, _image(directory, after))
 
 
 def _already_present(delta: bytes, live: Path) -> bool:

@@ -35,6 +35,10 @@ PROTECT_PUSH=0
 AGENTS_STOPPED=0
 SCHEDULER_MODE=native
 EXPECT_SCHEDULER_VALUE=0
+EXPECT_ADOPT_VALUE=0
+# `--adopt <resource-id>`: the operator takes over a file changed outside the installer as it
+# is now; see docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md.
+ADOPT_ARGS=()
 
 info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
@@ -52,15 +56,23 @@ for argument in "$@"; do
     EXPECT_SCHEDULER_VALUE=0
     continue
   fi
+  if [[ "$EXPECT_ADOPT_VALUE" -eq 1 ]]; then
+    ADOPT_ARGS+=(--adopt "$argument")
+    EXPECT_ADOPT_VALUE=0
+    continue
+  fi
   case "$argument" in
     --protect-push) PROTECT_PUSH=1 ;;
     --confirm-all-agents-stopped) AGENTS_STOPPED=1 ;;
     --scheduler) EXPECT_SCHEDULER_VALUE=1 ;;
     --scheduler=*) SCHEDULER_MODE="${argument#--scheduler=}" ;;
+    --adopt) EXPECT_ADOPT_VALUE=1 ;;
+    --adopt=*) ADOPT_ARGS+=(--adopt "${argument#--adopt=}") ;;
     *) fail "Unknown installer argument: $argument" ;;
   esac
 done
 [[ "$EXPECT_SCHEDULER_VALUE" -eq 0 ]] || fail "--scheduler requires native or cron"
+[[ "$EXPECT_ADOPT_VALUE" -eq 0 ]] || fail "--adopt requires a resource id"
 case "$SCHEDULER_MODE" in
   native|cron) ;;
   *) fail "--scheduler requires native or cron" ;;
@@ -564,7 +576,8 @@ INSTALL_CONTROL_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" py
   --home "$HOME" \
   --scheduler "$SCHEDULER_MODE" \
   --profile "$PROFILE" \
-  ${IDE_HOOK_ARGS[@]+"${IDE_HOOK_ARGS[@]}"})" || fail "Install ownership transaction failed"
+  ${IDE_HOOK_ARGS[@]+"${IDE_HOOK_ARGS[@]}"} \
+  ${ADOPT_ARGS[@]+"${ADOPT_ARGS[@]}"})" || fail "Install ownership transaction failed"
 SCHEDULER_BACKEND="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
 case "$SCHEDULER_BACKEND" in
   launchd|systemd_user|cron) ;;
