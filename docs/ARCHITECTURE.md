@@ -273,7 +273,8 @@ Markdown remains authoritative. SQLite stores coordination state, hashes, leases
 receipts, queue metadata, and derived claim indexes; there is no SQLite knowledge source
 and no graph database as a source of truth. Automatic writes use four-phase
 recoverable transactions (`preparing`, `prepared`, `applying`, `committed`) with
-before/after images and compare-and-swap (CAS) checks. Internal readers take the
+before/after images (an append keeps only the bytes it added and the before length,
+plan v2) and compare-and-swap (CAS) checks. Internal readers take the
 writer gate for a coherent view. Because several fixed paths cannot be swapped as
 one portable filesystem operation, an external editor may briefly see a mixed tree.
 CAS guarantees apply to cooperating transaction-API writers; concurrent external

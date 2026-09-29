@@ -96,7 +96,14 @@ _ALLOWED_FILES = {
     # (kept above for transactions written before). See `vault_log`.
     "knowledge/log.local.md",
 }
-_SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v1.json"
+# Plans are written as v2, which adds the append encoding (an append keeps only the
+# bytes it added and the before length); v1 plans, full images only, stay readable.
+# docs/research/2026-09-28-an-append-keeps-only-what-it-added.md
+_SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v2.json"
+_PLAN_SCHEMAS = {
+    "markdown-transaction/v1": Path(__file__).with_name("schemas") / "markdown-transaction-v1.json",
+    "markdown-transaction/v2": _SCHEMA,
+}
 _PROJECT_CHECKPOINT_SCHEMA = (
     Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
 )
@@ -2483,6 +2490,48 @@ def _run_plan_validators(plan: dict, validators: Sequence[Validator]) -> None:
             raise ValueError("transaction validator rejected the plan")
 
 
+def _is_append(before: bytes | None, after: bytes | None) -> bool:
+    """After-bytes that are the before-bytes plus something: what a capture writes."""
+    if before is None or after is None:
+        return False
+    return len(after) > len(before) and after.startswith(before)
+
+
+_PREFIX_STATE = frozenset({"sha256", "length"})
+# A full image, an append's before length, or an append's added bytes (plan v2).
+_STATE_DESCRIPTION_SHAPES = frozenset(
+    {
+        frozenset({"sha256", "artifact"}),
+        frozenset({"sha256", "length"}),
+        frozenset({"sha256", "base_length", "suffix", "suffix_sha256"}),
+    }
+)
+
+
+def _stored_image_keys(state: Mapping[str, object]) -> tuple[str, str]:
+    """Where a state's stored bytes are and the hash they must have: a suffix or a full image."""
+    if "suffix" in state:
+        return "suffix", "suffix_sha256"
+    return "artifact", "sha256"
+
+
+def _verify_stored_image(state: Mapping[str, object], state_name: str, artifact_root: Path) -> None:
+    """The bytes a state keeps on disk hash as recorded; an append's before keeps none."""
+    if "length" in state:
+        return
+    key, digest = _stored_image_keys(state)
+    relative = restricted_relative_path(str(state[key]), (state_name,))
+    artifact = artifact_root.joinpath(*relative.parts)
+    if sha256_bytes(_image_bytes(artifact)) != state[digest]:
+        raise RuntimeError(f"transaction artifact hash mismatch: {relative}")
+
+
+def _plan_schema(plan: object) -> Path:
+    """The schema of the plan's own version; an unknown one is refused by the v2 const."""
+    version = plan.get("schema_version") if isinstance(plan, dict) else None
+    return _PLAN_SCHEMAS.get(version, _SCHEMA)
+
+
 def _validated_plan(
     transaction_id: str,
     plan_operations: list[dict[str, object]],
@@ -2490,7 +2539,7 @@ def _validated_plan(
     validators: Sequence[Validator],
 ) -> dict[str, object]:
     plan: dict[str, object] = {
-        "schema_version": "markdown-transaction/v1",
+        "schema_version": "markdown-transaction/v2",
         "transaction_id": transaction_id,
         "operations": plan_operations,
     }
@@ -2672,10 +2721,33 @@ def _before_artifact(root: Path, transaction_id: str, position: object) -> Path:
 
 
 def _before_state(root: Path, transaction_id: str, row: sqlite3.Row) -> object:
-    """The undo image for one operation; ABSENT when there was nothing there."""
+    """The undo image for one operation; ABSENT when there was nothing there.
+
+    An append keeps no before-image, only the before length in its plan (v2); the
+    bytes are rebuilt from the target when the undo is applied, and hashed there.
+    """
     if row["before_hash"] == ABSENT:
         return ABSENT
-    content = _image_bytes(_before_artifact(root, transaction_id, row["position"]))
+    artifact = _before_artifact(root, transaction_id, row["position"])
+    if not artifact.exists():
+        return _recorded_before_length(root, transaction_id, row)
+    return _verified_before_image(artifact, row)
+
+
+def _recorded_before_length(root: Path, transaction_id: str, row: sqlite3.Row) -> dict[str, object]:
+    """An append's before state from its plan; RuntimeError when the plan holds none."""
+    try:
+        plan = json.loads((root / transaction_id / "plan.json").read_bytes())
+        state = plan["operations"][int(row["position"])]["before"]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"transaction before state is unreadable for {row['path']}") from exc
+    if not isinstance(state, dict) or frozenset(state) != _PREFIX_STATE or state["sha256"] != row["before_hash"]:
+        raise RuntimeError(f"transaction before state is not recorded for {row['path']}")
+    return state
+
+
+def _verified_before_image(artifact: Path, row: sqlite3.Row) -> dict[str, object]:
+    content = _image_bytes(artifact)
     if sha256_bytes(content) != row["before_hash"]:
         raise RefusedOperation(
             f"transaction before-image is corrupt for {row['path']}",
@@ -4057,6 +4129,14 @@ def _append_request_matches(
 ) -> bool:
     if not _single_operation_on(record, relative):
         return False
+    stored_suffix = _append_suffix_bytes(coordinator, record)
+    if stored_suffix is not None:
+        return stored_suffix == block
+    return _full_after_replays(coordinator, record, block)
+
+
+def _full_after_replays(coordinator: MarkdownCoordinator, record: TransactionRecord, block: bytes) -> bool:
+    """A v1 record's full after-image replays the block when it ends with it over its before."""
     content = _append_after_bytes(coordinator, record)
     if content is None or not content.endswith(block):
         return False
@@ -4076,6 +4156,20 @@ def _append_after_bytes(
     if not isinstance(after, dict):
         return None
     return _image_bytes(coordinator.transaction_root / record.id / after["artifact"])
+
+
+def _append_suffix_bytes(
+    coordinator: MarkdownCoordinator, record: TransactionRecord
+) -> bytes | None:
+    """The bytes an append-encoded record added, or None for a full after-image.
+
+    Its after is the before plus exactly these bytes by construction, so it replays a
+    block exactly when they are the block (the before-hash is the record's own).
+    """
+    after = coordinator._load_verified_plan(record)["operations"][0]["after"]
+    if not isinstance(after, dict) or "suffix" not in after:
+        return None
+    return _image_bytes(coordinator.transaction_root / record.id / after["suffix"])
 
 
 def _append_before_hash(record: TransactionRecord, prefix: bytes) -> str:
@@ -5831,8 +5925,9 @@ class MarkdownCoordinator:
         _require_capture_matches_kind(change, before)
         before_hash = _content_hash(before)
         _require_change_precondition(change, before_hash, persisted_preconditions)
-        before_description = self._stage_state(roots.before, position, before)
-        after_description = self._stage_state(roots.after, position, change.content)
+        before_description, after_description = self._staged_states(
+            roots, position, before, change.content
+        )
         return _StagedOperation(
             MarkdownOperation(
                 change.kind, change.path, before_hash, _content_hash(change.content)
@@ -6685,23 +6780,14 @@ class MarkdownCoordinator:
     def _restored_before_state(
         self, operation: sqlite3.Row, transaction_id: str
     ) -> object:
-        if operation["before_hash"] == ABSENT:
-            return ABSENT
-        position = int(operation["position"])
-        artifact = (
-            self.transaction_root / transaction_id / "before" / f"{position:06d}.bin"
-        )
-        content = _image_bytes(artifact)
-        if sha256_bytes(content) != operation["before_hash"]:
+        try:
+            return _before_state(self.transaction_root, transaction_id, operation)
+        except (RefusedOperation, RuntimeError) as exc:
             raise TransactionFailure(
                 "abort before-image is corrupt",
                 "abort_before_image_corrupt",
                 "aborting",
-            )
-        return {
-            "sha256": operation["before_hash"],
-            "artifact": f"before/{position:06d}.bin",
-        }
+            ) from exc
 
     def _restore_one_target(self, operation: sqlite3.Row, transaction_id: str) -> None:
         current = self._operation_hash(operation)
@@ -7220,7 +7306,7 @@ class MarkdownCoordinator:
     ) -> tuple[dict | None, bytes]:
         plan_bytes = (artifact_root / "plan.json").read_bytes()
         plan = json.loads(plan_bytes)
-        validate_schema(plan, _SCHEMA)
+        validate_schema(plan, _plan_schema(plan))
         if plan_bytes != canonical_json_bytes(plan):
             return None, plan_bytes
         if plan["transaction_id"] != record.id:
@@ -7461,7 +7547,7 @@ class MarkdownCoordinator:
     def _state_description_hash(self, state: object) -> str:
         if state == ABSENT:
             return ABSENT
-        if not isinstance(state, dict) or set(state) != {"sha256", "artifact"}:
+        if not isinstance(state, dict) or frozenset(state) not in _STATE_DESCRIPTION_SHAPES:
             raise ValueError("invalid transaction state description")
         return _required_state_hash(state["sha256"])
 
@@ -8617,6 +8703,35 @@ class MarkdownCoordinator:
         }
         return sha256_bytes(canonical_json_bytes(request))
 
+    def _staged_states(
+        self, roots: _ArtifactRoots, position: int, before: bytes | None, after: bytes | None
+    ) -> tuple[object, object]:
+        """Both images, or for an append only the added bytes and the before length.
+
+        An append stored the whole file twice; on the live vault 7 026 appends of one
+        day held 2.58 GB of images for 9.67 MB they added (2026-09-27).
+        """
+        if not _is_append(before, after):
+            return self._stage_state(roots.before, position, before), self._stage_state(
+                roots.after, position, after
+            )
+        return self._stage_append(roots.after, position, before, after)
+
+    def _stage_append(
+        self, root: Path, position: int, before: bytes, after: bytes
+    ) -> tuple[object, object]:
+        suffix = after[len(before) :]
+        name = f"{position:06d}.bin"
+        self._write_new_file(root / name, _compressed_image(suffix))
+        before_state = {"sha256": sha256_bytes(before), "length": len(before)}
+        after_state = {
+            "sha256": sha256_bytes(after),
+            "base_length": len(before),
+            "suffix": f"{root.name}/{name}",
+            "suffix_sha256": sha256_bytes(suffix),
+        }
+        return before_state, after_state
+
     def _stage_state(self, root: Path, position: int, content: bytes | None) -> object:
         if content is None:
             return ABSENT
@@ -8646,10 +8761,7 @@ class MarkdownCoordinator:
         if state == ABSENT:
             return
         assert isinstance(state, dict)
-        relative = restricted_relative_path(str(state["artifact"]), (state_name,))
-        artifact = artifact_root.joinpath(*relative.parts)
-        if sha256_bytes(_image_bytes(artifact)) != state["sha256"]:
-            raise RuntimeError(f"transaction artifact hash mismatch: {relative}")
+        _verify_stored_image(state, state_name, artifact_root)
 
     def _write_new_file(self, path: Path, content: bytes, *, owner_only: bool = True) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
@@ -9022,22 +9134,22 @@ class MarkdownCoordinator:
         """The inverse of one committed operation, read back from its before-image."""
         if row["before_hash"] == ABSENT:
             return MarkdownChange.delete(row["path"])
-        before = (
-            self.transaction_root
-            / transaction_id
-            / "before"
-            / f"{row['position']:06d}.bin"
-        )
-        before = _image_bytes(before)
-        if sha256_bytes(before) != row["before_hash"]:
-            raise RefusedOperation(
-                "transaction before-image is corrupt", "before_image_corrupt"
-            )
+        before = self._undo_bytes(transaction_id, row)
         return (
             MarkdownChange.create(row["path"], before)
             if row["after_hash"] == ABSENT
             else MarkdownChange.replace(row["path"], before)
         )
+
+    def _undo_bytes(self, transaction_id: str, row: sqlite3.Row) -> bytes:
+        """The before-bytes: its image, or for an append the target cut back to its length."""
+        state = _before_state(self.transaction_root, transaction_id, row)
+        before = self._materialized_state(dict(row, transaction_id=transaction_id), state)
+        if sha256_bytes(before) != row["before_hash"]:
+            raise RefusedOperation(
+                "transaction before-image is corrupt", "before_image_corrupt"
+            )
+        return before
 
     def _operation_hash(self, row: sqlite3.Row) -> str:
         with self._stable_parent(row) as (target, parent_descriptor):
@@ -9506,15 +9618,34 @@ class MarkdownCoordinator:
         after = operation_plan["after"]
         if not isinstance(after, dict):
             raise RuntimeError("transaction after-image is absent")
-        artifact = (
-            self.transaction_root / row["transaction_id"] / str(after["artifact"])
-        )
-        content = _image_bytes(artifact)
+        content = self._materialized_state(row, after)
         if sha256_bytes(content) != row["after_hash"]:
             raise TransactionImageError(
                 f"transaction after-image is corrupt for {row['path']}"
             )
         self._require_safe_model_output(content)
+        return content
+
+    def _materialized_state(self, row: sqlite3.Row, state: Mapping[str, object]) -> bytes:
+        """The bytes a state stands for, read from its image or rebuilt from the target.
+
+        The target was just checked against this operation's before-hash, so an
+        append's after is `current + suffix` and an undone append's is `current[:length]`;
+        the caller hashes the result against the row before it is published.
+        """
+        if "length" in state:
+            return self._current_target_bytes(row)[: int(state["length"])]
+        if "suffix" in state:
+            return self._current_target_bytes(row) + self._transaction_image(row, state["suffix"])
+        return self._transaction_image(row, state["artifact"])
+
+    def _transaction_image(self, row: sqlite3.Row, relative: object) -> bytes:
+        return _image_bytes(self.transaction_root / row["transaction_id"] / str(relative))
+
+    def _current_target_bytes(self, row: sqlite3.Row) -> bytes:
+        content = self._read_target(self._target(row["path"]))
+        if content is None:
+            raise TargetStateMismatch("before", str(row["path"]))
         return content
 
     def _require_safe_model_output(self, content: bytes) -> None:
@@ -9649,7 +9780,7 @@ class MarkdownCoordinator:
             if sha256_bytes(plan_bytes) != expected:
                 raise TransactionImageError("transaction plan hash mismatch")
             plan = json.loads(plan_bytes)
-            validate_schema(plan, _SCHEMA)
+            validate_schema(plan, _plan_schema(plan))
             self._verify_plan_artifacts(plan, self.transaction_root / record.id)
         except (AssertionError, KeyError, OSError, RuntimeError, ValueError) as exc:
             raise TransactionImageError("transaction after-image is corrupt") from exc
