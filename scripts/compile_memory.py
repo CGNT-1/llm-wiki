@@ -2316,9 +2316,29 @@ def _derive_operation_claims(operation: object, inputs: CompileInputs) -> None:
     slug = str(operation.get("slug", "?"))
     records: list[dict[str, object]] = []
     seen: set[str] = set()
+    recorded = _recorded_claim_fingerprints(inputs, slug)
     for candidate in list(operation["claims"]):
-        _collect_derived_claim(operation, candidate, inputs, (records, seen, slug))
+        _collect_derived_claim(operation, candidate, inputs, (records, seen, slug), recorded)
     _store_derived_claims(operation, records)
+
+
+def _recorded_claim_fingerprints(inputs: CompileInputs, slug: str) -> dict[str, str]:
+    """Claim id -> fingerprint already in the target page's ledger, if any.
+
+    Ids are content-addressed, so an update that re-derives a claim the page
+    already carries produces the same id. That copy is already recorded, not a
+    conflict (nightly of 2026-10-01 died on it). An unreadable ledger yields
+    nothing here; the merge keeps judging it.
+    """
+    target = _target_snapshot(inputs, f"knowledge/notes/{slug}.md")
+    match = CLAIM_LEDGER_RE.search(target.content) if target is not None else None
+    if match is None:
+        return {}
+    try:
+        claims = json.loads(match[2])["claims"]
+        return {str(item["id"]): str(item.get("fingerprint", "")) for item in claims}
+    except (ValueError, KeyError, TypeError):
+        return {}
 
 
 def _store_derived_claims(
@@ -2336,6 +2356,7 @@ def _collect_derived_claim(
     candidate: object,
     inputs: CompileInputs,
     sink: tuple[list[dict[str, object]], set[str], str],
+    recorded: Mapping[str, str] | None = None,
 ) -> None:
     records, seen, slug = sink
     try:
@@ -2345,6 +2366,9 @@ def _collect_derived_claim(
         return
     if record["id"] in seen:
         _report_dropped_claim(slug, "duplicate claim semantics")
+        return
+    if (recorded or {}).get(str(record["id"])) == record["fingerprint"]:
+        _report_dropped_claim(slug, "claim already recorded on the target page")
         return
     seen.add(str(record["id"]))
     records.append(record)

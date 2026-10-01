@@ -415,3 +415,48 @@ def test_a_drafted_claim_reaches_the_page_ledger_and_the_claim_index(vault):
     active = index.active_records(subject="maintenance lease")
     assert len(active) == 1
     assert active[0].claim.record["evidence"]["text"] == QUOTE
+
+
+def test_a_claim_the_target_page_already_records_is_dropped_not_fatal(vault, capsys):
+    """Nightly of 2026-10-01: `compile claim id already exists in target ledger`.
+
+    Claim ids are content-addressed (date + semantic fingerprint), so an update
+    that re-derives a claim its target page already carries produces the very
+    same id. The merge treated that as a conflict and the whole batch died. An
+    identical record already on the page is already recorded: the re-derived
+    copy is dropped and counted, like a duplicate inside one operation, and the
+    page update goes through.
+    """
+    root, state_root = vault
+    import compile_memory
+    from markdown_transaction import MarkdownCoordinator
+
+    daily = _daily(root)
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    prior = compile_memory._with_derived_claims(
+        compile_memory._draft_operations(_draft([_operation([_candidate()])])), inputs
+    )[0]["claims"]
+    page = root / "knowledge/notes/bounded-lease-expiry.md"
+    page.write_bytes(compile_memory._with_claim_ledger(
+        b"---\ntype: decision\n---\n# Bounded lease expiry\n\nAn earlier compile wrote this.\n",
+        prior,
+    ))
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    update = {**_operation([_candidate()]), "action": "update"}
+    operations = compile_memory._with_derived_claims(
+        compile_memory._draft_operations(_draft([update])), inputs
+    )
+    assert "claims" not in operations[0]
+    assert "already recorded on the target page" in capsys.readouterr().err
+
+    compile_memory.apply_compile_plan(
+        inputs, compile_memory._normalize_plan(operations, inputs),
+        action_key="e" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-08-29T12:00:00Z",
+    )
+    text = page.read_bytes()
+    ledger = json.loads(compile_memory.CLAIM_LEDGER_RE.search(text)[2])
+    assert [claim["id"] for claim in ledger["claims"]] == [prior[0]["id"]]
+    assert b"An earlier compile wrote this." in text
