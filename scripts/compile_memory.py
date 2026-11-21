@@ -4475,6 +4475,10 @@ def _report_deprecated_flags(args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     _report_deprecated_flags(args)
+    # LOCAL (κ.ZB 2026-10-13, NOUS order): `--trigger manual` still runs.
+    if args.trigger == "auto" and maybe_compile.DISABLED_FILE.exists():
+        print(f"compile_memory: automatic compile disabled ({maybe_compile.DISABLED_FILE})", file=sys.stderr)
+        return 75
     if args.discard_unusable_receipts:
         discarded = discard_unusable_receipts()
         print(f"discarded {len(discarded)} unusable receipt(s)")

@@ -325,7 +325,14 @@ def _spawn_outcome(force: bool, closed_days_only: bool = False) -> tuple[bool, b
     return _spawn_claimed(closed_days_only)
 
 
+# LOCAL (κ.ZB 2026-10-13, NOUS order): operator off switch for the automatic
+# compile. While this file exists nothing spawns a compile; delete it to re-enable.
+DISABLED_FILE = STATE_ROOT / "run" / "compile.disabled"
+
+
 def _refusal_before_claim(force: bool, closed_days_only: bool = False) -> str | None:
+    if DISABLED_FILE.exists():
+        return f"skipped: automatic compile disabled by operator ({DISABLED_FILE})"
     is_running, reason = _is_compile_running()
     if is_running:
         return _live_lock_refusal(force, reason)
